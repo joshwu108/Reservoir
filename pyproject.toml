@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reservoir"
+version = "0.1.0"
+description = "Certified Exact Prioritized Experience Replay with Crash Atomicity and Sampling Attestation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "torch>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "hypothesis>=6.0",
+    "pytest-cov>=4.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--tb=short -v"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reservoir"]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0",
+    "hypothesis>=6.0",
+    "pytest-cov>=4.0",
+]
