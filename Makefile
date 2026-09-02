@@ -1,6 +1,23 @@
 .PHONY: check test lint coverage clean
 
-check: test
+check: test check-imports
+
+campaigns: campaign-mutation campaign-crash campaign-divergence
+
+campaign-mutation:
+	uv run python -m campaigns.mutation
+
+campaign-crash:
+	uv run python -m campaigns.crash
+
+campaign-divergence:
+	uv run python -m campaigns.divergence
+
+demo:
+	uv run python -m demo.tiny_dqn
+
+tla:
+	bash spec/check.sh
 
 test:
 	uv run pytest tests/ -v --tb=short

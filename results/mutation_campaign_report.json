@@ -1,0 +1,44 @@
+{
+  "campaign": "T4_mutation",
+  "total_mutants": 63,
+  "rejected": 63,
+  "survived": [],
+  "categories": [
+    {
+      "name": "digest_bitflip",
+      "total": 16,
+      "rejected": 16
+    },
+    {
+      "name": "off_by_one_draw",
+      "total": 10,
+      "rejected": 10
+    },
+    {
+      "name": "swapped_indices",
+      "total": 4,
+      "rejected": 4
+    },
+    {
+      "name": "not_reduced_form",
+      "total": 12,
+      "rejected": 12
+    },
+    {
+      "name": "deleted_records",
+      "total": 9,
+      "rejected": 9
+    },
+    {
+      "name": "reordered_records",
+      "total": 5,
+      "rejected": 5
+    },
+    {
+      "name": "stale_suffix_replay",
+      "total": 7,
+      "rejected": 7
+    }
+  ],
+  "pass": true
+}

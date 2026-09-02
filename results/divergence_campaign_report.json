@@ -1,0 +1,364 @@
+{
+  "campaign": "T2_divergence",
+  "preregistration": "docs/preregistration.md",
+  "total_workloads": 135,
+  "total_divergences": 0,
+  "tv_max_openai": 8.673617379884035e-19,
+  "tv_max_labml": 8.673617379884035e-19,
+  "tv_kill_threshold": 9.094947017729282e-13,
+  "kill_rule_fired": true,
+  "thesis_T2": "DEAD",
+  "cells": [
+    {
+      "capacity": 512,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 8.673617379884035e-19,
+      "tv_max_labml": 8.673617379884035e-19,
+      "examples": []
+    },
+    {
+      "capacity": 512,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 8.673617379884035e-19,
+      "tv_max_labml": 8.673617379884035e-19,
+      "examples": []
+    },
+    {
+      "capacity": 512,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 8.673617379884035e-19,
+      "tv_max_labml": 8.673617379884035e-19,
+      "examples": []
+    },
+    {
+      "capacity": 512,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 4.336808689942018e-19,
+      "tv_max_labml": 4.336808689942018e-19,
+      "examples": []
+    },
+    {
+      "capacity": 512,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 4.336808689942018e-19,
+      "tv_max_labml": 4.336808689942018e-19,
+      "examples": []
+    },
+    {
+      "capacity": 512,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 4.336808689942018e-19,
+      "tv_max_labml": 4.336808689942018e-19,
+      "examples": []
+    },
+    {
+      "capacity": 512,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 8.673617379884035e-19,
+      "tv_max_labml": 8.673617379884035e-19,
+      "examples": []
+    },
+    {
+      "capacity": 512,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 4.336808689942018e-19,
+      "tv_max_labml": 4.336808689942018e-19,
+      "examples": []
+    },
+    {
+      "capacity": 512,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 8.673617379884035e-19,
+      "tv_max_labml": 8.673617379884035e-19,
+      "examples": []
+    },
+    {
+      "capacity": 4096,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 1.0842021724855044e-19,
+      "tv_max_labml": 1.0842021724855044e-19,
+      "examples": []
+    },
+    {
+      "capacity": 4096,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 1.0842021724855044e-19,
+      "tv_max_labml": 1.0842021724855044e-19,
+      "examples": []
+    },
+    {
+      "capacity": 4096,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 1.0842021724855044e-19,
+      "tv_max_labml": 1.0842021724855044e-19,
+      "examples": []
+    },
+    {
+      "capacity": 4096,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 5.421010862427522e-20,
+      "tv_max_labml": 5.421010862427522e-20,
+      "examples": []
+    },
+    {
+      "capacity": 4096,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 0.0,
+      "tv_max_labml": 0.0,
+      "examples": []
+    },
+    {
+      "capacity": 4096,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 2.710505431213761e-20,
+      "tv_max_labml": 2.710505431213761e-20,
+      "examples": []
+    },
+    {
+      "capacity": 4096,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 0.0,
+      "tv_max_labml": 0.0,
+      "examples": []
+    },
+    {
+      "capacity": 4096,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 5.421010862427522e-20,
+      "tv_max_labml": 5.421010862427522e-20,
+      "examples": []
+    },
+    {
+      "capacity": 4096,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 5.421010862427522e-20,
+      "tv_max_labml": 5.421010862427522e-20,
+      "examples": []
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 1.3552527156068805e-20,
+      "tv_max_labml": 1.3552527156068805e-20,
+      "examples": []
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 2.710505431213761e-20,
+      "tv_max_labml": 2.710505431213761e-20,
+      "examples": []
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 2.710505431213761e-20,
+      "tv_max_labml": 2.710505431213761e-20,
+      "examples": []
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 3.3881317890172014e-21,
+      "tv_max_labml": 3.3881317890172014e-21,
+      "examples": []
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 6.776263578034403e-21,
+      "tv_max_labml": 6.776263578034403e-21,
+      "examples": []
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 1.3552527156068805e-20,
+      "tv_max_labml": 1.3552527156068805e-20,
+      "examples": []
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 1.3552527156068805e-20,
+      "tv_max_labml": 1.3552527156068805e-20,
+      "examples": []
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 6.776263578034403e-21,
+      "tv_max_labml": 6.776263578034403e-21,
+      "examples": []
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 5,
+      "divergences": 0,
+      "tv_max_openai": 1.3552527156068805e-20,
+      "tv_max_labml": 1.3552527156068805e-20,
+      "examples": []
+    }
+  ]
+}
