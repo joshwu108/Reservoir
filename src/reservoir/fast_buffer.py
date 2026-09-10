@@ -190,16 +190,31 @@ class FastPERBuffer:
             self._max_priority = max(self._max_priority, priority)
             self._tree_update(int(idx), priority)
 
+    def _tree_sample_batch(self, values: np.ndarray) -> np.ndarray:
+        """Vectorized batch tree traversal. O(batch * log N) but numpy-native."""
+        batch = len(values)
+        idx = np.zeros(batch, dtype=np.int64)  # start at root
+
+        for _ in range(int(np.log2(self._tree_capacity)) + 1):
+            left = 2 * idx + 1
+            right = left + 1
+            # Nodes past tree size are leaves — stop
+            is_leaf = left >= 2 * self._tree_capacity - 1
+            if np.all(is_leaf):
+                break
+            left_vals = self._tree[np.where(is_leaf, idx, left)]
+            go_left = (values < left_vals) & ~is_leaf
+            values = np.where(go_left, values, values - np.where(go_left, 0.0, left_vals))
+            idx = np.where(is_leaf, idx, np.where(go_left, left, right))
+
+        return np.clip(idx - (self._tree_capacity - 1), 0, self.capacity - 1)
+
     def sample(self, batch_size: int) -> FastBatch:
-        """Sample a batch. O(batch_size * log N).
+        """Sample a batch using stratified PER sampling.
 
-        Uses stratified sampling: divides [0, total) into batch_size
-        equal segments and samples one value per segment. This gives
-        better coverage than i.i.d. sampling.
-
-        Parameters
-        ----------
-        batch_size : int
+        Uses stratified sampling: divides [0, total) into batch_size equal
+        segments and samples one value per segment for better coverage.
+        Tree traversal is vectorized across the batch.
 
         Returns
         -------
@@ -211,32 +226,25 @@ class FastPERBuffer:
         )
 
         total = self.total_priority
-        segment = total / batch_size
         min_priority = float(self._min_tree[0])
+        segment = total / batch_size
 
-        indices = np.empty(batch_size, dtype=np.int64)
-        priorities = np.empty(batch_size, dtype=np.float64)
+        # Stratified draws — one per segment
+        offsets = np.random.uniform(0, segment, size=batch_size)
+        values = offsets + segment * np.arange(batch_size)
 
-        for k in range(batch_size):
-            lo = segment * k
-            hi = segment * (k + 1)
-            value = np.random.uniform(lo, hi)
-            pos = self._tree_sample(value)
-            pos = np.clip(pos, 0, self.capacity - 1)
-            indices[k] = pos
-            leaf_idx = self._tree_capacity - 1 + pos
-            priorities[k] = self._tree[leaf_idx]
+        indices = self._tree_sample_batch(values)
+        leaf_idxs = self._tree_capacity - 1 + indices
+        priorities = self._tree[leaf_idxs]
 
-        # IS weights: w_i = (N * P(i))^(-beta) / max_w
+        # IS weights
         n = self._size
-        probs = priorities / total
-        # max weight comes from min priority
-        max_weight = (n * min_priority / total) ** (-self.beta)
-        weights = (n * probs) ** (-self.beta) / max_weight
-        weights = np.clip(weights, 0.0, 1.0).astype(np.float32)
+        probs = np.maximum(priorities / total, 1e-10)
+        max_weight = (n * min_priority / total) ** (-self.beta) if min_priority > 0 else 1.0
+        weights = ((n * probs) ** (-self.beta) / max_weight).clip(0.0, 1.0).astype(np.float32)
 
         def _t(arr: np.ndarray) -> torch.Tensor:
-            return torch.from_numpy(arr).to(self.device)
+            return torch.from_numpy(arr.copy()).to(self.device)
 
         return FastBatch(
             states=_t(self._states[indices]),
