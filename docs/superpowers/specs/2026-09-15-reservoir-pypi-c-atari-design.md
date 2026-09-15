@@ -81,7 +81,7 @@ Both files listed in `Extension.sources`. `sumtree.c` exports only C-internal sy
 | Member | Signature | Notes |
 |--------|-----------|-------|
 | `update` | `(position: int, value: float) -> None` | Sets leaf (pre-exponentiated), propagates up O(log N) |
-| `sample_batch` | `(values: np.ndarray) -> np.ndarray` | Vectorized batch traversal; returns int64 positions array |
+| `sample_batch` | `(values: Sequence[float]) -> list[int]` | Batch traversal via C loop; accepts any sequence of floats, returns list of int positions |
 | `get` | `(position: int) -> float` | Returns leaf value |
 | `total` | property `-> float` | Root value (sum of all leaves) |
 | `tree_capacity` | property `-> int` | Internal capacity (next power of 2) |
