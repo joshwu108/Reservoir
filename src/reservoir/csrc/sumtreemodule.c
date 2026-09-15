@@ -94,8 +94,8 @@ SumTree_sample_batch(SumTreeObject *self, PyObject *args)
         Py_DECREF(item);
         if (value == -1.0 && PyErr_Occurred()) { Py_DECREF(result); return NULL; }
         if (value < 0.0 || value >= total) {
-            PyErr_Format(PyExc_ValueError,
-                "draw value %f out of range [0, %f)", value, total);
+            PyErr_SetString(PyExc_ValueError,
+                "draw value out of range [0, total)");
             Py_DECREF(result); return NULL;
         }
         Py_ssize_t pos = sumtree_locate(self->data, value);

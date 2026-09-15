@@ -1,0 +1,4 @@
+include src/reservoir/csrc/sumtree.c
+include src/reservoir/csrc/sumtreemodule.c
+include src/reservoir/csrc/*.h
+include setup.py
