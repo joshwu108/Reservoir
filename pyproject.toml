@@ -28,6 +28,17 @@ atari = [
     "autorom[accept-rom-license]",
     "matplotlib>=3.7",
 ]
+prefcheck = [
+    "trl>=0.11",
+    "transformers>=4.40",
+    "datasets>=2.18",
+    "accelerate>=0.27",
+]
+anchor = [
+    "transformers>=4.40",
+    "datasets>=2.18",
+    "accelerate>=0.27",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
