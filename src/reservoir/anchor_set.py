@@ -114,9 +114,10 @@ class AnchorSet:
         for anchor in self._anchors:
             if anchor.idx in losses:
                 anchor.current_loss = losses[anchor.idx]
-                raw = (anchor.current_loss - anchor.baseline_loss) / (
-                    anchor.baseline_loss + 1e-8
-                )
+                # Clamp denominator to at least 0.1 so near-zero baselines
+                # don't produce astronomically large relative scores.
+                denom = max(anchor.baseline_loss, 0.1)
+                raw = (anchor.current_loss - anchor.baseline_loss) / denom
                 anchor.priority = max(0.0, raw)
 
     # ------------------------------------------------------------------

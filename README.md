@@ -352,6 +352,11 @@ injected flipped pairs (P=0.746, R=0.940, F1=0.832) on a 250-pair synthetic benc
 with 20% noise. Detection uses variance + residual loss trajectories.
 See `benchmarks/prefcheck/synthetic_noise.py`.
 
+**T6 — Forgetting monitor lead time.** `ForgettingMonitor` fires an alert 120 steps
+(40% of fine-tuning) before Task A accuracy visibly collapses in a sequential
+fine-tuning experiment (Task A → Task B, 2-layer MLP, synthetic classification).
+See `benchmarks/anchor/forgetting_benchmark.py`.
+
 <details>
 <summary>Campaign detail tables</summary>
 

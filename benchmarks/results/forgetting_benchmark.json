@@ -1,0 +1,103 @@
+{
+  "pretrain_accuracy": 0.586,
+  "final_accuracy": 0.474,
+  "accuracy_drop": 0.112,
+  "first_alert_step": 20,
+  "first_acc_drop_step": 140,
+  "lead_time_steps": 120,
+  "alert_threshold": 0.5,
+  "n_anchors": 200,
+  "finetune_steps": 300,
+  "history": [
+    {
+      "step": 20,
+      "forgetting_score": 6.267399,
+      "task_a_accuracy": 0.564,
+      "alert_fired": true
+    },
+    {
+      "step": 40,
+      "forgetting_score": 6.333235,
+      "task_a_accuracy": 0.526,
+      "alert_fired": true
+    },
+    {
+      "step": 60,
+      "forgetting_score": 7.876587,
+      "task_a_accuracy": 0.512,
+      "alert_fired": true
+    },
+    {
+      "step": 80,
+      "forgetting_score": 14.059968,
+      "task_a_accuracy": 0.498,
+      "alert_fired": true
+    },
+    {
+      "step": 100,
+      "forgetting_score": 23.073218,
+      "task_a_accuracy": 0.498,
+      "alert_fired": true
+    },
+    {
+      "step": 120,
+      "forgetting_score": 28.211338,
+      "task_a_accuracy": 0.492,
+      "alert_fired": true
+    },
+    {
+      "step": 140,
+      "forgetting_score": 33.007098,
+      "task_a_accuracy": 0.474,
+      "alert_fired": true
+    },
+    {
+      "step": 160,
+      "forgetting_score": 36.722141,
+      "task_a_accuracy": 0.492,
+      "alert_fired": true
+    },
+    {
+      "step": 180,
+      "forgetting_score": 40.120785,
+      "task_a_accuracy": 0.476,
+      "alert_fired": true
+    },
+    {
+      "step": 200,
+      "forgetting_score": 42.828061,
+      "task_a_accuracy": 0.484,
+      "alert_fired": true
+    },
+    {
+      "step": 220,
+      "forgetting_score": 45.306076,
+      "task_a_accuracy": 0.474,
+      "alert_fired": true
+    },
+    {
+      "step": 240,
+      "forgetting_score": 49.196894,
+      "task_a_accuracy": 0.474,
+      "alert_fired": true
+    },
+    {
+      "step": 260,
+      "forgetting_score": 50.106565,
+      "task_a_accuracy": 0.48,
+      "alert_fired": true
+    },
+    {
+      "step": 280,
+      "forgetting_score": 53.974893,
+      "task_a_accuracy": 0.474,
+      "alert_fired": true
+    },
+    {
+      "step": 300,
+      "forgetting_score": 56.496454,
+      "task_a_accuracy": 0.474,
+      "alert_fired": true
+    }
+  ]
+}
