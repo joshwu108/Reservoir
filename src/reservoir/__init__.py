@@ -31,9 +31,16 @@ __all__ = [
     "__version__",
 ]
 
+# Optional modules — imported lazily so missing/broken deps don't crash the package
 from reservoir.anchor_set import AnchorSet
 from reservoir.forgetting_monitor import ForgettingMonitor, ForgettingAlert
 from reservoir.replay_scheduler import ReplayScheduler
 from reservoir.dataset_buffer import DatasetBuffer
-from reservoir.prefcheck import PreferenceNoiseDetector
 from reservoir.report import PreferenceQualityReport, NoiseLabel
+
+try:
+    from reservoir.prefcheck import PreferenceNoiseDetector
+except (ImportError, RuntimeError):
+    # TRL not installed or incompatible (e.g. numpy version conflict on Colab).
+    # PreferenceNoiseDetector is unavailable but the rest of the package works.
+    PreferenceNoiseDetector = None  # type: ignore[assignment,misc]

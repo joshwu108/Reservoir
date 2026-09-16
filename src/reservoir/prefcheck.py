@@ -9,11 +9,12 @@ try:
         from trl import RewardConfig
     except ImportError:
         from transformers import TrainingArguments as RewardConfig  # type: ignore[assignment]
-except ImportError:
+except (ImportError, RuntimeError) as _trl_err:
     raise ImportError(
-        "reservoir-prefcheck requires trl>=0.11.\n"
-        "Install: pip install 'trl>=0.11'"
-    )
+        "reservoir-prefcheck requires trl>=0.11 with compatible transformers/numpy.\n"
+        "Install: pip install 'trl>=0.11' transformers\n"
+        f"Original error: {_trl_err}"
+    ) from _trl_err
 
 from typing import Any
 
