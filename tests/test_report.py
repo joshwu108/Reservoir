@@ -29,18 +29,26 @@ def _make_features(
 
 
 def _make_report_with_examples():
-    """Create a report with a mix of FLIPPED, AMBIGUOUS, and CLEAN examples."""
-    # Use enough examples so percentile calculations are meaningful
+    """Create a report with a mix of FLIPPED, AMBIGUOUS, and CLEAN examples.
+
+    Detection is variance + mean_loss based (not slope):
+      FLIPPED:   high variance AND high mean_loss  (model oscillates, never converges)
+      AMBIGUOUS: high variance AND low mean_loss   (oscillates but eventually fits)
+      CLEAN:     low variance                      (steady learning)
+
+    Use 22 examples so p75_var lands well below AMBIGUOUS variance,
+    and median_mean_loss lands between AMBIGUOUS and CLEAN.
+    """
     features = {}
-    # FLIPPED: high slope AND high mean_loss
-    features[0] = _make_features(0, slope=0.15, variance=0.01, mean_loss=0.9)
-    features[1] = _make_features(1, slope=0.20, variance=0.01, mean_loss=0.85)
-    # AMBIGUOUS: high variance AND near-zero slope
-    features[2] = _make_features(2, slope=0.0, variance=0.5, mean_loss=0.5)
-    features[3] = _make_features(3, slope=0.005, variance=0.6, mean_loss=0.5)
-    # CLEAN: low slope + low mean_loss
-    features[4] = _make_features(4, slope=-0.05, variance=0.01, mean_loss=0.1)
-    features[5] = _make_features(5, slope=0.001, variance=0.01, mean_loss=0.1)
+    # 2 FLIPPED: very high variance, high residual loss
+    features[0] = _make_features(0, slope=-0.01, variance=0.80, mean_loss=0.85)
+    features[1] = _make_features(1, slope=-0.01, variance=0.85, mean_loss=0.80)
+    # 2 AMBIGUOUS: high variance, low residual loss (below median)
+    features[2] = _make_features(2, slope=-0.02, variance=0.55, mean_loss=0.01)
+    features[3] = _make_features(3, slope=-0.02, variance=0.60, mean_loss=0.01)
+    # 18 CLEAN: low variance, median mean_loss
+    for i in range(4, 22):
+        features[i] = _make_features(i, slope=-0.05, variance=0.01, mean_loss=0.03)
     return PreferenceQualityReport(features)
 
 
@@ -81,8 +89,8 @@ def test_summary_percentages_sum_to_100():
 def test_summary_counts_match():
     report = _make_report_with_examples()
     s = report.summary()
-    assert s["n_total"] == 6
-    assert s["n_flipped"] + s["n_ambiguous"] + s["n_clean"] == 6
+    assert s["n_total"] == 22
+    assert s["n_flipped"] + s["n_ambiguous"] + s["n_clean"] == 22
 
 
 def test_to_json_is_valid_json():
