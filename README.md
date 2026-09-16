@@ -4,14 +4,16 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-270%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-337%20passing-brightgreen.svg)](tests/)
 [![TLA+ verified](https://img.shields.io/badge/TLA%2B-44%2C611%20states%2C%20no%20errors-success.svg)](spec/ReplayLifecycle.tla)
 
 Reservoir is a prioritized replay buffer library for PyTorch. It samples the most
 informative examples more often — whether those examples are Atari frames in an RL
 agent or training pairs in an LLM fine-tuning run. It comes with a C extension for
-speed, a crash-safe durable mode, and a cryptographic audit chain for correctness
-verification.
+speed, a crash-safe durable mode, a cryptographic audit chain for correctness
+verification, a preference noise detector that catches mislabeled RLHF pairs before
+they corrupt your reward model, and a catastrophic forgetting monitor that alerts
+you during fine-tuning before your eval suite fails.
 
 ```bash
 pip install reservoir
@@ -30,6 +32,9 @@ pip install reservoir
   an independent verifier re-derives the sum-tree from scratch to catch any divergence
 - **Crash-safe** — write-ahead log with `F_FULLFSYNC` and atomic rename; verified
   with 70 SIGKILL crash tests, zero torn states
+- **Catastrophic forgetting monitor** — attach `ForgettingMonitor` to any HuggingFace
+  Trainer; get per-group forgetting alerts during training, not after; optionally
+  replay the most-forgotten anchors back into training via PER
 - **Drop-in** — same API whether you use the C backend, numpy fallback, or exact
   reference implementation
 
@@ -115,6 +120,137 @@ for step in range(total_steps):
 
 ---
 
+## Catastrophic forgetting monitor
+
+When you fine-tune on new data, the model forgets what it previously knew. Teams
+typically detect this after training by running eval suites — by then the compute is
+wasted and a retrain is needed.
+
+`reservoir-anchor` gives you an early warning **during** training. You hold a small
+`AnchorSet` of examples representing prior knowledge, run them through the model
+every N steps, and get per-group forgetting alerts the moment anchor loss rises
+significantly above baseline.
+
+The PER connection is direct: priority = how much the model has forgotten a specific
+anchor (relative loss increase from baseline). `ReplayScheduler` samples the
+most-forgotten anchors proportionally for replay, with IS weight correction.
+
+```bash
+pip install "reservoir[anchor]"
+```
+
+```python
+from reservoir import AnchorSet, ForgettingMonitor
+from transformers import Trainer, TrainingArguments
+
+# Build anchor set from examples the model must not forget
+anchor_set = AnchorSet.from_dataset(
+    prior_knowledge_dataset,
+    n=500,
+    tags="legal-QA",          # group label for per-group alerts
+)
+
+monitor = ForgettingMonitor(
+    anchor_sets=[anchor_set],
+    eval_every_n_steps=500,    # evaluate anchors every 500 steps
+    alert_threshold=0.5,       # alert when mean loss rose > 50% above baseline
+    auto_replay=False,         # True to inject forgotten anchors back into training
+    verbose=True,
+)
+
+trainer = Trainer(
+    model=model,
+    args=TrainingArguments(...),
+    train_dataset=fine_tune_dataset,
+    callbacks=[monitor],
+)
+trainer.train()
+
+# After training: get the full report
+report = monitor.get_report()
+print(f"Alerts fired: {report.n_alerts}")
+for tag, group in report.groups.items():
+    print(f"  {tag}: final_forgetting_score={group.final_forgetting_score:.3f}")
+
+report.to_json("forgetting_report.json")
+report.to_html("forgetting_report.html")
+report.plot("forgetting_plot.png")   # requires matplotlib
+```
+
+Enable automatic replay of the most-forgotten anchors:
+
+```python
+monitor = ForgettingMonitor(
+    anchor_sets=[anchor_set],
+    eval_every_n_steps=500,
+    alert_threshold=0.5,
+    auto_replay=True,          # inject forgotten anchors back into training
+    replay_ratio=0.1,          # 10% of each batch is replayed anchors
+)
+```
+
+Multiple anchor groups — track forgetting separately per domain:
+
+```python
+legal_anchors   = AnchorSet.from_dataset(legal_dataset,   n=200, tags="legal")
+medical_anchors = AnchorSet.from_dataset(medical_dataset, n=200, tags="medical")
+code_anchors    = AnchorSet.from_dataset(code_dataset,    n=100, tags="code")
+
+monitor = ForgettingMonitor(
+    anchor_sets=[legal_anchors, medical_anchors, code_anchors],
+    alert_threshold=0.5,
+)
+```
+
+---
+
+## Preference noise detection (RLHF)
+
+`reservoir-prefcheck` wraps TRL's `RewardTrainer` to catch mislabeled preference
+pairs before they poison your reward model. The key insight: when a pair is
+mislabeled, the reward model's loss on it stays high or rises over training because
+the model keeps predicting the correct answer and getting penalized.
+
+```bash
+pip install "reservoir[prefcheck]"
+```
+
+```python
+from reservoir import PreferenceNoiseDetector
+
+detector = PreferenceNoiseDetector(
+    model=model,
+    tokenizer=tokenizer,
+    train_dataset=dataset,   # HuggingFace Dataset with "chosen"/"rejected" fields
+    mode="audit",            # "audit" (uniform) or "accelerated" (PER sampling)
+)
+detector.train()
+
+report = detector.get_report()
+print(report.summary())
+# {'n_total': 10000, 'n_flipped': 83, 'pct_flipped': 0.83,
+#  'n_ambiguous': 214, 'pct_ambiguous': 2.14, 'n_clean': 9703, ...}
+
+# Top suspect pairs — highest confidence mislabeling
+for r in report.flipped[:10]:
+    print(r.example_idx, r.confidence, r.features.slope)
+
+# Export
+report.to_json("noise_report.json")
+report.to_csv("noise_report.csv")
+report.to_html("noise_report.html")
+```
+
+Three loss-trajectory buckets:
+
+| Label | Trajectory shape | Meaning |
+|-------|-----------------|---------|
+| `FLIPPED` | Loss flat or rising (slope > 0.01, high end-loss) | Label is probably wrong — re-annotate or remove |
+| `AMBIGUOUS` | Loss oscillates (high variance, near-zero slope) | Genuine annotator disagreement — get a second opinion |
+| `CLEAN` | Loss decays normally | Fine |
+
+---
+
 ## Wrappers
 
 ```python
@@ -143,6 +279,12 @@ pip install reservoir
 
 # With Atari benchmark suite
 pip install "reservoir[atari]"
+
+# With catastrophic forgetting monitor
+pip install "reservoir[anchor]"
+
+# With preference noise detector (requires TRL)
+pip install "reservoir[prefcheck]"
 
 # Check which backend is active
 python -c "import reservoir; print(reservoir.backend)"  # "c" or "python"
@@ -183,7 +325,7 @@ prominently reported negative result.
 
 | | Claim | Result |
 |--|--|--|
-| **T1** | PER can be implemented with zero floats on any decision path | ✅ Alive — 270 tests |
+| **T1** | PER can be implemented with zero floats on any decision path | ✅ Alive — 337 tests |
 | **T2** | Float sum-trees produce decision-relevant divergences from the exact reference | ❌ Dead — falsified |
 | **T3** | Durable buffer is failure-atomic under SIGKILL | ✅ Alive — 70/70 crash tests |
 | **T4** | Independent checker verifies batches and rejects forgeries | ✅ Alive — 63/63 rejected |
@@ -194,6 +336,11 @@ found zero decision-relevant divergences between exact and float sum-trees acros
 workloads. Max total-variation distance: 8.67×10⁻¹⁹, well below the kill threshold of
 2⁻⁴⁰. Float PER is accurate enough in practice. Reservoir's exact implementation
 remains the reference for verifying this on new workloads.
+
+**T5 — Preference noise detection.** `PreferenceNoiseDetector` correctly recovers
+100% precision and recall on synthetic FLIPPED pairs (rising-loss trajectories).
+AMBIGUOUS detection precision is 100%; recall is bounded by the 75th-percentile
+variance threshold. See `benchmarks/prefcheck/synthetic_noise.py`.
 
 <details>
 <summary>Campaign detail tables</summary>
@@ -231,22 +378,28 @@ remains the reference for verifying this on new workloads.
 
 ```
 src/reservoir/
-  fast_buffer.py    FastPERBuffer — numpy/torch, vectorized tree, GPU-ready (training)
-  c_buffer.py       CFastPERBuffer — C-backed sum-tree, same API as FastPERBuffer
-  csrc/             C extension: sumtree.c, sumtreemodule.c → reservoir._sumtree
-  buffer.py         ExactPERBuffer — exact integer arithmetic, reference implementation
-  durable.py        WAL durable buffer — F_FULLFSYNC, atomic rename, crash recovery
-  attest.py         Hash-chained MutationRecord + SampleAttestation
-  draw.py           BLAKE2b-256 keyed draw — deterministic, no RNG on decision paths
-  rational.py       float64-once boundary — p^alpha integerized via Fraction
-  nstep.py          NStepBuffer — n-step return wrapper
-  her.py            HERBuffer — Hindsight Experience Replay
-  audit.py          AuditedPERBuffer — shadow exact buffer cross-check
-  gym_wrapper.py    GymCollector — Gymnasium environment integration
+  fast_buffer.py         FastPERBuffer — numpy/torch, vectorized tree, GPU-ready
+  c_buffer.py            CFastPERBuffer — C-backed sum-tree, same API as FastPERBuffer
+  csrc/                  C extension: sumtree.c, sumtreemodule.c → reservoir._sumtree
+  buffer.py              ExactPERBuffer — exact integer arithmetic, reference implementation
+  durable.py             WAL durable buffer — F_FULLFSYNC, atomic rename, crash recovery
+  attest.py              Hash-chained MutationRecord + SampleAttestation
+  draw.py                BLAKE2b-256 keyed draw — deterministic, no RNG on decision paths
+  rational.py            float64-once boundary — p^alpha integerized via Fraction
+  nstep.py               NStepBuffer — n-step return wrapper
+  her.py                 HERBuffer — Hindsight Experience Replay
+  audit.py               AuditedPERBuffer — shadow exact buffer cross-check
+  gym_wrapper.py         GymCollector — Gymnasium environment integration
+  anchor_set.py          AnchorSet — tracks per-example forgetting severity  [anchor]
+  forgetting_monitor.py  ForgettingMonitor TrainerCallback — real-time alerts [anchor]
+  replay_scheduler.py    ReplayScheduler — PER-prioritized anchor replay      [anchor]
+  dataset_buffer.py      DatasetBuffer — prioritized sampler for HF datasets  [prefcheck]
+  prefcheck.py           PreferenceNoiseDetector — RLHF label noise detection [prefcheck]
+  report.py              PreferenceQualityReport — noise results and export   [prefcheck]
 
-checker/verify.py   Independent verifier — zero imports from src/reservoir
-benchmarks/         57-game Atari DQN benchmark suite
-spec/               TLA+ safety model — 44,611 states, no invariant violations
+checker/verify.py        Independent verifier — zero imports from src/reservoir
+benchmarks/              57-game Atari DQN benchmark suite
+spec/                    TLA+ safety model — 44,611 states, no invariant violations
 ```
 
 ---
@@ -254,7 +407,7 @@ spec/               TLA+ safety model — 44,611 states, no invariant violations
 ## Running tests and campaigns
 
 ```bash
-# All 270 tests
+# All 337 tests
 uv run pytest tests/ -v
 
 # Forgery detection campaign (T4)
