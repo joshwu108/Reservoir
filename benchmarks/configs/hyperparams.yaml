@@ -1,0 +1,14 @@
+# Schaul et al. 2016 PER paper hyperparameters
+alpha: 0.6
+beta_start: 0.4
+beta_end: 1.0
+epsilon: 1.0e-6
+capacity: 1000000
+batch_size: 32
+learning_rate: 1.0e-4
+gamma: 0.99
+target_update_freq: 10000
+total_steps: 50000000
+learning_starts: 80000
+train_frequency: 4
+tau: 1.0
