@@ -245,9 +245,19 @@ Three loss-trajectory buckets:
 
 | Label | Trajectory shape | Meaning |
 |-------|-----------------|---------|
-| `FLIPPED` | Loss flat or rising (slope > 0.01, high end-loss) | Label is probably wrong — re-annotate or remove |
-| `AMBIGUOUS` | Loss oscillates (high variance, near-zero slope) | Genuine annotator disagreement — get a second opinion |
-| `CLEAN` | Loss decays normally | Fine |
+| `FLIPPED` | High loss variance AND high residual loss | Label is probably wrong — re-annotate or remove |
+| `AMBIGUOUS` | High loss variance, lower residual loss | Genuine annotator disagreement — get a second opinion |
+| `CLEAN` | Low variance, low residual loss | Fine |
+
+**Benchmark** (`benchmarks/prefcheck/synthetic_noise.py`, 250 pairs, 20% synthetic noise):
+
+| Label | Precision | Recall | F1 |
+|-------|-----------|--------|----|
+| FLIPPED | 0.746 | **0.940** | 0.832 |
+| CLEAN | 0.802 | 1.000 | 0.890 |
+
+94% of injected flipped pairs recovered. Detection quality scales with model capability —
+a transformer-based reward model produces stronger trajectory separation than a bag-of-words baseline.
 
 ---
 
@@ -337,10 +347,10 @@ workloads. Max total-variation distance: 8.67×10⁻¹⁹, well below the kill t
 2⁻⁴⁰. Float PER is accurate enough in practice. Reservoir's exact implementation
 remains the reference for verifying this on new workloads.
 
-**T5 — Preference noise detection.** `PreferenceNoiseDetector` correctly recovers
-100% precision and recall on synthetic FLIPPED pairs (rising-loss trajectories).
-AMBIGUOUS detection precision is 100%; recall is bounded by the 75th-percentile
-variance threshold. See `benchmarks/prefcheck/synthetic_noise.py`.
+**T5 — Preference noise detection.** `PreferenceNoiseDetector` recovers 94% of
+injected flipped pairs (P=0.746, R=0.940, F1=0.832) on a 250-pair synthetic benchmark
+with 20% noise. Detection uses variance + residual loss trajectories.
+See `benchmarks/prefcheck/synthetic_noise.py`.
 
 <details>
 <summary>Campaign detail tables</summary>
