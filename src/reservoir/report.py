@@ -45,37 +45,59 @@ class PreferenceQualityReport:
 
         # Extract arrays for threshold computation
         all_mean_loss = np.array([f.mean_loss_last_k for f in features.values()])
-        all_variance = np.array([f.variance for f in features.values()])
+        all_variance  = np.array([f.variance          for f in features.values()])
+        all_slopes    = np.array([f.slope             for f in features.values()])
 
         median_mean_loss = float(np.median(all_mean_loss))
-        p75_var = float(np.percentile(all_variance, 75))
+        p75_loss         = float(np.percentile(all_mean_loss, 75))
+        p75_var          = float(np.percentile(all_variance, 75))
+        median_slope     = float(np.median(all_slopes))
+        slope_std        = float(np.std(all_slopes)) or 1e-6
+
+        # Relative threshold: a pair is "slow learner" if its slope is
+        # above median_slope + 0.5 * slope_std (i.e. learned notably slower
+        # than typical, regardless of whether slope is positive or negative).
+        slow_learner_threshold = median_slope + 0.5 * slope_std
 
         # Compute all confidences for CLEAN label fallback
         all_reports: list[ExampleReport] = []
 
         for idx, feat in features.items():
-            slope = feat.slope
-            variance = feat.variance
+            slope     = feat.slope
+            variance  = feat.variance
             mean_loss = feat.mean_loss_last_k
 
-            # FLIPPED confidence
-            flipped_conf = float(np.clip((slope - 0.01) / 0.10, 0.0, 1.0))
+            # FLIPPED: high residual loss AND slow relative learner.
+            # Works even when the model memorises everything (all slopes negative)
+            # because we compare to the distribution, not an absolute threshold.
+            is_flipped = (slope > slow_learner_threshold) and (mean_loss > median_mean_loss)
 
-            # AMBIGUOUS confidence
+            # Confidence: how far above the slow-learner threshold is this slope,
+            # normalised by one std.
+            flipped_conf = float(np.clip(
+                (slope - slow_learner_threshold) / (slope_std + 1e-8), 0.0, 1.0
+            ))
+
+            # AMBIGUOUS: high variance, near-median slope
+            is_ambiguous = (
+                variance > p75_var
+                and abs(slope - median_slope) < 0.5 * slope_std
+            )
+
             if p75_var > 0:
                 ambiguous_conf = float(np.clip((variance - p75_var) / p75_var, 0.0, 1.0))
             else:
                 ambiguous_conf = 0.0
 
-            # Bucketing rules (exact as specified)
-            if slope > 0.01 and mean_loss > median_mean_loss:
-                label = NoiseLabel.FLIPPED
+            # Assign label (FLIPPED takes priority)
+            if is_flipped:
+                label      = NoiseLabel.FLIPPED
                 confidence = flipped_conf
-            elif variance > p75_var and -0.01 <= slope <= 0.01:
-                label = NoiseLabel.AMBIGUOUS
+            elif is_ambiguous:
+                label      = NoiseLabel.AMBIGUOUS
                 confidence = ambiguous_conf
             else:
-                label = NoiseLabel.CLEAN
+                label      = NoiseLabel.CLEAN
                 confidence = 1.0 - max(flipped_conf, ambiguous_conf)
 
             all_reports.append(ExampleReport(
