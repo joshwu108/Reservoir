@@ -66,7 +66,7 @@ def main() -> None:
     else:
         parser.error("Specify --games or --all-57")
 
-    extra = ["--total-steps", str(args.total_steps)]
+    extra = ["--total-timesteps", str(args.total_steps)]
 
     for game in games:
         for seed in args.seeds:

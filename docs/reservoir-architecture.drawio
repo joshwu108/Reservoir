@@ -1,0 +1,417 @@
+<mxfile host="app.diagrams.net" modified="2026-09-15T00:00:00.000Z" agent="Claude" version="21.0.0">
+  <diagram id="reservoir-arch" name="Reservoir Architecture">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ============================================================ -->
+        <!-- TITLE -->
+        <!-- ============================================================ -->
+        <mxCell id="title" value="Reservoir — Project Architecture &amp; Data Flow" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1;fontColor=#1a1a2e;" vertex="1" parent="1">
+          <mxGeometry x="20" y="10" width="1600" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- LANE BACKGROUNDS -->
+        <!-- ============================================================ -->
+
+        <!-- Lane 1: RL Environment -->
+        <mxCell id="lane1-bg" value="" style="rounded=0;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;opacity=30;" vertex="1" parent="1">
+          <mxGeometry x="20" y="60" width="1600" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="lane1-label" value="RL Environment" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;fontStyle=1;fontColor=#1a4a7a;" vertex="1" parent="1">
+          <mxGeometry x="25" y="100" width="130" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Lane 2: Buffer API Layer -->
+        <mxCell id="lane2-bg" value="" style="rounded=0;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;opacity=30;" vertex="1" parent="1">
+          <mxGeometry x="20" y="180" width="1600" height="230" as="geometry" />
+        </mxCell>
+        <mxCell id="lane2-label" value="Buffer API Layer" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;fontStyle=1;fontColor=#1a5c1a;" vertex="1" parent="1">
+          <mxGeometry x="25" y="270" width="130" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Lane 3: C Extension -->
+        <mxCell id="lane3-bg" value="" style="rounded=0;whiteSpace=wrap;fillColor=#ffe6cc;strokeColor=#d6b656;opacity=30;" vertex="1" parent="1">
+          <mxGeometry x="20" y="420" width="1600" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="lane3-label" value="C Extension&#xa;reservoir._sumtree" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;fontStyle=1;fontColor=#7a4800;" vertex="1" parent="1">
+          <mxGeometry x="25" y="470" width="130" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Lane 4: Attestation -->
+        <mxCell id="lane4-bg" value="" style="rounded=0;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;opacity=30;" vertex="1" parent="1">
+          <mxGeometry x="20" y="560" width="1600" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="lane4-label" value="Attestation &amp;&#xa;Verification" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;fontStyle=1;fontColor=#7a0000;" vertex="1" parent="1">
+          <mxGeometry x="25" y="605" width="130" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Lane 5: Benchmarks -->
+        <mxCell id="lane5-bg" value="" style="rounded=0;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;opacity=30;" vertex="1" parent="1">
+          <mxGeometry x="20" y="690" width="1600" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="lane5-label" value="Atari Benchmarks" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;fontStyle=1;fontColor=#5a1a7a;" vertex="1" parent="1">
+          <mxGeometry x="25" y="740" width="130" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- LANE 1: RL ENVIRONMENT -->
+        <!-- ============================================================ -->
+
+        <mxCell id="gym-env" value="&lt;b&gt;Gymnasium Env&lt;/b&gt;&#xa;gym.make(env_id)" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="160" y="80" width="150" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="transition" value="&lt;b&gt;Transition&lt;/b&gt;&#xa;(obs, action, reward,&#xa;next_obs, done)" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="380" y="75" width="150" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="td-error" value="&lt;b&gt;TD Error&lt;/b&gt;&#xa;δ = r + γ·Q_target - Q&#xa;(after training step)" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="650" y="70" width="170" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="priority-calc" value="&lt;b&gt;Priority Calc&lt;/b&gt;&#xa;p = |δ| + ε&#xa;p_α = p^α  (float64-once)" style="rounded=1;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="920" y="70" width="170" height="65" as="geometry" />
+        </mxCell>
+
+        <!-- Env → Transition -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="gym-env" target="transition" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Transition → TD Error (via training) -->
+        <mxCell id="e2" value="training step" style="edgeStyle=orthogonalEdgeStyle;dashed=1;fontSize=9;" edge="1" source="transition" target="td-error" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- TD Error → Priority Calc -->
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="td-error" target="priority-calc" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- LANE 2: BUFFER API LAYER -->
+        <!-- ============================================================ -->
+
+        <!-- __init__.py auto-selector -->
+        <mxCell id="init-selector" value="&lt;b&gt;reservoir.__init__&lt;/b&gt;&#xa;Auto-selects backend&#xa;FastPERBuffer alias&#xa;backend = 'c' | 'python'" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="160" y="200" width="155" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- CFastPERBuffer -->
+        <mxCell id="cfastper" value="&lt;b&gt;CFastPERBuffer&lt;/b&gt;&#xa;c_buffer.py&#xa;• add() / sample()&#xa;• update_priorities()&#xa;• anneal_beta()&#xa;• C-backed trees" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="400" y="190" width="155" height="105" as="geometry" />
+        </mxCell>
+
+        <!-- FastPERBuffer (Python fallback) -->
+        <mxCell id="fastper" value="&lt;b&gt;PyFastPERBuffer&lt;/b&gt;&#xa;fast_buffer.py&#xa;• numpy float64 trees&#xa;• np.inf sentinel&#xa;• Stratified sampling&#xa;• GPU tensors" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="400" y="305" width="155" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- ExactPERBuffer -->
+        <mxCell id="exactper" value="&lt;b&gt;ExactPERBuffer&lt;/b&gt;&#xa;buffer.py&#xa;• Python integers only&#xa;• BLAKE2b draws&#xa;• Exact IS weights&#xa;• Fraction arithmetic" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="640" y="190" width="155" height="105" as="geometry" />
+        </mxCell>
+
+        <!-- DurableBuffer -->
+        <mxCell id="durableper" value="&lt;b&gt;DurableBuffer&lt;/b&gt;&#xa;durable.py&#xa;• WAL intent records&#xa;• F_FULLFSYNC (macOS)&#xa;• Atomic rename commit&#xa;• Crash recovery" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="640" y="305" width="155" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- Wrappers -->
+        <mxCell id="nstep" value="&lt;b&gt;NStepBuffer&lt;/b&gt;&#xa;nstep.py&#xa;n-step returns&#xa;(Rainbow DQN)" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="890" y="195" width="130" height="75" as="geometry" />
+        </mxCell>
+
+        <mxCell id="herbuf" value="&lt;b&gt;HERBuffer&lt;/b&gt;&#xa;her.py&#xa;Hindsight Experience&#xa;Replay (robotics)" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="890" y="285" width="130" height="75" as="geometry" />
+        </mxCell>
+
+        <mxCell id="audited" value="&lt;b&gt;AuditedPERBuffer&lt;/b&gt;&#xa;audit.py&#xa;Shadow exact buffer&#xa;correctness checks" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="890" y="370" width="130" height="65" as="geometry" />
+        </mxCell>
+
+        <!-- FastBatch output -->
+        <mxCell id="fastbatch" value="&lt;b&gt;FastBatch&lt;/b&gt;&#xa;• states (torch.Tensor)&#xa;• actions, rewards, dones&#xa;• next_states&#xa;• is_weights&#xa;• indices" style="rounded=1;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="210" width="145" height="110" as="geometry" />
+        </mxCell>
+
+        <!-- __init__ → CFastPERBuffer (try) -->
+        <mxCell id="e4" value="try (C built)" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;exitX=1;exitY=0.3;entryX=0;entryY=0.5;" edge="1" source="init-selector" target="cfastper" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- __init__ → FastPERBuffer (fallback) -->
+        <mxCell id="e5" value="except (fallback)" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;dashed=1;exitX=1;exitY=0.7;entryX=0;entryY=0.5;" edge="1" source="init-selector" target="fastper" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- CFastPERBuffer → FastBatch -->
+        <mxCell id="e6" value="sample()" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" edge="1" source="cfastper" target="fastbatch" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- FastPERBuffer → FastBatch -->
+        <mxCell id="e7" value="sample()" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" edge="1" source="fastper" target="fastbatch" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Priority → CFastPERBuffer (update) -->
+        <mxCell id="e8" value="update_priorities()" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" source="priority-calc" target="cfastper" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Transition → CFastPERBuffer (add) -->
+        <mxCell id="e9" value="add()" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;exitX=0.5;exitY=1;entryX=0.3;entryY=0;" edge="1" source="transition" target="cfastper" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- CFastPERBuffer wraps NStep -->
+        <mxCell id="e10" value="wraps" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;dashed=1;" edge="1" source="nstep" target="cfastper" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- AuditedPERBuffer wraps CFast -->
+        <mxCell id="e11" value="wraps" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;dashed=1;" edge="1" source="audited" target="cfastper" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- LANE 3: C EXTENSION -->
+        <!-- ============================================================ -->
+
+        <!-- sumtree.c -->
+        <mxCell id="sumtree-c" value="&lt;b&gt;sumtree.c&lt;/b&gt;&#xa;Pure C (no Python headers)&#xa;SumTreeData, MinTreeData&#xa;next_power_of_two()" style="rounded=1;whiteSpace=wrap;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="370" y="438" width="165" height="75" as="geometry" />
+        </mxCell>
+
+        <!-- sumtreemodule.c -->
+        <mxCell id="sumtreemodule-c" value="&lt;b&gt;sumtreemodule.c&lt;/b&gt;&#xa;Python C API bindings&#xa;PyInit__sumtree" style="rounded=1;whiteSpace=wrap;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="570" y="438" width="165" height="75" as="geometry" />
+        </mxCell>
+
+        <!-- SumTree class -->
+        <mxCell id="sumtree-class" value="&lt;b&gt;SumTree(capacity)&lt;/b&gt;&#xa;update(pos, value)&#xa;sample_batch(values) → list[int]&#xa;get(pos) | total" style="rounded=1;whiteSpace=wrap;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="800" y="430" width="185" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- MinTree class -->
+        <mxCell id="mintree-class" value="&lt;b&gt;MinTree(capacity)&lt;/b&gt;&#xa;update(pos, value)&#xa;get(pos) | minimum&#xa;(INFINITY sentinel)" style="rounded=1;whiteSpace=wrap;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="430" width="185" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- setup.py / build -->
+        <mxCell id="setup-py" value="&lt;b&gt;setup.py&lt;/b&gt;&#xa;setuptools Extension&#xa;-O3 compile flag&#xa;MANIFEST.in → sdist" style="rounded=1;whiteSpace=wrap;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="160" y="438" width="155" height="75" as="geometry" />
+        </mxCell>
+
+        <!-- setup.py → sumtree.c -->
+        <mxCell id="e12" value="compiles" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" edge="1" source="setup-py" target="sumtree-c" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- sumtree.c → sumtreemodule.c -->
+        <mxCell id="e13" value="#include" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" edge="1" source="sumtreemodule-c" target="sumtree-c" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- sumtreemodule.c → SumTree class -->
+        <mxCell id="e14" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" edge="1" source="sumtreemodule-c" target="sumtree-class" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- sumtreemodule.c → MinTree class -->
+        <mxCell id="e15" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" edge="1" source="sumtreemodule-c" target="mintree-class" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- CFastPERBuffer → SumTree -->
+        <mxCell id="e16" value="self._sum_tree" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;strokeColor=#d6b656;" edge="1" source="cfastper" target="sumtree-class" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- CFastPERBuffer → MinTree -->
+        <mxCell id="e17" value="self._min_tree" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;strokeColor=#d6b656;" edge="1" source="cfastper" target="mintree-class" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- LANE 4: ATTESTATION -->
+        <!-- ============================================================ -->
+
+        <!-- attest.py -->
+        <mxCell id="attest" value="&lt;b&gt;attest.py&lt;/b&gt;&#xa;MutationRecord (BLAKE2b chain)&#xa;SampleAttestation&#xa;op_counter per mutation" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="400" y="580" width="175" height="75" as="geometry" />
+        </mxCell>
+
+        <!-- draw.py -->
+        <mxCell id="draw-py" value="&lt;b&gt;draw.py&lt;/b&gt;&#xa;BLAKE2b-256 keyed draw&#xa;(seed, buffer_id, op_counter)&#xa;No random/numpy/torch RNG" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="640" y="580" width="175" height="75" as="geometry" />
+        </mxCell>
+
+        <!-- checker/verify.py -->
+        <mxCell id="checker" value="&lt;b&gt;checker/verify.py&lt;/b&gt;&#xa;Independent verifier&#xa;Zero imports from src/&#xa;Re-implements sum-tree&#xa;Verifies every record" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="890" y="575" width="175" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- rational.py -->
+        <mxCell id="rational" value="&lt;b&gt;rational.py&lt;/b&gt;&#xa;float64-once boundary&#xa;int(Fraction(p^α) × 2^52)&#xa;td_error_to_priority()" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="160" y="580" width="175" height="75" as="geometry" />
+        </mxCell>
+
+        <!-- ExactPERBuffer → attest.py -->
+        <mxCell id="e18" value="every mutation" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;strokeColor=#b85450;" edge="1" source="exactper" target="attest" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ExactPERBuffer → draw.py -->
+        <mxCell id="e19" value="keyed draw" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;strokeColor=#b85450;" edge="1" source="exactper" target="draw-py" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- attest → checker -->
+        <mxCell id="e20" value="verify chain" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;strokeColor=#b85450;" edge="1" source="attest" target="checker" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ExactPERBuffer → rational.py -->
+        <mxCell id="e21" value="priority_int" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;strokeColor=#b85450;" edge="1" source="exactper" target="rational" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- LANE 5: BENCHMARKS -->
+        <!-- ============================================================ -->
+
+        <!-- atari_dqn.py -->
+        <mxCell id="atari-dqn" value="&lt;b&gt;benchmarks/atari_dqn.py&lt;/b&gt;&#xa;Adapted CleanRL DQN (Apache-2.0)&#xa;--buffer-type c|python|uniform&#xa;--output result.json" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="380" y="705" width="195" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- run_atari.py -->
+        <mxCell id="run-atari" value="&lt;b&gt;benchmarks/run_atari.py&lt;/b&gt;&#xa;Resumable CLI runner&#xa;57 games × N seeds&#xa;Skips completed runs" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="640" y="705" width="195" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- compare.py -->
+        <mxCell id="compare-py" value="&lt;b&gt;benchmarks/compare.py&lt;/b&gt;&#xa;Load results/*.json&#xa;Markdown table&#xa;matplotlib PNG chart" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="900" y="705" width="195" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- configs -->
+        <mxCell id="configs" value="&lt;b&gt;benchmarks/configs/&lt;/b&gt;&#xa;games.txt (57 Atari IDs)&#xa;hyperparams.yaml&#xa;(Schaul et al. 2016)" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="160" y="705" width="175" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- results -->
+        <mxCell id="results" value="&lt;b&gt;benchmarks/results/&lt;/b&gt;&#xa;{game}_{type}_seed{n}.json&#xa;episode_rewards[]&#xa;final_mean_reward_100ep" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1155" y="705" width="195" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- configs → run_atari -->
+        <mxCell id="e22" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" edge="1" source="configs" target="run-atari" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- run_atari → atari_dqn (spawns) -->
+        <mxCell id="e23" value="spawns subprocess" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" edge="1" source="run-atari" target="atari-dqn" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- run_atari → results (writes) -->
+        <mxCell id="e24" value="writes JSON" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" edge="1" source="run-atari" target="results" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- results → compare.py (reads) -->
+        <mxCell id="e25" value="reads" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;" edge="1" source="results" target="compare-py" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- atari_dqn → CFastPERBuffer (uses) -->
+        <mxCell id="e26" value="buffer-type=c" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;strokeColor=#9673a6;dashed=1;" edge="1" source="atari-dqn" target="cfastper" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- FastBatch → atari_dqn (training) -->
+        <mxCell id="e27" value="batch tensors" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;strokeColor=#9673a6;dashed=1;" edge="1" source="fastbatch" target="atari-dqn" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- LEGEND -->
+        <!-- ============================================================ -->
+        <mxCell id="legend-bg" value="" style="rounded=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="200" width="270" height="280" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-title" value="&lt;b&gt;Legend&lt;/b&gt;" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="205" width="270" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg1" value="" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1355" y="235" width="25" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="leg1t" value="RL / Training" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1390" y="235" width="210" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg2" value="" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="1355" y="265" width="25" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="leg2t" value="Buffer API (Python)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1390" y="265" width="210" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg3" value="" style="rounded=1;fillColor=#ffe6cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1355" y="295" width="25" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="leg3t" value="C Extension (reservoir._sumtree)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1390" y="295" width="210" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg4" value="" style="rounded=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="1355" y="325" width="25" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="leg4t" value="Attestation / Verification" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1390" y="325" width="210" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg5" value="" style="rounded=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="1355" y="355" width="25" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="leg5t" value="Atari Benchmarks" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1390" y="355" width="210" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg6" value="" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1355" y="385" width="25" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="leg6t" value="Priority / Data flow" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1390" y="385" width="210" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg7t" value="--- Dashed = optional/fallback path" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1355" y="415" width="245" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="leg8t" value="— Solid = primary data flow" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1355" y="440" width="245" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- TLA+ / SPEC NOTE -->
+        <!-- ============================================================ -->
+        <mxCell id="tla-note" value="&lt;b&gt;spec/ReplayLifecycle.tla&lt;/b&gt;&#xa;44,611 states explored&#xa;I1 + I2 invariants hold&#xa;No errors found" style="rounded=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="570" width="180" height="75" as="geometry" />
+        </mxCell>
+
+        <!-- Test suite note -->
+        <mxCell id="test-note" value="&lt;b&gt;Test Suite&lt;/b&gt;&#xa;270 tests passing&#xa;T1 (168) + C trees (32)&#xa;+ CFastPER (14) + Parity (110 Hyp)" style="rounded=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="660" width="180" height="80" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
