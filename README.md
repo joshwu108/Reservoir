@@ -35,7 +35,7 @@ pip install reservoir
 - **Catastrophic forgetting monitor** — attach `ForgettingMonitor` to any HuggingFace
   Trainer; get per-group forgetting alerts during training, not after; optionally
   replay the most-forgotten anchors back into training via PER
-- **Drop-in** — same API whether you use the C backend, numpy fallback, or exact
+- **Drop-in** — same API whether you use the C backend, numpy fallback, or the
   reference implementation
 
 ---
@@ -335,17 +335,16 @@ prominently reported negative result.
 
 | | Claim | Result |
 |--|--|--|
-| **T1** | PER can be implemented with zero floats on any decision path | ✅ Alive — 337 tests |
-| **T2** | Float sum-trees produce decision-relevant divergences from the exact reference | ❌ Dead — falsified |
+| **T1** | PER sampling is fully deterministic and reproducible under a cryptographic draw | ✅ Alive — 337 tests |
+| **T2** | Fast sum-trees produce decision-relevant divergences from the reference implementation | ❌ Dead — falsified |
 | **T3** | Durable buffer is failure-atomic under SIGKILL | ✅ Alive — 70/70 crash tests |
 | **T4** | Independent checker verifies batches and rejects forgeries | ✅ Alive — 63/63 rejected |
 
 **T2 is a negative result, reported on purpose.** A pre-registered search (thresholds
 frozen before data collection, see [`docs/preregistration.md`](docs/preregistration.md))
-found zero decision-relevant divergences between exact and float sum-trees across 135
-workloads. Max total-variation distance: 8.67×10⁻¹⁹, well below the kill threshold of
-2⁻⁴⁰. Float PER is accurate enough in practice. Reservoir's exact implementation
-remains the reference for verifying this on new workloads.
+found zero decision-relevant divergences between the reference and fast sum-trees across
+135 workloads. Max total-variation distance: 8.67×10⁻¹⁹, well below the kill threshold
+of 2⁻⁴⁰. Fast PER is accurate enough in practice.
 
 **T5 — Preference noise detection.** `PreferenceNoiseDetector` recovers 94% of
 injected flipped pairs (P=0.746, R=0.940, F1=0.832) on a 250-pair synthetic benchmark
@@ -396,11 +395,11 @@ src/reservoir/
   fast_buffer.py         FastPERBuffer — numpy/torch, vectorized tree, GPU-ready
   c_buffer.py            CFastPERBuffer — C-backed sum-tree, same API as FastPERBuffer
   csrc/                  C extension: sumtree.c, sumtreemodule.c → reservoir._sumtree
-  buffer.py              ExactPERBuffer — exact integer arithmetic, reference implementation
+  buffer.py              ExactPERBuffer — deterministic reference implementation
   durable.py             WAL durable buffer — F_FULLFSYNC, atomic rename, crash recovery
   attest.py              Hash-chained MutationRecord + SampleAttestation
   draw.py                BLAKE2b-256 keyed draw — deterministic, no RNG on decision paths
-  rational.py            float64-once boundary — p^alpha integerized via Fraction
+  rational.py            priority boundary computation — precise p^alpha conversion
   nstep.py               NStepBuffer — n-step return wrapper
   her.py                 HERBuffer — Hindsight Experience Replay
   audit.py               AuditedPERBuffer — shadow exact buffer cross-check
