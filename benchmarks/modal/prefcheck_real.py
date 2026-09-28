@@ -181,6 +181,11 @@ def run_prefcheck(
     print("\nTokenizing...")
     model_name = "distilbert-base-uncased"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # Keep the END of prompt+response when truncating. rm-static prompts are
+    # long multi-turn dialogues; with the default right-truncation ~18% of
+    # pairs lose the response entirely, making chosen/rejected encodings
+    # identical (loss pinned at ln 2, undetectable in principle).
+    tokenizer.truncation_side = "left"
 
     MAX_LEN = 256
 
@@ -196,6 +201,15 @@ def run_prefcheck(
 
     chosen_enc  = [encode_pair(p, c) for p, c in zip(prompts, chosen_texts)]
     rejected_enc = [encode_pair(p, r) for p, r in zip(prompts, rejected_texts)]
+
+    # Guardrail: pairs whose encodings are identical are unlearnable and
+    # undetectable — report how many remain after left-truncation.
+    n_identical = sum(
+        int(torch.equal(c["input_ids"], r["input_ids"]))
+        for c, r in zip(chosen_enc, rejected_enc)
+    )
+    print(f"  Identical chosen/rejected encodings: {n_identical}/{n_pairs} "
+          f"({100.0*n_identical/n_pairs:.1f}%)")
 
     # -----------------------------------------------------------------------
     # Model — binary reward classifier (chosen > rejected)
@@ -312,6 +326,7 @@ def run_prefcheck(
         "clean":   {"precision": cl_p, "recall": cl_r, "f1": cl_f1},
         "summary": summary,
         "signal_check": signal_check,
+        "n_identical_encodings": n_identical,
     }
 
     # Print table
