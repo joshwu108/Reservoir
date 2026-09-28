@@ -47,6 +47,8 @@ _DEPS = [
     "datasets==2.19.1",
     "numpy==1.26.4",
     "accelerate==0.30.1",
+    "sentencepiece==0.2.0",   # DeBERTa-v3 tokenizer
+    "protobuf==4.25.3",
 ]
 
 try:
