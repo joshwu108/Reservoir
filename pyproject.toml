@@ -53,4 +53,5 @@ dev-dependencies = [
     "pytest>=7.0",
     "hypothesis>=6.0",
     "pytest-cov>=4.0",
+    "modal>=1.5.5",
 ]
