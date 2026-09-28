@@ -1,23 +1,46 @@
 # reservoir
 
-**Fast, auditable priority sampling for any PyTorch training loop.**
+**Exact, reproducible, auditable prioritized replay for PyTorch training loops.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-337%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-363%20passing-brightgreen.svg)](tests/)
 [![TLA+ verified](https://img.shields.io/badge/TLA%2B-44%2C611%20states%2C%20no%20errors-success.svg)](spec/ReplayLifecycle.tla)
 
-Reservoir is a prioritized replay buffer library for PyTorch. It samples the most
-informative examples more often — whether those examples are Atari frames in an RL
-agent or training pairs in an LLM fine-tuning run. It comes with a C extension for
-speed, a crash-safe durable mode, a cryptographic audit chain for correctness
-verification, a preference noise detector that catches mislabeled RLHF pairs before
-they corrupt your reward model, and a catastrophic forgetting monitor that alerts
-you during fine-tuning before your eval suite fails.
+Reservoir is a prioritized experience replay (PER) library for PyTorch built around
+three properties that other replay buffers do not offer together:
+
+1. **Exact** — priorities are integers, the sum-tree is integer arithmetic, and
+   floats enter at one declared boundary ([`docs/design.md`](docs/design.md)).
+2. **Reproducible and verifiable** — every draw is a keyed BLAKE2b hash rather than
+   an RNG call, and every sampled batch can be recorded in a hash-chained
+   attestation log that an independent checker replays from scratch.
+3. **Crash-atomic** — a write-ahead log with full fsync, tested under SIGKILL.
+
+On top of that core it ships two fine-tuning tools: a preference-noise detector for
+RLHF reward-model data and a catastrophic-forgetting monitor.
 
 ```bash
 pip install reservoir
 ```
+
+---
+
+## Which buffer should I use?
+
+| You want | Use | Notes |
+|----------|-----|-------|
+| Speed in a training loop | `FastPERBuffer` | C or numpy sum-tree, float priorities, returns `torch.Tensor`. Not attested. |
+| Bit-exact, replayable sampling | `ExactPERBuffer` | Integer priorities, keyed BLAKE2b draws. Slow by design. |
+| A verifiable sampling record | `ExactPERBuffer` + `AttestationLog` | You append records yourself; see `demo/tiny_dqn.py`. Verify with `checker/verify.py`. |
+| Survival across crashes | `DurableBuffer` | WAL + fsync around the exact buffer. |
+| Prioritized sampling over a dataset | `DatasetBuffer` | Built on `FastPERBuffer`. |
+| A cross-check of fast vs exact | `AuditedPERBuffer` | Shadow exact buffer alongside the fast one. |
+
+All buffers store fixed-shape transitions. Scope limits are listed in
+[`docs/nonclaims.md`](docs/nonclaims.md); in particular the attestation chain is a
+consistency-verification tool, not a security boundary against an adversary with
+filesystem access.
 
 ---
 
@@ -43,6 +66,7 @@ pip install reservoir
 ## Quick start — RL replay buffer
 
 ```python
+import reservoir
 from reservoir import FastPERBuffer
 
 buf = FastPERBuffer(
@@ -256,8 +280,21 @@ Three loss-trajectory buckets:
 | FLIPPED | 0.746 | **0.940** | 0.832 |
 | CLEAN | 0.802 | 1.000 | 0.890 |
 
-94% of injected flipped pairs recovered. Detection quality scales with model capability —
-a transformer-based reward model produces stronger trajectory separation than a bag-of-words baseline.
+94% of injected flipped pairs recovered on the synthetic benchmark.
+
+**Real-data benchmark** (`benchmarks/modal/prefcheck_real.py`, `Dahoas/rm-static`,
+5,000 pairs, 20% injected flips, 3 epochs, mean of seeds 42–44):
+
+| Reward model | FLIPPED precision@k | Score AUROC |
+|--------------|---------------------|-------------|
+| distilbert-base-uncased | 0.335 | 0.652 |
+| deberta-v3-base | 0.359 | 0.630 |
+
+Chance precision is 0.20. The signal is real but much weaker than on synthetic
+data, and a larger reward model did not clearly improve it. `rm-static` labels are
+themselves noisy, so precision against injected flips is a lower bound. Treat
+prefcheck as a triage aid for human review, not an automatic cleaner. Raw results
+are in `benchmarks/modal/results/`.
 
 ---
 
@@ -335,7 +372,7 @@ prominently reported negative result.
 
 | | Claim | Result |
 |--|--|--|
-| **T1** | PER sampling is fully deterministic and reproducible under a cryptographic draw | ✅ Alive — 337 tests |
+| **T1** | PER sampling is fully deterministic and reproducible under a cryptographic draw | ✅ Alive — 363 tests |
 | **T2** | Fast sum-trees produce decision-relevant divergences from the reference implementation | ❌ Dead — falsified |
 | **T3** | Durable buffer is failure-atomic under SIGKILL | ✅ Alive — 70/70 crash tests |
 | **T4** | Independent checker verifies batches and rejects forgeries | ✅ Alive — 63/63 rejected |
@@ -348,8 +385,10 @@ of 2⁻⁴⁰. Fast PER is accurate enough in practice.
 
 **T5 — Preference noise detection.** `PreferenceNoiseDetector` recovers 94% of
 injected flipped pairs (P=0.746, R=0.940, F1=0.832) on a 250-pair synthetic benchmark
-with 20% noise. Detection uses variance + residual loss trajectories.
-See `benchmarks/prefcheck/synthetic_noise.py`.
+with 20% noise. On real data the result is weaker: precision@k 0.34–0.36 against a
+0.20 base rate (see the prefcheck section above). Detection uses variance + residual
+loss trajectories. See `benchmarks/prefcheck/synthetic_noise.py` and
+`benchmarks/modal/prefcheck_real.py`.
 
 **T6 — Forgetting monitor lead time.** `ForgettingMonitor` fires an alert 120 steps
 (40% of fine-tuning) before Task A accuracy visibly collapses in a sequential
@@ -409,10 +448,11 @@ src/reservoir/
   replay_scheduler.py    ReplayScheduler — PER-prioritized anchor replay      [anchor]
   dataset_buffer.py      DatasetBuffer — prioritized sampler for HF datasets  [prefcheck]
   prefcheck.py           PreferenceNoiseDetector — RLHF label noise detection [prefcheck]
+  trajectory.py          TrajectoryLogger — per-example loss trajectories     [prefcheck]
   report.py              PreferenceQualityReport — noise results and export   [prefcheck]
 
 checker/verify.py        Independent verifier — zero imports from src/reservoir
-benchmarks/              57-game Atari DQN benchmark suite
+benchmarks/              Atari DQN suite, synthetic benchmarks, Modal GPU benchmarks
 spec/                    TLA+ safety model — 44,611 states, no invariant violations
 ```
 
@@ -421,7 +461,7 @@ spec/                    TLA+ safety model — 44,611 states, no invariant viola
 ## Running tests and campaigns
 
 ```bash
-# All 337 tests
+# All 363 tests
 uv run pytest tests/ -v
 
 # Forgery detection campaign (T4)
