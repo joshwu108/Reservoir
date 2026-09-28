@@ -27,6 +27,26 @@ class ExampleReport:
     label: NoiseLabel
     confidence: float
     features: "TrajectoryFeatures"
+    # Continuous suspicion score in [0, 1]: mean percentile rank of variance
+    # and mean_loss_last_k. Unlike bucket confidences it never collapses to 0,
+    # so it supports ranked review (top-k) and AUROC evaluation.
+    score: float = 0.0
+
+
+def _pct_rank(values: "np.ndarray") -> "np.ndarray":
+    """Percentile ranks in [0, 1] with average ties."""
+    n = len(values)
+    if n <= 1:
+        return np.full(n, 0.5)
+    sorter = np.argsort(values, kind="mergesort")
+    inv = np.empty_like(sorter)
+    inv[sorter] = np.arange(n)
+    v_sorted = values[sorter]
+    group_starts = np.r_[True, v_sorted[1:] != v_sorted[:-1]]
+    dense = group_starts.cumsum()[inv]
+    boundaries = np.r_[np.nonzero(group_starts)[0], n]
+    avg_ranks = 0.5 * (boundaries[dense] + boundaries[dense - 1] + 1)
+    return (avg_ranks - 1) / (n - 1)
 
 
 class PreferenceQualityReport:
@@ -35,9 +55,17 @@ class PreferenceQualityReport:
     Parameters
     ----------
     features : dict[int, TrajectoryFeatures] — from TrajectoryLogger.get_all_features()
+    expected_noise_rate : float | None — when provided, the FLIPPED bucket is
+        calibrated to the expected contamination: the top round(n * rate)
+        examples by suspicion score are labeled FLIPPED instead of using
+        fixed quantile cuts.
     """
 
-    def __init__(self, features: dict[int, "TrajectoryFeatures"]) -> None:
+    def __init__(
+        self,
+        features: dict[int, "TrajectoryFeatures"],
+        expected_noise_rate: float | None = None,
+    ) -> None:
         self._all: list[ExampleReport] = []
 
         if not features:
@@ -46,13 +74,12 @@ class PreferenceQualityReport:
         # Extract arrays for threshold computation
         all_mean_loss = np.array([f.mean_loss_last_k for f in features.values()])
         all_variance  = np.array([f.variance          for f in features.values()])
-        all_slopes    = np.array([f.slope             for f in features.values()])
 
         median_mean_loss = float(np.median(all_mean_loss))
-        p75_loss         = float(np.percentile(all_mean_loss, 75))
         p75_var          = float(np.percentile(all_variance, 75))
-        median_slope     = float(np.median(all_slopes))
-        slope_std        = float(np.std(all_slopes)) or 1e-6
+
+        # Continuous suspicion score: mean percentile rank of the two signals
+        scores = 0.5 * (_pct_rank(all_variance) + _pct_rank(all_mean_loss))
 
         # Primary detection signal is variance (oscillation), not slope.
         # Empirical finding: when models memorise everything, slope is nearly
@@ -67,12 +94,10 @@ class PreferenceQualityReport:
         #
         # All thresholds are relative to the distribution so the detector works
         # whether the model generalises or memorises.
-        p75_loss = float(np.percentile(all_mean_loss, 75))
 
-        # Compute all confidences for CLEAN label fallback
         all_reports: list[ExampleReport] = []
 
-        for idx, feat in features.items():
+        for pos, (idx, feat) in enumerate(features.items()):
             variance  = feat.variance
             mean_loss = feat.mean_loss_last_k
 
@@ -105,9 +130,39 @@ class PreferenceQualityReport:
                 label=label,
                 confidence=float(np.clip(confidence, 0.0, 1.0)),
                 features=feat,
+                score=float(scores[pos]),
             ))
 
+        # Rank-based calibration: with a known/estimated contamination rate,
+        # relabel the top-k most suspicious examples as FLIPPED.
+        if expected_noise_rate is not None:
+            n = len(all_reports)
+            k = int(round(n * expected_noise_rate))
+            by_score = sorted(all_reports, key=lambda r: r.score, reverse=True)
+            top_k_ids = {r.example_idx for r in by_score[:k]}
+            relabeled: list[ExampleReport] = []
+            for r in all_reports:
+                if r.example_idx in top_k_ids:
+                    label = NoiseLabel.FLIPPED
+                elif r.label == NoiseLabel.FLIPPED:
+                    # Was quantile-FLIPPED but didn't make top-k: high variance
+                    label = NoiseLabel.AMBIGUOUS
+                else:
+                    label = r.label
+                relabeled.append(ExampleReport(
+                    example_idx=r.example_idx,
+                    label=label,
+                    confidence=r.confidence if label == r.label else r.score,
+                    features=r.features,
+                    score=r.score,
+                ))
+            all_reports = relabeled
+
         self._all = all_reports
+
+    def ranked(self) -> list[ExampleReport]:
+        """All examples sorted by suspicion score, most suspicious first."""
+        return sorted(self._all, key=lambda r: r.score, reverse=True)
 
     @property
     def flipped(self) -> list[ExampleReport]:

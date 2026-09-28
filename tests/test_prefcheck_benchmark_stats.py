@@ -70,3 +70,70 @@ class TestSeparationStats:
     def test_accepts_numpy_arrays(self, bench):
         stats = bench.separation_stats(np.array([2.0, 3.0]), np.array([0.0, 1.0]))
         assert stats["auroc"] == pytest.approx(1.0)
+
+
+class TestDedupByPrompt:
+    def test_keeps_first_occurrence_only(self, bench):
+        prompts = ["a", "b", "a", "c", "b"]
+        assert bench.dedup_by_prompt(prompts) == [0, 1, 3]
+
+    def test_no_duplicates_keeps_everything(self, bench):
+        assert bench.dedup_by_prompt(["x", "y", "z"]) == [0, 1, 2]
+
+    def test_empty_list(self, bench):
+        assert bench.dedup_by_prompt([]) == []
+
+
+class TestEncodePairConsistent:
+    @pytest.fixture(scope="class")
+    def tok(self):
+        from transformers import AutoTokenizer
+        return AutoTokenizer.from_pretrained("distilbert-base-uncased")
+
+    def test_short_inputs_fit_completely(self, bench, tok):
+        c_ids, r_ids = bench.encode_pair_consistent(tok, "hello world", "yes", "no", 64)
+        assert len(c_ids) <= 64 and len(r_ids) <= 64
+        # Responses must survive: decode and check
+        assert "yes" in tok.decode(c_ids)
+        assert "no" in tok.decode(r_ids)
+
+    def test_long_prompt_keeps_both_full_responses(self, bench, tok):
+        prompt = "word " * 500  # far beyond max_len
+        c_ids, r_ids = bench.encode_pair_consistent(
+            tok, prompt, "the good answer", "a bad reply", 64
+        )
+        assert len(c_ids) <= 64 and len(r_ids) <= 64
+        assert "the good answer" in tok.decode(c_ids)
+        assert "a bad reply" in tok.decode(r_ids)
+
+    def test_prompt_context_identical_across_pair(self, bench, tok):
+        prompt = "word " * 500
+        c_ids, r_ids = bench.encode_pair_consistent(tok, prompt, "aaa bbb", "ccc", 64)
+        c_resp = tok("aaa bbb", add_special_tokens=False)["input_ids"]
+        r_resp = tok("ccc", add_special_tokens=False)["input_ids"]
+        # Strip [CLS], response tokens, [SEP]: what remains is the prompt tail
+        c_prompt_part = c_ids[1:len(c_ids) - len(c_resp) - 1]
+        r_prompt_part = r_ids[1:len(r_ids) - len(r_resp) - 1]
+        assert c_prompt_part == r_prompt_part
+
+    def test_identical_responses_give_identical_encodings(self, bench, tok):
+        c_ids, r_ids = bench.encode_pair_consistent(tok, "prompt", "same", "same", 64)
+        assert c_ids == r_ids
+
+    def test_overlong_response_is_truncated_to_fit(self, bench, tok):
+        resp = "token " * 500
+        c_ids, r_ids = bench.encode_pair_consistent(tok, "p", resp, "short", 64)
+        assert len(c_ids) <= 64 and len(r_ids) <= 64
+
+
+class TestPadBatch:
+    def test_pads_to_longest_and_masks(self, bench):
+        ids, mask = bench.pad_batch([[5, 6, 7], [8]], pad_id=0)
+        assert ids.shape == (2, 3)
+        assert ids.tolist() == [[5, 6, 7], [8, 0, 0]]
+        assert mask.tolist() == [[1, 1, 1], [1, 0, 0]]
+
+    def test_equal_lengths_no_padding(self, bench):
+        ids, mask = bench.pad_batch([[1, 2], [3, 4]], pad_id=0)
+        assert ids.tolist() == [[1, 2], [3, 4]]
+        assert mask.tolist() == [[1, 1], [1, 1]]

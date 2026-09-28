@@ -109,3 +109,50 @@ def test_summary_stats():
     assert stats["n_logged"] == 2
     assert stats["n_never_seen"] == 3
     assert stats["mean_observations"] == pytest.approx(1.0)
+
+
+# --- residual_variance (detrended oscillation measure) ---
+
+def test_residual_variance_zero_for_perfect_linear_decline():
+    logger = TrajectoryLogger(n_examples=5)
+    # Perfectly linear: variance is large but residual_variance ~ 0
+    for step in range(6):
+        logger.log(0, step, 1.0 - 0.15 * step)
+    logger.finalize(total_steps=10)
+    feat = logger.get_features(0)
+    assert feat.variance > 0.05
+    assert feat.residual_variance == pytest.approx(0.0, abs=1e-12)
+
+
+def test_residual_variance_equals_variance_for_trendless_oscillation():
+    logger = TrajectoryLogger(n_examples=5)
+    # Oscillation around 0.5 with no trend: residual variance ~ full variance
+    losses = [0.9, 0.1, 0.9, 0.1, 0.9, 0.1]
+    for step, loss in enumerate(losses):
+        logger.log(0, step, loss)
+    logger.finalize(total_steps=10)
+    feat = logger.get_features(0)
+    assert feat.residual_variance == pytest.approx(feat.variance, rel=0.15)
+    assert feat.residual_variance > 0.1
+
+
+def test_residual_variance_zero_when_too_few_points():
+    logger = TrajectoryLogger(n_examples=5)
+    logger.log(0, 0, 0.9)
+    logger.log(0, 1, 0.1)
+    logger.finalize(total_steps=10)
+    feat = logger.get_features(0)
+    # 2 points always fit a line exactly
+    assert feat.residual_variance == pytest.approx(0.0, abs=1e-12)
+
+
+def test_residual_variance_separates_oscillator_from_converger():
+    logger = TrajectoryLogger(n_examples=5)
+    # Example 0: clean converger (linear decline)
+    for step in range(6):
+        logger.log(0, step, 1.0 - 0.15 * step)
+    # Example 1: flipped-style oscillator (same overall variance scale)
+    for step, loss in enumerate([0.8, 0.2, 0.9, 0.1, 0.7, 0.3]):
+        logger.log(1, step, loss)
+    logger.finalize(total_steps=10)
+    assert logger.get_features(1).residual_variance > 10 * logger.get_features(0).residual_variance

@@ -19,6 +19,9 @@ class TrajectoryFeatures:
     variance: float
     first_correct_step: int | None
     loss_history: list[float]
+    # Variance of residuals around the linear fit. Unlike `variance`, this does
+    # not count a monotone convergence trend as "oscillation".
+    residual_variance: float = 0.0
 
 
 class TrajectoryLogger:
@@ -70,11 +73,15 @@ class TrajectoryLogger:
 
             loss_arr = np.array(losses, dtype=np.float64)
 
-            # Slope
+            # Slope and detrended residual variance from one linear fit
             if n >= 2:
-                slope = float(np.polyfit(steps, losses, deg=1)[0])
+                coeffs = np.polyfit(steps, losses, deg=1)
+                slope = float(coeffs[0])
+                residuals = loss_arr - np.polyval(coeffs, np.array(steps, dtype=np.float64))
+                residual_variance = float(np.var(residuals)) if n >= 3 else 0.0
             else:
                 slope = 0.0
+                residual_variance = 0.0
 
             # Variance
             if n >= 2:
@@ -104,6 +111,7 @@ class TrajectoryLogger:
                 variance=variance,
                 first_correct_step=first_correct_step,
                 loss_history=losses,
+                residual_variance=residual_variance,
             )
 
         self._finalized = True

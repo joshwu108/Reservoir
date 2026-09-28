@@ -161,3 +161,47 @@ def test_empty_report_handles_gracefully():
     assert s["n_flipped"] == 0
     assert s["n_ambiguous"] == 0
     assert s["n_clean"] == 0
+
+
+# --- ranked() and expected_noise_rate calibration ---
+
+def test_ranked_returns_all_examples_sorted_by_score_desc():
+    report = _make_report_with_examples()
+    ranked = report.ranked()
+    assert len(ranked) == 22
+    scores = [r.score for r in ranked]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_ranked_puts_high_var_high_loss_first():
+    report = _make_report_with_examples()
+    ranked = report.ranked()
+    # The two constructed FLIPPED examples (idx 0, 1) should lead the ranking
+    assert {ranked[0].example_idx, ranked[1].example_idx} == {0, 1}
+
+
+def test_expected_noise_rate_flags_exactly_top_k():
+    features = {}
+    features[0] = _make_features(0, slope=-0.01, variance=0.80, mean_loss=0.85)
+    features[1] = _make_features(1, slope=-0.01, variance=0.85, mean_loss=0.80)
+    features[2] = _make_features(2, slope=-0.02, variance=0.55, mean_loss=0.01)
+    features[3] = _make_features(3, slope=-0.02, variance=0.60, mean_loss=0.01)
+    for i in range(4, 22):
+        features[i] = _make_features(i, slope=-0.05, variance=0.01, mean_loss=0.03)
+    report = PreferenceQualityReport(features, expected_noise_rate=2 / 22)
+    flipped = report.flipped
+    assert len(flipped) == 2
+    assert {r.example_idx for r in flipped} == {0, 1}
+
+
+def test_expected_noise_rate_none_preserves_default_behavior():
+    default = _make_report_with_examples()
+    assert {r.example_idx for r in default.flipped} == {0, 1}
+    assert len(default.ambiguous) == 2
+    assert len(default.clean) == 18
+
+
+def test_score_present_on_all_example_reports():
+    report = _make_report_with_examples()
+    for r in report.ranked():
+        assert 0.0 <= r.score <= 1.0
