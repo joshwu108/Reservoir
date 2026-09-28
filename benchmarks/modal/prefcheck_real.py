@@ -181,7 +181,7 @@ def pad_batch(id_lists, pad_id: int):
 # ---------------------------------------------------------------------------
 
 @app.function(
-    gpu="T4",
+    gpu="A10G",
     image=image,
     timeout=7200,
     volumes={"/hf_cache": hf_cache},
@@ -465,8 +465,9 @@ def main(
     out_dir = Path("benchmarks/modal/results")
     out_dir.mkdir(parents=True, exist_ok=True)
     for res in all_results:
+        model_tag = res["model"].split("/")[-1]
         out = out_dir / (
-            f"prefcheck_{res['n_pairs']}pairs_{res['n_epochs']}epochs_"
+            f"prefcheck_{model_tag}_{res['n_pairs']}pairs_{res['n_epochs']}epochs_"
             f"evalpass_seed{res['seed']}.json"
         )
         with open(out, "w") as f:
