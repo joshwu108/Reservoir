@@ -253,3 +253,222 @@ def is_weight(N: int, priority_int: int, root_total: int, beta: float,
 
 The float-once boundary for IS weights is declared here. All arithmetic after
 the float64 evaluation of `(N·P(i))^(-β)` is exact Fraction arithmetic.
+
+## 7. Age-Decayed Priorities in 64 Bits (Phase 1 design spike)
+
+Status: primitive shipped in `src/reservoir/decay.py` with tests in
+`tests/test_decay.py`. Not yet wired into any buffer, the attestation log, the
+checker, or the C extension. Nothing in this section is a training-quality or
+throughput claim.
+
+### 7.1 Declared semantics
+
+Integer parameters, fixed at construction (`DecayParams`):
+
+| Symbol | Parameter | Meaning |
+|---|---|---|
+| h | `half_life` | model versions per halving of the sampling weight, 1 ≤ h ≤ 1024 |
+| A | `max_policy_age` | an entry written at version t is live at version v iff v − t ≤ A |
+| N | `capacity` | maximum number of leaves |
+| P | `priority_bits` | base priority satisfies 0 ≤ q < 2^P (default 32) |
+| Q | `priority_frac_bits` | fixed-point fraction bits of q (default 16) |
+| F | `table_frac_bits` | fraction bits of the decay table (default 31) |
+| R | `rebase_slack` | extra epochs of shift headroom (default 0) |
+
+1. **Quantization — the only float boundary.** A finite raw priority x ≥ 0
+   (the binary64 value of `p^α`, as in §2) becomes `q = floor(x · 2^Q)`,
+   computed exactly through `Fraction(x)`. `q ≥ 2^P` is a `ValueError`; there
+   is no clamp and no wrap.
+2. **Decay table.** `T[k] = floor(2^(k/h) · 2^F)` for k in [0, h), where
+   `2^(k/h)` is the true real value. `T[k]` is the unique integer with
+   `T[k]^h ≤ 2^(k + F·h) < (T[k] + 1)^h`.
+3. **Weight.** With epoch `E = t // h` and phase `k = t mod h`, the absolute
+   weight of an entry is `W = floor(q · T[k] / 2^F) · 2^E`. The product is
+   rounded by floor, once, before the epoch shift.
+4. **Distribution.** Over live entries, `P(i) = W_i / Σ_j W_j` exactly.
+5. **Stored leaf.** `leaf = floor(q · T[k] / 2^F) << (E − B)` for a base epoch
+   B with `0 ≤ E − B ≤ S`, where `S = max_shift = ceil(A / h) + R`.
+
+Consequences that are tested, not assumed: two entries with equal q whose
+versions differ by m·h have weights in ratio exactly 2^m; a positive q never
+yields a zero weight; W is non-decreasing in t for fixed q.
+
+What this is **not**: it is not `p · exp(−Δ/τ)` evaluated in the reals. It is
+base-2 decay with an integer half-life and floor rounding at two declared
+points. FreshPER's τ maps to `h ≈ τ · ln 2` in the priority domain; because
+FreshPER applies α after the decay, the half-life of the *sampling weight* is
+`τ · ln 2 / α`. h is an integer, so τ is matched only approximately.
+
+### 7.2 Bit budget (Question 1)
+
+```
+tree:     P + 1 + S + ceil(log2(N)) ≤ 64        S = ceil(A / h) + R
+product:  P + F + 1 ≤ 64
+```
+
+Proof sketch. `T[k] < 2^(F+1)` and `q ≤ 2^P − 1` give
+`floor(q·T[k]/2^F) < 2^(P+1)`, so every leaf is `< 2^(P+1+S)`. Any internal
+node is a sum of at most N' leaves, where N' is the tree's power-of-two
+capacity and `log2(N') = ceil(log2(N))`. The "+1" is the cost of the phase
+within an epoch. The bound is within one bit of tight.
+
+Both inequalities are checked in `DecayParams.__post_init__`; a violation is a
+`ValueError` naming each term. The table bits F do not appear in the tree
+budget: that is the purpose of flooring the product (see 7.5, alternative 2).
+
+Supported ranges at the default P = 32 (`S + ceil(log2 N) ≤ 31`):
+
+| capacity | max half-lives of spread (S) |
+|---|---|
+| 2^10 | 21 |
+| 2^16 (covers 50K) | 15 |
+| 2^20 | 11 |
+| 2^24 | 7 |
+
+At P = 24 each row gains 8. An entry 15 half-lives old has weight 2^−15 of a
+fresh entry with the same base priority.
+
+### 7.3 Rebase cost (Question 3)
+
+A rebase by d epochs divides every live leaf by 2^d. Because every live leaf
+is a multiple of 2^d, every internal node is too, so a rebase is one right
+shift over the whole node array with no re-propagation. It is O(N) in touched
+memory. Measured here with numpy on 2^21 uint64 nodes (a 2^20-leaf tree):
+0.3 ms on the development machine — one measurement, not a benchmark.
+
+Frequency: once every `(R + 1) · h` model versions. It is independent of the
+number of inserts, updates and samples.
+
+Avoiding the O(N) pass is possible with one sub-tree per epoch and an
+(S+1)-entry top level weighted by `2^(E−B)`: a rebase then drops the oldest
+sub-tree in O(1). It needs the same bit budget, more memory or a position
+indirection, and a second traversal level. Not chosen: the flat shift is
+cheap, rare, and keeps the tree identical to the existing one.
+
+Ordering constraint: expired entries must be evicted (leaf set to 0) **before**
+the shift. `rebase_priority` refuses a shift that would drop a set bit, but
+divisibility is necessary, not sufficient, evidence of liveness; eviction is
+decided by version.
+
+### 7.4 Remaining questions
+
+**Age on update (Question 4).** Default: an update keeps the original
+version and changes only q. `version_after_update(...,
+reset_age_on_update=True)` re-stamps instead. Source: arXiv 2604.16918 was
+read through an automated summary of its HTML version, not line by line. It
+defines t_i as "the global training step when trajectory i was collected" and
+Δ_i = t − t_i, and states that base priorities may be recomputed after a
+training step. No sentence about resetting t_i was found. The default follows
+the definition; the paper does not state it explicitly.
+
+**Attestation (Question 5) — proposal, not implemented.**
+
+- New first record `decay_config`: `half_life`, `max_policy_age`, `capacity`,
+  `priority_bits`, `priority_frac_bits`, `table_frac_bits`, `rebase_slack`,
+  `reset_age_on_update`. The checker rebuilds `T` itself from `half_life` and
+  `table_frac_bits` with integer arithmetic; the table is not shipped.
+- `insert` / `update` records gain `base_priority_int` (q), `entry_version`
+  (t) and `base_epoch` (B). The checker recomputes the leaf and requires it to
+  equal `new_priority_int`.
+- New record `advance_version`: `old_version`, `new_version`. The checker
+  requires every subsequent `evict` with reason `"stale"` to satisfy
+  `new_version − t > A`, and requires that no live entry is missing one.
+- New record `rebase`: `old_base_epoch`, `new_base_epoch`,
+  `root_total_before`, `root_total_after`. The checker shifts every replayed
+  leaf, fails if any dropped bit is non-zero, and compares totals. One record
+  per rebase, not N mutation records.
+- `sample` records are unchanged.
+
+Files that must change when this is wired in (not changed by this spike):
+`attest.py` (`append_mutation` rejects unknown ops and has no fields for
+q/t/B), `checker/verify.py` (unknown op is a `CheckerError`), and
+`sumtree.c`/`sumtree.h` (nodes are `double`; a `uint64_t` variant is needed).
+`ExactMinTree.INFINITY = 2^2048` must become `UINT64_MAX` in a fixed-width
+min-tree.
+
+**Quantization loss (Question 6).** The 2^52 scheme keeps every mantissa
+bit for x ≥ 1 and floors below 2^−52. The default 16.16 format has absolute
+step 2^−16 and range [0, 65536):
+
+| raw priority x | q | relative step 1/q |
+|---|---|---|
+| 1e-6 | 0 | not sampleable |
+| 2.5e-4 (= (1e-6)^0.6) | 16 | 6.3% |
+| 1e-3 | 65 | 1.5% |
+| 1e-2 | 655 | 0.15% |
+| 1.0 | 65 536 | 1.5e-5 |
+| 1000 | 65 536 000 | 1.5e-8 |
+
+So 32 bits lose about 36 bits of relative resolution at x = 1. For priorities
+in roughly [1e-2, 6e4] the per-entry probability error is below 0.2%. It does
+matter in two cases: (a) x < 2^−16 floors to zero and the entry is never
+sampled — with α = 1 and ε = 1e-6 a zero-error entry hits this; (b) x ≥ 65536
+is rejected. Both are moved by Q (e.g. Q = 24 gives step 6e-8, range
+[0, 256)). The product floor in 7.1(3) has absolute error below one unit of
+the same grid, so it is the same order as the quantization error. Whether any
+of this affects training is not measured and not claimed.
+
+### 7.5 Chosen approach and rejected alternatives
+
+Chosen: inflate-new-entries with exact epoch shifts, as proposed, with two
+changes to the proposal.
+
+**Change 1 — integer-root table instead of float64.** The proposal computed
+`2^(k/h)` in float64. `pow` is not required to be correctly rounded and libm
+implementations differ, so a checker on another machine could derive a
+different table. §2 tolerates float `pow` because the result is recorded in
+the log and never recomputed; a decay table would have to be either shipped
+in the log or recomputed. The integer h-th root removes the dependency. On
+the development machine the float64 table equals the integer table for
+h ∈ {3, 347, 1000} at F = 31; that is an observation on one platform, not a
+guarantee. Cost: table construction is 0.23 s at h = 1024 and about 10 s at
+h = 4096, hence `MAX_HALF_LIFE = 1024`. Larger half-lives need a coarser
+version unit.
+
+**Change 2 — floor the product.** Rejected alternative: keep the full product
+`q · T[k]`. It needs no rounding, but its budget is
+`P + F + 1 + S + ceil(log2 N) ≤ 64`. At P = 32, F = 15 that leaves
+`S + ceil(log2 N) ≤ 16`: a 2^16 buffer gets S = 0. For equal leaf width the
+floored product is at least as close to the real-valued weight.
+
+Other rejected alternatives:
+
+- *Decay old entries in place* (multiply every leaf each version): O(N) per
+  version and rounding error accumulates per step.
+- *Lazy decay at sample time with stale internal nodes*: internal sums no
+  longer equal the sum of current leaf weights, so `P(i) = leaf_i / total`
+  is false.
+- *Unbounded Python integers, never rebase*: exact, but leaf width grows by
+  one bit per half-life without bound; cannot move to C.
+- *Base-e table*: whole decay periods are no longer shifts, so rebasing is a
+  multiplication with rounding and is not exact.
+
+### 7.6 Verdict
+
+Exact 64-bit age decay is viable. With 32-bit priorities it supports, for
+example, 2^16 entries with 15 half-lives of spread or 2^20 entries with 11.
+A FreshPER-scale configuration (h = 347, 50K entries, A = 15·h) uses exactly
+64 bits.
+
+Costs: priorities are 16.16 fixed point by default instead of 2^52-scaled;
+the decay rate is base-2 with integer half-life ≤ 1024; one O(N) shift every
+(R+1)·h versions; the decayed weight is floored once.
+
+Implications for the rollout buffer: it must store (q, t) per entry, track the
+current version and base epoch, evict stale entries before rebasing, and call
+`pending_rebase_shift` before writing at a new version. The min-tree used for
+IS-weight normalisation needs the same shift on rebase.
+
+Implications for the C backend: the leaf is `((uint64_t)q * T[k]) >> F << s`
+with q and T[k] both fitting in uint32 at the defaults; the tree needs a
+`uint64_t` node type. The draw must also be produced as an integer below the
+root total; that path is not examined here.
+
+Interaction with the known DurableBuffer issue: a rebase rewrites every leaf,
+so under the current full-state serialization it costs the same as any other
+operation, but it must be a single durable operation (eviction plus shift
+under one intent). An incremental WAL would need a `rebase` entry rather than
+N leaf writes.
+
+Not established by this spike: behaviour of variable-length trajectories,
+IS weights under decay, any end-to-end buffer, and any C implementation.

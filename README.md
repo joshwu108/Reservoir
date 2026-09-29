@@ -1,24 +1,27 @@
 # reservoir
 
-**Exact, reproducible, auditable prioritized replay for PyTorch training loops.**
+**Exact, reproducible, auditable replay for LLM reinforcement learning.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-363%20passing-brightgreen.svg)](tests/)
-[![TLA+ verified](https://img.shields.io/badge/TLA%2B-44%2C611%20states%2C%20no%20errors-success.svg)](spec/ReplayLifecycle.tla)
 
-Reservoir is a prioritized experience replay (PER) library for PyTorch built around
-three properties that other replay buffers do not offer together:
+> **Status:** this README describes the target interface. Not everything below is
+> implemented yet.
 
-1. **Exact** — priorities are integers, the sum-tree is integer arithmetic, and
-   floats enter at one declared boundary ([`docs/design.md`](docs/design.md)).
-2. **Reproducible and verifiable** — every draw is a keyed BLAKE2b hash rather than
-   an RNG call, and every sampled batch can be recorded in a hash-chained
-   attestation log that an independent checker replays from scratch.
-3. **Crash-atomic** — a write-ahead log with full fsync, tested under SIGKILL.
+Generating rollouts is the most expensive part of GRPO-style training, and the
+standard recipe uses each rollout once and throws it away. Reservoir is a replay
+library that lets you keep them: store rollouts, re-sample them by priority, and
+get a record of exactly what was sampled and why.
 
-On top of that core it ships two fine-tuning tools: a preference-noise detector for
-RLHF reward-model data and a catastrophic-forgetting monitor.
+It is built around three properties:
+
+1. **Exact** — priorities are integers and the sum-tree is integer arithmetic.
+   Floats enter at one declared boundary.
+2. **Reproducible and verifiable** — draws are keyed BLAKE2b hashes, not RNG
+   calls. Every sampled batch is written to a hash-chained attestation log that
+   an independent checker can replay.
+3. **Crash-atomic** — a write-ahead log with full fsync. A killed trial does not
+   lose its rollout history.
 
 ```bash
 pip install reservoir
@@ -26,214 +29,186 @@ pip install reservoir
 
 ---
 
-## Which buffer should I use?
-
-| You want | Use | Notes |
-|----------|-----|-------|
-| Speed in a training loop | `FastPERBuffer` | C or numpy sum-tree, float priorities, returns `torch.Tensor`. Not attested. |
-| Bit-exact, replayable sampling | `ExactPERBuffer` | Integer priorities, keyed BLAKE2b draws. Slow by design. |
-| A verifiable sampling record | `ExactPERBuffer` + `AttestationLog` | You append records yourself; see `demo/tiny_dqn.py`. Verify with `checker/verify.py`. |
-| Survival across crashes | `DurableBuffer` | WAL + fsync around the exact buffer. |
-| Prioritized sampling over a dataset | `DatasetBuffer` | Built on `FastPERBuffer`. |
-| A cross-check of fast vs exact | `AuditedPERBuffer` | Shadow exact buffer alongside the fast one. |
-
-All buffers store fixed-shape transitions. Scope limits are listed in
-[`docs/nonclaims.md`](docs/nonclaims.md); in particular the attestation chain is a
-consistency-verification tool, not a security boundary against an adversary with
-filesystem access.
-
----
-
-## What it does
-
-- **Prioritized sampling** — sample transitions/examples proportional to their
-  importance (TD error for RL, training loss for supervised learning), with
-  importance-sampling weight correction to prevent bias
-- **Fast** — C-backed sum-tree, vectorized numpy fallback, returns `torch.Tensor`
-  directly; auto-selects best available backend at import time
-- **Auditable** — every sampled batch carries a hash-chained attestation record;
-  an independent verifier re-derives the sum-tree from scratch to catch any divergence
-- **Crash-safe** — write-ahead log with `F_FULLFSYNC` and atomic rename; verified
-  with 70 SIGKILL crash tests, zero torn states
-- **Catastrophic forgetting monitor** — attach `ForgettingMonitor` to any HuggingFace
-  Trainer; get per-group forgetting alerts during training, not after; optionally
-  replay the most-forgotten anchors back into training via PER
-- **Drop-in** — same API whether you use the C backend, numpy fallback, or the
-  reference implementation
-
----
-
-## Quick start — RL replay buffer
+## Quick start — replay for GRPO
 
 ```python
-import reservoir
-from reservoir import FastPERBuffer
+from reservoir import RolloutBuffer, Rollout
+from reservoir.priorities import AdvantagePriority
 
-buf = FastPERBuffer(
-    capacity=100_000,
-    obs_shape=(84, 84, 4),  # Atari frame stack
-    alpha=0.6,               # prioritization strength
-    beta=0.4,                # IS correction (anneal to 1.0)
-    device="cuda",
+buf = RolloutBuffer(
+    capacity=50_000,
+    priority=AdvantagePriority(),
+    half_life=4,            # priority halves every 4 model versions
+    max_policy_age=16,      # evict rollouts older than 16 versions
+    seed=0,
 )
 
-print(reservoir.backend)  # "c" if C extension built, "python" otherwise
+# After each generation step, store the group of rollouts for a prompt
+buf.add_group(
+    prompt_id="gsm8k-0412",
+    model_version=step,
+    rollouts=[
+        Rollout(tokens=ids, logprobs=lp, reward=r)
+        for ids, lp, r in zip(completions, behavior_logprobs, rewards)
+    ],
+)
 
-# Add a transition
-buf.add(obs, action, reward, next_obs, done)
+# Mix replayed rollouts into the next update
+batch = buf.sample(batch_size=64, current_version=step)
+# batch.rollouts       variable-length entries
+# batch.logprobs       behavior logprobs, for importance correction
+# batch.model_versions the policy version that produced each rollout
+# batch.is_weights     importance-sampling weights
+# batch.indices
 
-# Sample — returns torch tensors on your device
-batch = buf.sample(batch_size=32)
-# batch.states, batch.actions, batch.rewards, batch.next_states,
-# batch.dones, batch.is_weights, batch.indices
+buf.update_priorities(batch.indices, new_advantages)
+```
 
-# After computing TD errors, update priorities
-buf.update_priorities(batch.indices, td_errors)
-buf.anneal_beta(step, total_steps)  # linearly anneals beta → 1.0
+Entries are whole rollouts, not fixed-shape transitions. Each one carries the
+behavior logprobs and the model version that produced it, which is what
+off-policy correction and staleness handling need.
+
+---
+
+## Priority strategies
+
+Priority functions are pluggable. Each one maps a rollout or a prompt to a
+non-negative score; Reservoir handles integerization, decay and sampling.
+
+```python
+from reservoir.priorities import (
+    AdvantagePriority,     # |advantage| of the rollout
+    PassRateTargeting,     # favor prompts near a target pass rate
+    PassRateVariance,      # favor prompts with uncertain outcomes
+)
+
+buf = RolloutBuffer(
+    capacity=50_000,
+    priority=PassRateTargeting(target=0.5, width=0.15),
+)
+```
+
+Write your own by implementing one method:
+
+```python
+from reservoir.priorities import PriorityStrategy
+
+class RewardGap(PriorityStrategy):
+    def score(self, rollout, group) -> float:
+        return abs(rollout.reward - group.mean_reward)
+```
+
+**Age decay** is exact. Priorities decay by half-life in model versions, and
+the decayed distribution is the declared distribution the checker verifies.
+See [`docs/design.md`](docs/design.md).
+
+**Prompt-level sampling** is available through `DatasetBuffer`, for choosing
+which prompts to generate rollouts for in the first place:
+
+```python
+from reservoir import DatasetBuffer
+from reservoir.priorities import PassRateVariance
+
+prompts = DatasetBuffer(dataset, priority=PassRateVariance())
+next_prompts = prompts.sample_indices(batch_size=128)
 ```
 
 ---
 
-## Quick start — LLM / supervised fine-tuning
+## Reproducible, verifiable runs
 
-The core insight of PER applies to any gradient-based training: sample the examples
-your model finds most surprising (high loss) more often, correct for the sampling
-bias with IS weights. Uniform sampling wastes steps on examples the model already knows.
+Deterministic inference engines make the compute reproducible. Reservoir does
+the same for the data: which entry was sampled, when, and under what priority.
 
 ```python
-import torch
-from reservoir import FastPERBuffer
-
-# One slot per training example; obs_shape holds the tokenized input
-buf = FastPERBuffer(
-    capacity=len(dataset),
-    obs_shape=(seq_len,),
-    action_dim=1,
-    alpha=0.6,
-    beta=0.4,
-    device="cuda",
-)
-
-# Seed the buffer — initial priority = max (every example seen at least once)
-for i, example in enumerate(dataset):
-    buf.add(
-        state=example["input_ids"],
-        action=0,
-        reward=0.0,
-        next_state=example["input_ids"],
-        done=False,
-    )
-
-# Training loop
-for step in range(total_steps):
-    batch = buf.sample(batch_size=32)
-
-    # Forward pass — compute per-example loss
-    logits = model(batch.states)
-    loss_per_example = F.cross_entropy(logits, targets, reduction="none")
-
-    # IS-weighted loss — prevents over-fitting to hard examples
-    loss = (batch.is_weights * loss_per_example).mean()
-    loss.backward()
-    optimizer.step()
-
-    # Update priorities with current per-example loss
-    buf.update_priorities(batch.indices, loss_per_example.detach().cpu().numpy())
-    buf.anneal_beta(step, total_steps)
+buf = RolloutBuffer(capacity=50_000, seed=0, attest="run-01/attest.jsonl")
 ```
 
----
-
-## Catastrophic forgetting monitor
-
-When you fine-tune on new data, the model forgets what it previously knew. Teams
-typically detect this after training by running eval suites — by then the compute is
-wasted and a retrain is needed.
-
-`reservoir-anchor` gives you an early warning **during** training. You hold a small
-`AnchorSet` of examples representing prior knowledge, run them through the model
-every N steps, and get per-group forgetting alerts the moment anchor loss rises
-significantly above baseline.
-
-The PER connection is direct: priority = how much the model has forgotten a specific
-anchor (relative loss increase from baseline). `ReplayScheduler` samples the
-most-forgotten anchors proportionally for replay, with IS weight correction.
+Every insert, priority update, eviction and sampled batch is appended to the
+log. Anyone with the log can verify it, without your code or your model:
 
 ```bash
-pip install "reservoir[anchor]"
+python -m checker.verify run-01/attest.jsonl
+```
+
+The checker shares no code with the library. It rebuilds the sum-tree from the
+mutation records and confirms that every sampled index follows from the
+recorded draw.
+
+Two runs with the same seed and the same inputs produce identical sampling
+transcripts. Paired with a deterministic inference engine, that gives a
+bitwise-reproducible training run with a sampling record a third party can
+check.
+
+The same log supports data-mixture and quota reporting, and sampling records
+for unlearning audits. It is a consistency-verification tool, not a security
+boundary; see [`docs/nonclaims.md`](docs/nonclaims.md).
+
+---
+
+## Durable buffers
+
+```python
+buf = RolloutBuffer(capacity=50_000, directory="run-01/buffer")
+```
+
+Every operation is committed through a write-ahead log. If the process is
+killed, reopening the same directory recovers the last committed state, with
+no torn entries.
+
+---
+
+## Integrations
+
+### TRL
+
+```bash
+pip install "reservoir[trl]"
 ```
 
 ```python
-from reservoir import AnchorSet, ForgettingMonitor
-from transformers import Trainer, TrainingArguments
+from reservoir.integrations.trl import ReservoirReplay
 
-# Build anchor set from examples the model must not forget
-anchor_set = AnchorSet.from_dataset(
-    prior_knowledge_dataset,
-    n=500,
-    tags="legal-QA",          # group label for per-group alerts
-)
-
-monitor = ForgettingMonitor(
-    anchor_sets=[anchor_set],
-    eval_every_n_steps=500,    # evaluate anchors every 500 steps
-    alert_threshold=0.5,       # alert when mean loss rose > 50% above baseline
-    auto_replay=False,         # True to inject forgotten anchors back into training
-    verbose=True,
-)
-
-trainer = Trainer(
+trainer = GRPOWithReplayBufferTrainer(
     model=model,
-    args=TrainingArguments(...),
-    train_dataset=fine_tune_dataset,
-    callbacks=[monitor],
+    args=args,
+    train_dataset=dataset,
+    replay_buffer=ReservoirReplay(capacity=50_000, half_life=4),
 )
 trainer.train()
-
-# After training: get the full report
-report = monitor.get_report()
-print(f"Alerts fired: {report.n_alerts}")
-for tag, group in report.groups.items():
-    print(f"  {tag}: final_forgetting_score={group.final_forgetting_score:.3f}")
-
-report.to_json("forgetting_report.json")
-report.to_html("forgetting_report.html")
-report.plot("forgetting_plot.png")   # requires matplotlib
 ```
 
-Enable automatic replay of the most-forgotten anchors:
+### verl
 
-```python
-monitor = ForgettingMonitor(
-    anchor_sets=[anchor_set],
-    eval_every_n_steps=500,
-    alert_threshold=0.5,
-    auto_replay=True,          # inject forgotten anchors back into training
-    replay_ratio=0.1,          # 10% of each batch is replayed anchors
-)
+```bash
+pip install reservoir-verl
 ```
 
-Multiple anchor groups — track forgetting separately per domain:
+A trajectory store and prioritized sampler plugin with WAL durability, so
+rollout history survives a failed trial.
+
+### Classic RL
+
+`FastPERBuffer` is a C-backed PER buffer for transition-based RL, with n-step
+and HER wrappers. Adapters are provided for Stable-Baselines3 and TorchRL.
 
 ```python
-legal_anchors   = AnchorSet.from_dataset(legal_dataset,   n=200, tags="legal")
-medical_anchors = AnchorSet.from_dataset(medical_dataset, n=200, tags="medical")
-code_anchors    = AnchorSet.from_dataset(code_dataset,    n=100, tags="code")
+from reservoir import FastPERBuffer
 
-monitor = ForgettingMonitor(
-    anchor_sets=[legal_anchors, medical_anchors, code_anchors],
-    alert_threshold=0.5,
-)
+buf = FastPERBuffer(capacity=100_000, obs_shape=(84, 84, 4), alpha=0.6, beta=0.4)
+buf.add(obs, action, reward, next_obs, done)
+batch = buf.sample(batch_size=32)
+buf.update_priorities(batch.indices, td_errors)
 ```
 
 ---
 
-## Preference noise detection (RLHF)
+## Fine-tuning tools
 
-`reservoir-prefcheck` wraps TRL's `RewardTrainer` to catch mislabeled preference
-pairs before they poison your reward model. The key insight: when a pair is
-mislabeled, the reward model's loss on it stays high or rises over training because
-the model keeps predicting the correct answer and getting penalized.
+### Preference noise detection
+
+Finds likely mislabeled pairs in RLHF preference data from their loss
+trajectories during reward-model training.
 
 ```bash
 pip install "reservoir[prefcheck]"
@@ -245,239 +220,101 @@ from reservoir import PreferenceNoiseDetector
 detector = PreferenceNoiseDetector(
     model=model,
     tokenizer=tokenizer,
-    train_dataset=dataset,   # HuggingFace Dataset with "chosen"/"rejected" fields
-    mode="audit",            # "audit" (uniform) or "accelerated" (PER sampling)
+    train_dataset=dataset,   # "chosen" / "rejected" fields
 )
 detector.train()
 
 report = detector.get_report()
-print(report.summary())
-# {'n_total': 10000, 'n_flipped': 83, 'pct_flipped': 0.83,
-#  'n_ambiguous': 214, 'pct_ambiguous': 2.14, 'n_clean': 9703, ...}
-
-# Top suspect pairs — highest confidence mislabeling
 for r in report.flipped[:10]:
-    print(r.example_idx, r.confidence, r.features.slope)
-
-# Export
-report.to_json("noise_report.json")
-report.to_csv("noise_report.csv")
+    print(r.example_idx, r.confidence)
 report.to_html("noise_report.html")
 ```
 
-Three loss-trajectory buckets:
+| Label | Meaning |
+|-------|---------|
+| `FLIPPED` | Label is probably wrong — re-annotate or remove |
+| `AMBIGUOUS` | Genuine annotator disagreement — get a second opinion |
+| `CLEAN` | Fine |
 
-| Label | Trajectory shape | Meaning |
-|-------|-----------------|---------|
-| `FLIPPED` | High loss variance AND high residual loss | Label is probably wrong — re-annotate or remove |
-| `AMBIGUOUS` | High loss variance, lower residual loss | Genuine annotator disagreement — get a second opinion |
-| `CLEAN` | Low variance, low residual loss | Fine |
+### Forgetting monitor
 
-**Benchmark** (`benchmarks/prefcheck/synthetic_noise.py`, 250 pairs, 20% synthetic noise):
+Measures forgetting during fine-tuning on a held set of anchor examples, and
+can replay the most-forgotten anchors back into training.
 
-| Label | Precision | Recall | F1 |
-|-------|-----------|--------|----|
-| FLIPPED | 0.746 | **0.940** | 0.832 |
-| CLEAN | 0.802 | 1.000 | 0.890 |
+```bash
+pip install "reservoir[anchor]"
+```
 
-94% of injected flipped pairs recovered on the synthetic benchmark.
+```python
+from reservoir import AnchorSet, ForgettingMonitor
 
-**Real-data benchmark** (`benchmarks/modal/prefcheck_real.py`, `Dahoas/rm-static`,
-5,000 pairs, 20% injected flips, 3 epochs, mean of seeds 42–44):
+anchors = AnchorSet.from_dataset(prior_knowledge_dataset, n=500, tags="legal-QA")
 
-| Reward model | FLIPPED precision@k | Score AUROC |
-|--------------|---------------------|-------------|
-| distilbert-base-uncased | 0.335 | 0.652 |
-| deberta-v3-base | 0.359 | 0.630 |
+monitor = ForgettingMonitor(
+    anchor_sets=[anchors],
+    metrics=["loss", "kl_to_base"],
+    eval_every_n_steps=500,
+    alert_threshold=0.5,
+    auto_replay=True,
+    replay_ratio=0.1,
+)
 
-Chance precision is 0.20. The signal is real but much weaker than on synthetic
-data, and a larger reward model did not clearly improve it. `rm-static` labels are
-themselves noisy, so precision against injected flips is a lower bound. Treat
-prefcheck as a triage aid for human review, not an automatic cleaner. Raw results
-are in `benchmarks/modal/results/`.
+trainer = Trainer(model=model, args=args, train_dataset=data, callbacks=[monitor])
+trainer.train()
+
+report = monitor.get_report()
+report.transitions   # per-example correct→wrong and wrong→correct counts
+report.to_html("forgetting_report.html")
+```
 
 ---
 
-## Wrappers
+## Guarantees
 
-```python
-from reservoir.nstep import NStepBuffer
-from reservoir.her import HERBuffer
-from reservoir.audit import AuditedPERBuffer
+| Claim | Evidence |
+|-------|----------|
+| Sampling is deterministic and reproducible under a keyed draw | Property tests against a brute-force reference |
+| The durable buffer is failure-atomic under SIGKILL | 70/70 crash tests, zero torn states |
+| The independent checker rejects forged logs | 63/63 mutants rejected |
+| The lifecycle protocol is safe within a finite scope | TLA+ model, 44,611 states |
 
-# n-step returns for Rainbow DQN
-buf = NStepBuffer(buf, n=3, gamma=0.99)
+Reservoir reports negative results. A pre-registered search for
+decision-relevant divergence between float and exact sum-trees found none
+([`docs/preregistration.md`](docs/preregistration.md)); float PER is accurate
+enough in practice. Exactness is for reproducibility and verification, not
+for training quality.
 
-# Hindsight Experience Replay for goal-conditioned tasks
-buf = HERBuffer(buf, goal_strategy="future", k=4)
-
-# Shadow exact buffer — alerts if C/numpy sampling diverges from reference
-buf = AuditedPERBuffer(buf, audit_capacity=512, audit_interval=1000)
-print(buf.audit_report())
-```
+What Reservoir does not claim is listed in
+[`docs/nonclaims.md`](docs/nonclaims.md).
 
 ---
 
 ## Install
 
 ```bash
-# Standard install (builds C extension automatically)
-pip install reservoir
+pip install reservoir                 # core
+pip install "reservoir[trl]"          # TRL integration
+pip install "reservoir[prefcheck]"    # preference noise detector
+pip install "reservoir[anchor]"       # forgetting monitor
+pip install "reservoir[atari]"        # Atari benchmark suite
 
-# With Atari benchmark suite
-pip install "reservoir[atari]"
-
-# With catastrophic forgetting monitor
-pip install "reservoir[anchor]"
-
-# With preference noise detector (requires TRL)
-pip install "reservoir[prefcheck]"
-
-# Check which backend is active
 python -c "import reservoir; print(reservoir.backend)"  # "c" or "python"
 ```
 
-A C compiler is required to build the C extension. If none is available, `reservoir`
-falls back to the pure-Python/numpy implementation transparently. To opt into
-CPU-specific tuning:
+A C compiler is needed for the C extension. Without one, Reservoir falls back
+to the numpy implementation.
+
+---
+
+## Development
 
 ```bash
-CFLAGS="-O3 -march=native" pip install reservoir
-```
-
----
-
-## Performance
-
-C-backed `FastPERBuffer` vs. Stable-Baselines3 uniform `ReplayBuffer`:
-
-| | reservoir (C backend) | SB3 ReplayBuffer (uniform) |
-|--|--|--|
-| Insert | 5μs | 2μs |
-| Sample (batch=256, cap=100K) | 0.12ms | 0.03ms |
-| Importance-sampling weights | ✓ | ✗ |
-| Priority updates | ✓ | ✗ |
-| GPU tensors | ✓ | ✓ |
-| Correctness audit | ✓ | ✗ |
-
-The sampling gap vs. uniform is inherent: PER is O(log N) tree traversal vs. O(1)
-for uniform. The C extension closes the gap vs. pure-Python significantly.
-
----
-
-## Correctness guarantees
-
-Reservoir was built around four falsifiable claims. Three are proven; one is a
-prominently reported negative result.
-
-| | Claim | Result |
-|--|--|--|
-| **T1** | PER sampling is fully deterministic and reproducible under a cryptographic draw | ✅ Alive — 363 tests |
-| **T2** | Fast sum-trees produce decision-relevant divergences from the reference implementation | ❌ Dead — falsified |
-| **T3** | Durable buffer is failure-atomic under SIGKILL | ✅ Alive — 70/70 crash tests |
-| **T4** | Independent checker verifies batches and rejects forgeries | ✅ Alive — 63/63 rejected |
-
-**T2 is a negative result, reported on purpose.** A pre-registered search (thresholds
-frozen before data collection, see [`docs/preregistration.md`](docs/preregistration.md))
-found zero decision-relevant divergences between the reference and fast sum-trees across
-135 workloads. Max total-variation distance: 8.67×10⁻¹⁹, well below the kill threshold
-of 2⁻⁴⁰. Fast PER is accurate enough in practice.
-
-**T5 — Preference noise detection.** `PreferenceNoiseDetector` recovers 94% of
-injected flipped pairs (P=0.746, R=0.940, F1=0.832) on a 250-pair synthetic benchmark
-with 20% noise. On real data the result is weaker: precision@k 0.34–0.36 against a
-0.20 base rate (see the prefcheck section above). Detection uses variance + residual
-loss trajectories. See `benchmarks/prefcheck/synthetic_noise.py` and
-`benchmarks/modal/prefcheck_real.py`.
-
-**T6 — Forgetting monitor lead time.** `ForgettingMonitor` fires an alert 120 steps
-(40% of fine-tuning) before Task A accuracy visibly collapses in a sequential
-fine-tuning experiment (Task A → Task B, 2-layer MLP, synthetic classification).
-See `benchmarks/anchor/forgetting_benchmark.py`.
-
-<details>
-<summary>Campaign detail tables</summary>
-
-**T3 — Crash Atomicity (70/70 pass, 0 torn states)**
-
-| Operations | Cut Points | Seeds | Total | Torn States |
-|-----------|-----------|-------|-------|-------------|
-| insert, update | 7 | 5 | 70 | **0** |
-
-**T4 — Forgery Detection (63/63 rejected)**
-
-| Category | Mutants | Rejected |
-|----------|---------|---------|
-| Digest bit-flips | 16 | 16 |
-| Off-by-one draw integers | 10 | 10 |
-| Swapped sampled indices | 4 | 4 |
-| Probability not in reduced form | 12 | 12 |
-| Deleted mutation records | 9 | 9 |
-| Reordered records | 5 | 5 |
-| Stale suffix replay | 7 | 7 |
-| **Total** | **63** | **63** |
-
-**T2 — Float Divergence (T2 dead)**
-
-| Grid Cells | Workloads | Divergences | Max TV Distance |
-|-----------|-----------|-------------|----------------|
-| 27 | 135 | **0** | 8.67×10⁻¹⁹ |
-
-</details>
-
----
-
-## Architecture
-
-```
-src/reservoir/
-  fast_buffer.py         FastPERBuffer — numpy/torch, vectorized tree, GPU-ready
-  c_buffer.py            CFastPERBuffer — C-backed sum-tree, same API as FastPERBuffer
-  csrc/                  C extension: sumtree.c, sumtreemodule.c → reservoir._sumtree
-  buffer.py              ExactPERBuffer — deterministic reference implementation
-  durable.py             WAL durable buffer — F_FULLFSYNC, atomic rename, crash recovery
-  attest.py              Hash-chained MutationRecord + SampleAttestation
-  draw.py                BLAKE2b-256 keyed draw — deterministic, no RNG on decision paths
-  rational.py            priority boundary computation — precise p^alpha conversion
-  nstep.py               NStepBuffer — n-step return wrapper
-  her.py                 HERBuffer — Hindsight Experience Replay
-  audit.py               AuditedPERBuffer — shadow exact buffer cross-check
-  gym_wrapper.py         GymCollector — Gymnasium environment integration
-  anchor_set.py          AnchorSet — tracks per-example forgetting severity  [anchor]
-  forgetting_monitor.py  ForgettingMonitor TrainerCallback — real-time alerts [anchor]
-  replay_scheduler.py    ReplayScheduler — PER-prioritized anchor replay      [anchor]
-  dataset_buffer.py      DatasetBuffer — prioritized sampler for HF datasets  [prefcheck]
-  prefcheck.py           PreferenceNoiseDetector — RLHF label noise detection [prefcheck]
-  trajectory.py          TrajectoryLogger — per-example loss trajectories     [prefcheck]
-  report.py              PreferenceQualityReport — noise results and export   [prefcheck]
-
-checker/verify.py        Independent verifier — zero imports from src/reservoir
-benchmarks/              Atari DQN suite, synthetic benchmarks, Modal GPU benchmarks
-spec/                    TLA+ safety model — 44,611 states, no invariant violations
-```
-
----
-
-## Running tests and campaigns
-
-```bash
-# All 363 tests
-uv run pytest tests/ -v
-
-# Forgery detection campaign (T4)
-uv run python -m campaigns.mutation
-
-# Crash atomicity campaign (T3)
-uv run python -m campaigns.crash
-
-# Float divergence campaign (T2)
-uv run python -m campaigns.divergence
-
-# TLA+ model check
-bash spec/check.sh
-
-# End-to-end DQN demo — bitwise-identical attested runs
-uv run python -m demo.tiny_dqn
+uv run pytest tests/ -v               # tests
+uv run python -m campaigns.mutation   # forgery detection campaign
+uv run python -m campaigns.crash      # crash atomicity campaign
+uv run python -m campaigns.divergence # float divergence campaign
+bash spec/check.sh                    # TLA+ model check
+make check                            # tests + checker import isolation
 ```
 
 ---
