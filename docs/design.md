@@ -276,9 +276,11 @@ Integer parameters, fixed at construction (`DecayParams`):
 | R | `rebase_slack` | extra epochs of shift headroom (default 0) |
 
 1. **Quantization — the only float boundary.** A finite raw priority x ≥ 0
-   (the binary64 value of `p^α`, as in §2) becomes `q = floor(x · 2^Q)`,
-   computed exactly through `Fraction(x)`. `q ≥ 2^P` is a `ValueError`; there
-   is no clamp and no wrap.
+   (the binary64 value of `p^α`, as in §2) becomes `q = 0` if `x = 0` and
+   `q = max(1, floor(x · 2^Q))` if `x > 0`, computed exactly through
+   `Fraction(x)`. The lower bound keeps every positive priority sampleable;
+   only an exact zero is excluded. `q ≥ 2^P` is a `ValueError`; there is no
+   upper clamp and no wrap.
 2. **Decay table.** `T[k] = floor(2^(k/h) · 2^F)` for k in [0, h), where
    `2^(k/h)` is the true real value. `T[k]` is the unique integer with
    `T[k]^h ≤ 2^(k + F·h) < (T[k] + 1)^h`.
@@ -392,7 +394,7 @@ step 2^−16 and range [0, 65536):
 
 | raw priority x | q | relative step 1/q |
 |---|---|---|
-| 1e-6 | 0 | not sampleable |
+| 1e-6 | 1 (raised from 0) | 100% |
 | 2.5e-4 (= (1e-6)^0.6) | 16 | 6.3% |
 | 1e-3 | 65 | 1.5% |
 | 1e-2 | 655 | 0.15% |
@@ -401,9 +403,10 @@ step 2^−16 and range [0, 65536):
 
 So 32 bits lose about 36 bits of relative resolution at x = 1. For priorities
 in roughly [1e-2, 6e4] the per-entry probability error is below 0.2%. It does
-matter in two cases: (a) x < 2^−16 floors to zero and the entry is never
-sampled — with α = 1 and ε = 1e-6 a zero-error entry hits this; (b) x ≥ 65536
-is rejected. Both are moved by Q (e.g. Q = 24 gives step 6e-8, range
+matter in two cases: (a) 0 < x < 2^−16 is raised to q = 1, so the entry stays
+sampleable but all such priorities are indistinguishable and over-weighted
+relative to their raw value — with α = 1 and ε = 1e-6 a zero-error entry hits
+this; (b) x ≥ 65536 is rejected. Both are moved by Q (e.g. Q = 24 gives step 6e-8, range
 [0, 256)). The product floor in 7.1(3) has absolute error below one unit of
 the same grid, so it is the same order as the quantization error. Whether any
 of this affects training is not measured and not claimed.

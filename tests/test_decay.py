@@ -311,12 +311,25 @@ class TestQuantizePriority:
 
     @given(st.floats(min_value=0.0, max_value=65535.0, allow_nan=False))
     def test_matches_exact_rational_floor(self, x: float) -> None:
-        expected = math.floor(Fraction(x) * (1 << 16))
+        floored = math.floor(Fraction(x) * (1 << 16))
+        expected = max(1, floored) if x > 0 else 0
 
         assert quantize_priority(x, self.PARAMS) == expected
 
-    def test_below_resolution_floors_to_zero(self) -> None:
-        assert quantize_priority(2.0**-17, self.PARAMS) == 0
+    @pytest.mark.parametrize("x", [2.0**-17, 1e-6, 5e-324])
+    def test_positive_below_resolution_quantizes_to_one(self, x: float) -> None:
+        assert quantize_priority(x, self.PARAMS) == 1
+
+    @pytest.mark.parametrize("x", [0.0, -0.0, 0])
+    def test_exact_zero_stays_zero(self, x: float) -> None:
+        assert quantize_priority(x, self.PARAMS) == 0
+
+    @given(st.floats(min_value=0.0, max_value=65535.0, allow_nan=False, exclude_min=True))
+    def test_positive_priority_is_always_sampleable(self, x: float) -> None:
+        q = quantize_priority(x, self.PARAMS)
+
+        for version in range(8, 12):
+            assert inflated_priority(q, version, 2, self.PARAMS) >= 1
 
     def test_largest_representable_value(self) -> None:
         largest = Fraction((1 << 32) - 1, 1 << 16)

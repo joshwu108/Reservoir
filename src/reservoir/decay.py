@@ -17,9 +17,11 @@ Parameters (all integers, fixed at construction of DecayParams):
 1. Quantization (the only float boundary). A finite raw priority x >= 0
    (already alpha-exponentiated, see rational.py) becomes
 
-       q = floor(x * 2^Q)          computed exactly via fractions.Fraction
+       q = 0                       if x == 0
+       q = max(1, floor(x * 2^Q))  if x > 0, via fractions.Fraction
 
-   and q >= 2^P is a ValueError, never a wrap or a clamp.
+   so every positive priority is sampleable and only an exact zero is
+   excluded. q >= 2^P is a ValueError, never a wrap or a clamp.
 
 2. Decay table. For k in [0, h):
 
@@ -74,6 +76,9 @@ UINT64_LIMIT: Final[int] = 1 << UINT64_BITS
 # Base priority q is a P-bit unsigned fixed-point number with Q fraction bits.
 DEFAULT_PRIORITY_BITS: Final[int] = 32
 DEFAULT_PRIORITY_FRAC_BITS: Final[int] = 16
+
+# Smallest q a positive raw priority can quantize to; keeps it sampleable.
+MIN_POSITIVE_PRIORITY: Final[int] = 1
 
 # T[k] has F fraction bits; with F = 31 every T[k] fits in uint32.
 DEFAULT_TABLE_FRAC_BITS: Final[int] = 31
@@ -261,7 +266,10 @@ def decay_table(half_life: int, table_frac_bits: int) -> tuple[int, ...]:
 
 
 def quantize_priority(x: float, params: DecayParams) -> int:
-    """Quantize a raw priority to q = floor(x * 2^Q). The float boundary.
+    """Quantize a raw priority to q. The float boundary.
+
+    q = 0 if x == 0, else max(MIN_POSITIVE_PRIORITY, floor(x * 2^Q)), so a
+    positive priority is always sampleable. Exact zero stays zero.
 
     Raises
     ------
@@ -274,7 +282,12 @@ def quantize_priority(x: float, params: DecayParams) -> int:
         raise ValueError(f"Raw priority must be finite, got {x!r}")
     if x < 0:
         raise ValueError(f"Raw priority must be non-negative, got {x!r}")
-    quantized = math.floor(Fraction(x) * (1 << params.priority_frac_bits))
+    if x == 0:
+        return 0
+    quantized = max(
+        MIN_POSITIVE_PRIORITY,
+        math.floor(Fraction(x) * (1 << params.priority_frac_bits)),
+    )
     if quantized >= 1 << params.priority_bits:
         integer_bits = params.priority_bits - params.priority_frac_bits
         raise ValueError(
