@@ -4,7 +4,10 @@ reservoir.rollout_attest — Writes RolloutBuffer events to an attestation log.
 The buffer produces frozen events (``WriteEvent``, ``AdvanceResult``) and
 sampled batches; this module turns them into the hash-chained records of
 ``reservoir.attest`` and, optionally, streams each record to a JSON-lines
-file as it is produced so a crash still leaves a verifiable prefix.
+file as it is produced. If the process dies, the file holds every record
+written so far; the checker verifies such a prefix with
+``--allow-truncated``, because the cut may fall between an
+``advance_version`` and the evictions it requires.
 
 Record order the checker relies on
 ----------------------------------

@@ -486,6 +486,11 @@ def _bump(records: list[dict], idx: int, field: str, delta: int = 1) -> list[dic
 def _decay_mutants() -> list[tuple[list[dict], str]]:
     """One mutant per rule the decay replay enforces, plus a few variants."""
     base = _build_decay_chain()
+    return _decay_protocol_mutants(base) + _decay_hardening_mutants(base)
+
+
+def _decay_protocol_mutants(base: list[dict]) -> list[tuple[list[dict], str]]:
+    """Forgeries of the decay bookkeeping: config, leaves, versions, staleness, rebase."""
     mutants: list[tuple[list[dict], str]] = []
 
     # config placement / presence
@@ -515,6 +520,13 @@ def _decay_mutants() -> list[tuple[list[dict], str]]:
     adv[advances[1]]["old_version"] = str(int(adv[advances[1]]["old_version"]) + 1)
     adv[advances[1]]["new_version"] = str(int(adv[advances[1]]["new_version"]) + 1)
     mutants.append((_recompute_digests_from(adv, advances[1]), "advance_version_old_mismatch"))
+
+    return mutants + _decay_lifecycle_mutants(base)
+
+
+def _decay_lifecycle_mutants(base: list[dict]) -> list[tuple[list[dict], str]]:
+    """Forgeries of the staleness and rebase protocol."""
+    mutants: list[tuple[list[dict], str]] = []
 
     # staleness protocol
     s = _first(base, "evict", reason="stale")
@@ -547,6 +559,35 @@ def _decay_mutants() -> list[tuple[list[dict], str]]:
     # sample after a rebase must use the shifted tree
     smp = next(j for j in range(r, len(base)) if base[j]["op"] == "sample")
     mutants.append((_bump(base, smp, "root_total", 1), "sample_total_ignores_rebase"))
+    return mutants
+
+
+def _decay_hardening_mutants(base: list[dict]) -> list[tuple[list[dict], str]]:
+    """Malformed-but-digested inputs: index range, no-op rebase, field encoding,
+    a stray reason, and configs that would stall or overflow the replay."""
+    mutants: list[tuple[list[dict], str]] = []
+    i = _first(base, "insert")
+    r = _first(base, "rebase")
+    for bad_index in (-1, 8, 10**6):
+        m = copy.deepcopy(base)
+        m[i]["index"] = bad_index
+        mutants.append((_recompute_digests_from(m, i), f"insert_index_{bad_index}"))
+    noop = copy.deepcopy(base)
+    noop[r]["new_base_epoch"] = noop[r]["old_base_epoch"]
+    mutants.append((_recompute_digests_from(noop, r), "rebase_noop"))
+    for bad_value in (5, 5.9, True, "-1", " 7"):
+        m = copy.deepcopy(base)
+        m[i]["entry_version"] = bad_value
+        mutants.append((_recompute_digests_from(m, i), f"entry_version_encoded_as_{bad_value!r}"))
+    stray = copy.deepcopy(base)
+    stray[i]["reason"] = "explicit"
+    mutants.append((_recompute_digests_from(stray, i), "reason_on_insert"))
+    hostile = copy.deepcopy(base)
+    hostile[0]["half_life"] = "200000"
+    mutants.append((_recompute_digests_from(hostile, 0), "config_half_life_hostile"))
+    budget = copy.deepcopy(base)
+    budget[0]["max_policy_age"] = "100"
+    mutants.append((_recompute_digests_from(budget, 0), "config_bit_budget_violated"))
     return mutants
 
 

@@ -25,6 +25,12 @@ Command line::
 
     python -m checker.verify run-01/attest.jsonl              # decayed log
     python -m checker.verify legacy.jsonl --capacity 1024     # log without decay_config
+    python -m checker.verify crashed.jsonl --allow-truncated  # prefix cut mid-advance
+
+A log that was being streamed when the process died may stop between an
+``advance_version`` and the evictions it requires. Every record present
+is still checked; ``--allow-truncated`` only waives the end-of-log rule
+that nothing may be left pending.
 """
 
 from __future__ import annotations
@@ -137,7 +143,11 @@ class _SumTree:
 # Verification entry point
 # ---------------------------------------------------------------------------
 
-def verify_chain(records: list[dict], capacity: Optional[int] = None) -> None:
+def verify_chain(
+    records: list[dict],
+    capacity: Optional[int] = None,
+    allow_truncated: bool = False,
+) -> None:
     """Verify the entire attestation chain from a list of records.
 
     Parameters
@@ -148,6 +158,10 @@ def verify_chain(records: list[dict], capacity: Optional[int] = None) -> None:
         Buffer capacity for the replay sum-tree. Required for a log without
         a leading ``decay_config`` record; if given for a log that has one,
         it must agree with the recorded capacity.
+    allow_truncated : bool
+        Accept a log that ends with stale evictions or a rebase still
+        pending, as a crashed writer can leave. Every record present is
+        still fully checked.
 
     Raises
     ------
@@ -156,6 +170,9 @@ def verify_chain(records: list[dict], capacity: Optional[int] = None) -> None:
     """
     if not records:
         return  # Empty chain is valid
+    for i, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise CheckerError(f"Record {i}: not a JSON object")
 
     decay = _decay_state(records[0], capacity)
     if decay is not None:
@@ -164,34 +181,38 @@ def verify_chain(records: list[dict], capacity: Optional[int] = None) -> None:
         raise CheckerError("capacity is required: the log has no decay_config record")
 
     tree = _SumTree(capacity)
+    if decay is not None:
+        decay.cfg["tree_capacity"] = tree.capacity  # power-of-two slot count
     # priorities[pos] = current integerized priority at position pos
     priorities: dict[int, int] = {}
 
     prev_digest = _GENESIS
-
     for record_idx, record in enumerate(records):
-        # 1. Check digest integrity
-        expected_digest = _digest_record(record)
-        actual_digest = record.get("digest", "")
-        if expected_digest != actual_digest:
-            raise CheckerError(
-                f"Record {record_idx}: digest mismatch. "
-                f"Expected {expected_digest!r}, got {actual_digest!r}"
-            )
-
-        # 2. Check chain linkage
-        record_prev = record.get("prev_digest", "")
-        if record_prev != prev_digest:
-            raise CheckerError(
-                f"Record {record_idx}: prev_digest mismatch. "
-                f"Expected {prev_digest!r}, got {record_prev!r}"
-            )
-
+        prev_digest = _verify_link(record, record_idx, prev_digest)
         _verify_record(record, record_idx, tree, priorities, decay)
-        prev_digest = actual_digest
 
     if decay is not None:
-        decay.require_no_pending(len(records), "end of log")
+        decay.close_capacity_run(len(records))
+        if not allow_truncated:
+            decay.require_no_pending(len(records), "end of log")
+
+
+def _verify_link(record: dict, idx: int, prev_digest: str) -> str:
+    """Check the record's digest and its link to the previous record; return its digest."""
+    expected_digest = _digest_record(record)
+    actual_digest = record.get("digest", "")
+    if expected_digest != actual_digest:
+        raise CheckerError(
+            f"Record {idx}: digest mismatch. "
+            f"Expected {expected_digest!r}, got {actual_digest!r}"
+        )
+    record_prev = record.get("prev_digest", "")
+    if record_prev != prev_digest:
+        raise CheckerError(
+            f"Record {idx}: prev_digest mismatch. "
+            f"Expected {prev_digest!r}, got {record_prev!r}"
+        )
+    return actual_digest
 
 
 def _verify_record(
@@ -203,6 +224,8 @@ def _verify_record(
 ) -> None:
     """Semantic checks for one record (digest and chain linkage already passed)."""
     op = record.get("op")
+    if decay is not None:
+        decay.note_record(op, record.get("reason"), idx)
 
     if op == "decay_config":
         if idx != 0:
@@ -216,6 +239,8 @@ def _verify_record(
             decay.on_mutation(record, idx, tree)  # type: ignore[union-attr]
         elif decay is not None:
             raise CheckerError(f"Record {idx}: {op} without decay fields in a decayed log")
+        elif "reason" in record:
+            raise CheckerError(f"Record {idx}: reason requires the decay fields")
 
     elif op == "sample":
         if decay is not None:
@@ -229,7 +254,7 @@ def _verify_record(
 
     elif op == "rebase":
         _require_decay(decay, idx, op)
-        decay.require_no_pending(idx, op)  # type: ignore[union-attr]
+        decay.require_ready_for_rebase(idx)  # type: ignore[union-attr]
         decay.on_rebase(record, idx, tree)  # type: ignore[union-attr]
 
     else:
@@ -256,8 +281,8 @@ def _require_decay(decay: Optional[DecayState], idx: int, op: str) -> None:
 
 
 def _guard_pending(decay: Optional[DecayState], record: dict, idx: int) -> None:
-    """While expired entries await eviction, only their stale evicts may appear."""
-    if decay is None or not decay.pending_stale:
+    """While evictions or a rebase are pending, only stale evicts of pending slots may appear."""
+    if decay is None or not (decay.pending_stale or decay.pending_rebase):
         return
     is_stale_evict = record["op"] == "evict" and record.get("reason") == "stale"
     if not is_stale_evict or record["index"] not in decay.pending_stale:
@@ -276,8 +301,15 @@ def _verify_mutation(
         old_p = int(record["old_priority_int"])
         new_p = int(record["new_priority_int"])
         op = record["op"]
-    except (KeyError, ValueError) as e:
+    except (KeyError, ValueError, TypeError) as e:
         raise CheckerError(f"Record {idx}: malformed mutation record: {e}") from e
+
+    # index is a JSON integer. A negative value would address an internal
+    # node of the flat tree array, so the range check is a security check.
+    if type(pos) is not int or not (0 <= pos < tree.capacity):
+        raise CheckerError(
+            f"Record {idx}: index must be an int in [0, {tree.capacity}), got {pos!r}"
+        )
 
     if old_p < 0 or new_p < 0:
         raise CheckerError(
@@ -382,15 +414,17 @@ def _verify_sample(
             )
 
 
-def verify_json_lines(data: str, capacity: Optional[int] = None) -> None:
+def verify_json_lines(
+    data: str, capacity: Optional[int] = None, allow_truncated: bool = False
+) -> None:
     """Verify an attestation chain from newline-separated JSON.
 
     Parameters
     ----------
     data : str
         Newline-separated JSON records (as produced by AttestationLog.to_json_lines).
-    capacity : int, optional
-        Buffer capacity for tree replay; see ``verify_chain``.
+    capacity, allow_truncated
+        See ``verify_chain``.
 
     Raises
     ------
@@ -402,7 +436,7 @@ def verify_json_lines(data: str, capacity: Optional[int] = None) -> None:
         if not line:
             continue
         records.append(json.loads(line))
-    verify_chain(records, capacity)
+    verify_chain(records, capacity, allow_truncated)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -416,13 +450,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--capacity", type=int, default=None,
         help="buffer capacity; required for logs without a decay_config record",
     )
+    parser.add_argument(
+        "--allow-truncated", action="store_true",
+        help="accept a log cut off mid-advance (a crashed writer); records present are still checked",
+    )
     args = parser.parse_args(argv)
     try:
         with open(args.path, encoding="utf-8") as f:
             data = f.read()
         n_records = sum(1 for line in data.strip().split("\n") if line)
-        verify_json_lines(data, args.capacity)
-    except (OSError, ValueError, CheckerError) as exc:
+        verify_json_lines(data, args.capacity, args.allow_truncated)
+    except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, CheckerError) as exc:
+        # Everything a malformed file can raise is reported as a failure, never a traceback.
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
     print(f"OK: {n_records} records verified")

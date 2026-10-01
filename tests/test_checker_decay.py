@@ -83,7 +83,7 @@ class TestIndependentDerivation:
 
     def test_inflated_priority_matches_library(self) -> None:
         p = DecayParams(half_life=3, max_policy_age=9, capacity=16)
-        cfg = dict(half_life=3, priority_bits=32, table_frac_bits=31)
+        cfg = dict(half_life=3, priority_bits=32, table_frac_bits=31, max_shift=p.max_shift)
         for q in (0, 1, 5, 65536, (1 << 32) - 1):
             for t in range(0, 12):
                 for base in range(0, 2):
@@ -290,6 +290,113 @@ class TestRejects:
         with pytest.raises(CheckerError, match="root_total"):
             verify_chain(rechain(records, s))
 
+    @pytest.mark.parametrize("bad", [-1, 8, 1000, "1", 1.0, True])
+    def test_bad_index_rejected(self, bad: object) -> None:
+        records, _ = build_decayed_log()
+        i = first_index(records, "insert")
+        records[i]["index"] = bad
+        with pytest.raises(CheckerError, match="index"):
+            verify_chain(rechain(records, i))
+
+    def test_noop_rebase_rejected(self) -> None:
+        records, _ = build_decayed_log()
+        r = first_index(records, "rebase")
+        records[r]["new_base_epoch"] = records[r]["old_base_epoch"]
+        with pytest.raises(CheckerError, match="canonical"):
+            verify_chain(rechain(records, r))
+
+    def test_rebase_not_due_rejected(self) -> None:
+        log = AttestationLog()
+        buf = RolloutBuffer(capacity=8, half_life=4, max_policy_age=8, rebase_slack=5, attest=log)
+        buf.add_group("a", 0, rollouts([1.0, 0.0]))
+        buf.advance(13)  # newest epoch 3, max_shift 7: no rebase
+        records = [dict(r) for r in log.records]
+        n = buf._op_counter
+        records.append({
+            "op": "rebase", "old_base_epoch": "0", "new_base_epoch": "1",
+            "root_total_before": str(buf.total), "root_total_after": str(buf.total >> 1),
+            "op_counter": n,
+        })
+        with pytest.raises(CheckerError, match="not due"):
+            verify_chain(rechain(records, len(records) - 1))
+
+    def test_skipped_due_rebase_rejected(self) -> None:
+        # Advance past the shift budget (which forces a rebase), drop the rebase
+        # record, and continue with another advance. Nothing else is wrong, so
+        # only the "rebase is due" rule can reject it.
+        log = AttestationLog()
+        buf = RolloutBuffer(capacity=8, half_life=1, max_policy_age=2, attest=log)  # max_shift 2
+        buf.add_group("a", 0, rollouts([1.0, 0.0]))
+        buf.advance(3)  # both entries expire, then a rebase to epoch 1
+        records = [dict(r) for r in log.records]
+        r = first_index(records, "rebase")
+        del records[r]
+        records.append({"op": "advance_version", "old_version": "3", "new_version": "4", "op_counter": 0})
+        with pytest.raises(CheckerError, match="rebase is due"):
+            verify_chain(rechain(records, r))
+
+    def test_hostile_half_life_rejected_quickly(self) -> None:
+        records, _ = build_decayed_log()
+        records[0]["half_life"] = "200000"
+        with pytest.raises(CheckerError, match="half_life"):
+            verify_chain(rechain(records, 0))
+
+    def test_config_bit_budget_enforced(self) -> None:
+        records, _ = build_decayed_log()
+        records[0]["max_policy_age"] = "100"  # max_shift 100 with half_life 1
+        with pytest.raises(CheckerError, match="64-bit budget"):
+            verify_chain(rechain(records, 0))
+
+    @pytest.mark.parametrize("value", [5, 5.9, True, " 7", "1_0", "-1", "+3"])
+    def test_integer_fields_must_be_decimal_strings(self, value: object) -> None:
+        records, _ = build_decayed_log()
+        i = first_index(records, "insert")
+        records[i]["entry_version"] = value
+        with pytest.raises(CheckerError, match="decimal string"):
+            verify_chain(rechain(records, i))
+
+    def test_unnecessary_capacity_evict_rejected(self) -> None:
+        log = AttestationLog()
+        buf = RolloutBuffer(capacity=8, max_policy_age=100, attest=log)
+        buf.add_group("a", 0, rollouts([1.0, 0.0]))
+        buf.add_group("b", 1, rollouts([1.0, 0.0]))
+        records = [dict(r) for r in log.records]
+        i = first_index(records, "insert", index=2)
+        q, t = buf.base_priority(0), buf.entry_version(0)
+        forged = {
+            "op": "evict", "index": 0, "old_priority_int": str(buf.leaf(0)),
+            "new_priority_int": "0", "op_counter": 0, "base_priority_int": str(q),
+            "entry_version": str(t), "base_epoch": "0", "reason": "capacity",
+        }
+        records.insert(i, forged)  # 6 slots were free; evicting one for a 2-rollout group is a lie
+        with pytest.raises(CheckerError, match="capacity eviction"):
+            verify_chain(rechain(records, i))
+
+    def test_reason_on_insert_rejected(self) -> None:
+        records, _ = build_decayed_log()
+        i = first_index(records, "insert")
+        records[i]["reason"] = "explicit"
+        with pytest.raises(CheckerError, match="reason"):
+            verify_chain(rechain(records, i))
+
+    def test_truncated_prefix_needs_the_flag(self) -> None:
+        records, _ = build_decayed_log()
+        a = first_index(records, "advance_version", old_version="2")
+        prefix = records[: a + 1]  # ends right after an advance, evictions still pending
+        with pytest.raises(CheckerError, match="end of log"):
+            verify_chain(prefix)
+        verify_chain(prefix, allow_truncated=True)
+        # The flag waives only the end-of-log rule; a forgery inside the prefix still fails.
+        bad = rechain(prefix)
+        bad[2]["new_priority_int"] = "1"
+        with pytest.raises(CheckerError, match="recomputed"):
+            verify_chain(rechain(bad, 2), allow_truncated=True)
+
+    def test_non_object_record_rejected(self) -> None:
+        records, _ = build_decayed_log()
+        with pytest.raises(CheckerError, match="JSON object"):
+            verify_chain(records[:3] + [["not", "a", "record"]])
+
     def test_unknown_op_still_rejected(self) -> None:
         records, _ = build_decayed_log()
         records[3]["op"] = "mystery"
@@ -325,6 +432,22 @@ class TestCommandLine:
         result = self.run(path)
         assert result.returncode != 0
         assert "recomputed" in result.stderr
+
+    def test_malformed_file_reports_fail_not_traceback(self, tmp_path: Path) -> None:
+        path = tmp_path / "bad.jsonl"
+        path.write_text('["not", "a", "record"]\n')
+        result = self.run(path)
+        assert result.returncode == 1
+        assert result.stderr.startswith("FAIL:")
+        assert "Traceback" not in result.stderr
+
+    def test_allow_truncated_flag(self, tmp_path: Path) -> None:
+        records, _ = build_decayed_log()
+        a = first_index(records, "advance_version", old_version="2")
+        path = tmp_path / "prefix.jsonl"
+        path.write_text(to_lines(records[: a + 1]) + "\n")
+        assert self.run(path).returncode == 1
+        assert self.run(path, "--allow-truncated").returncode == 0
 
     def test_legacy_log_needs_capacity_flag(self, tmp_path: Path) -> None:
         log = AttestationLog()

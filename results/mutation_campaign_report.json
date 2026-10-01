@@ -1,7 +1,7 @@
 {
   "campaign": "T4_mutation",
-  "total_mutants": 89,
-  "rejected": 89,
+  "total_mutants": 101,
+  "rejected": 101,
   "survived": [],
   "categories": [
     {
@@ -41,8 +41,8 @@
     },
     {
       "name": "decay",
-      "total": 26,
-      "rejected": 26
+      "total": 38,
+      "rejected": 38
     }
   ],
   "pass": true
