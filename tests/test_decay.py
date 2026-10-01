@@ -117,6 +117,60 @@ def params_and_entries(draw: st.DrawFn) -> tuple[DecayParams, int, list[tuple[in
     return params, current_version, entries
 
 
+@st.composite
+def rebase_case(draw: st.DrawFn) -> tuple[DecayParams, int, list[tuple[int, int]], int]:
+    """Valid params, current version, live entries, and a version advance.
+
+    Used by the rebase test. The old version of this strategy drew
+    ``advance`` independently and then ``assume``-filtered away every case
+    where all entries expired, which was most of them and tripped
+    Hypothesis's filter_too_much health check. This one *constructs* a
+    valid case instead:
+
+    - one "survivor" entry has a positive base priority q and is written
+      recently enough that it is still live after the advance, so the
+      rebased tree always has a non-zero total;
+    - ``max_policy_age`` starts at 1 because with 0 any advance >= 1
+      expires every entry and no survivor is possible;
+    - the entries are shuffled so the survivor is not always leaf 0.
+    """
+    half_life = draw(st.integers(1, 24))
+    capacity = draw(st.integers(1, 16))
+    max_policy_age = draw(st.integers(1, half_life * 20))
+    rebase_slack = draw(st.integers(0, 3))
+    params = DecayParams(
+        half_life=half_life,
+        max_policy_age=max_policy_age,
+        capacity=capacity,
+        rebase_slack=rebase_slack,
+    )
+    current_version = draw(st.integers(0, 5000))
+    oldest = max(0, current_version - max_policy_age)
+    advance = draw(st.integers(1, max_policy_age))
+    # An entry stays live while current_version - entry_version <= max_policy_age.
+    # The survivor is written at most (max_policy_age - advance) versions ago,
+    # so after advancing by `advance` its age is at most max_policy_age.
+    survivor_version = draw(
+        st.integers(
+            max(oldest, current_version - (max_policy_age - advance)),
+            current_version,
+        )
+    )
+    max_q = (1 << params.priority_bits) - 1
+    survivor = (draw(st.integers(1, max_q)), survivor_version)
+    others = draw(
+        st.lists(
+            st.tuples(st.integers(0, max_q), st.integers(oldest, current_version)),
+            min_size=0,
+            max_size=capacity - 1,
+        )
+    )
+    # Shuffle so zero-weight and expired entries can land at leaf 0 too;
+    # prefix_sum_locate must skip leading zero-weight leaves correctly.
+    entries = draw(st.permutations([survivor] + others))
+    return params, current_version, entries, advance
+
+
 # ---------------------------------------------------------------------------
 # Decay table
 # ---------------------------------------------------------------------------
@@ -615,14 +669,13 @@ class TestRebase:
         with pytest.raises(ValueError, match="lose"):
             rebase_priorities([8, 16, 3], 3)
 
-    @given(case=params_and_entries(), advance=st.integers(1, 400))
+    @given(case=rebase_case())
     @settings(max_examples=300, deadline=None)
     def test_rebase_loses_no_bits_and_changes_no_sampling_decision(
         self,
-        case: tuple[DecayParams, int, list[tuple[int, int]]],
-        advance: int,
+        case: tuple[DecayParams, int, list[tuple[int, int]], int],
     ) -> None:
-        params, current_version, entries = case
+        params, current_version, entries, advance = case
         old_base = canonical_base_epoch(current_version, params)
         later_version = current_version + advance
         new_base = canonical_base_epoch(later_version, params)
@@ -631,9 +684,11 @@ class TestRebase:
         survivors = [
             (q, v) for q, v in entries if not is_expired(v, later_version, params)
         ]
-        assume(survivors)
         old_leaves = [inflated_priority(q, v, old_base, params) for q, v in survivors]
-        assume(sum(old_leaves) > 0)
+        # rebase_case() guarantees a live survivor with positive weight. If a
+        # future edit to the strategy breaks that, fail here with a clear
+        # message rather than inside the tree code below.
+        assert survivors and sum(old_leaves) > 0
 
         new_leaves = rebase_priorities(old_leaves, shift)
 
