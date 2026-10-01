@@ -59,7 +59,11 @@ class RolloutAttester:
     """
 
     def __init__(
-        self, target: AttestTarget, params: DecayParams, reset_age_on_update: bool
+        self,
+        target: AttestTarget,
+        params: DecayParams,
+        reset_age_on_update: bool,
+        overwrite: bool = False,
     ) -> None:
         self._log: Optional[AttestationLog] = None
         self._file: Optional[IO[str]] = None
@@ -69,7 +73,10 @@ class RolloutAttester:
             self._log = target
         elif isinstance(target, (str, Path)):
             self._log = AttestationLog()
-            self._file = open(Path(target), "x", encoding="utf-8")
+            # "x" refuses an existing file so two runs never share one chain.
+            # The durable buffer passes overwrite=True because it rewrites
+            # the file from the recovered state, which is the source of truth.
+            self._file = open(Path(target), "w" if overwrite else "x", encoding="utf-8")
         else:
             raise TypeError(
                 "attest must be an AttestationLog, a path, or None; "
@@ -88,10 +95,12 @@ class RolloutAttester:
 
     @property
     def enabled(self) -> bool:
+        """False when the buffer was built with ``attest=None``; every record call is then a no-op."""
         return self._log is not None
 
     @property
     def log(self) -> Optional[AttestationLog]:
+        """The in-memory log being appended to, or None when disabled."""
         return self._log
 
     def record_write(self, event: WriteEvent, op_counter: int) -> None:
@@ -163,6 +172,27 @@ class RolloutAttester:
             op_counter=op_counter, root_total=root_total, samples=entries
         )
         self._emit(record)
+
+    def restore(self, records: list[dict]) -> None:
+        """Replace the log with recovered records and rewrite the mirror file.
+
+        With attestation off, a non-empty ``records`` is an error: the
+        saved state came from a buffer that was attesting, and silently
+        dropping its log would break the chain for later records.
+        """
+        if self._log is None:
+            if records:
+                raise ValueError(
+                    "saved state carries an attestation log; reopen with attest=<path>"
+                )
+            return
+        self._log.restore(records)
+        if self._file is not None:
+            self._file.seek(0)
+            self._file.truncate()
+            for record in records:
+                self._file.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+            self._file.flush()
 
     def _emit(self, record: dict) -> None:
         """Mirror one record to the file as a canonical JSON line (same form as the log)."""

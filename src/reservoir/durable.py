@@ -238,6 +238,139 @@ def _deserialize_state(raw: dict) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Generic protocol: any buffer that can snapshot itself to a JSON dict can
+# use these two functions. DurableBuffer (classic PER) and
+# DurableRolloutBuffer (rollout replay) both do.
+# ---------------------------------------------------------------------------
+
+_STATE_FILE = "state.json"
+
+
+def _save_state_file(directory: Path, state: dict) -> None:
+    """Atomically replace state.json (tmp file, fsync, rename, directory fsync)."""
+    data = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    _atomic_write(directory / _STATE_FILE, data, directory)
+
+
+class CorruptStateError(ValueError):
+    """``state.json`` exists but cannot be read as a state dict."""
+
+
+def _read_state_file(directory: Path, strict: bool) -> Optional[dict]:
+    """``state.json`` as a dict, None if absent; unreadable is None or, if strict, an error."""
+    state_file = directory / _STATE_FILE
+    if not state_file.exists():
+        return None
+    try:
+        state = json.loads(state_file.read_bytes())
+    except (json.JSONDecodeError, OSError) as exc:
+        if strict:
+            raise CorruptStateError(f"{state_file} is unreadable: {exc}") from exc
+        return None
+    if not isinstance(state, dict):
+        if strict:
+            raise CorruptStateError(f"{state_file} does not hold a state object")
+        return None
+    return state
+
+
+def recover_state(directory: Path, strict: bool = False) -> Optional[dict]:
+    """Return the committed state for ``directory``, or None if it is fresh.
+
+    With ``strict=True`` an unreadable or non-dict ``state.json`` raises
+    ``CorruptStateError`` instead of being treated as a fresh directory,
+    so data is never silently discarded. ``DurableBuffer`` keeps the lenient
+    legacy behaviour; ``DurableRolloutBuffer`` is strict.
+
+    Resolves whatever a crash left behind:
+
+    - no ``intent.json``: nothing was in flight; return ``state.json`` if it
+      exists and parses, else None (fresh or unreadable).
+    - ``intent.json`` plus a complete ``seg_0``: the operation committed;
+      return the post-state.
+    - ``intent.json`` without a readable segment: the operation did not
+      commit; return the pre-state the intent carried.
+
+    In every case the intent and segment files are removed and the chosen
+    state is written back to ``state.json`` so a second recovery is a
+    no-op. The caller decides what to do with an unreadable state.
+    """
+    intent_file = directory / _INTENT_FILE
+    intent_tmp = directory / _INTENT_TMP
+
+    if not intent_file.exists():
+        if intent_tmp.exists():
+            intent_tmp.unlink()
+        return _read_state_file(directory, strict)
+
+    try:
+        intent = json.loads(intent_file.read_bytes())
+    except (json.JSONDecodeError, OSError):
+        _clear_intent(directory)  # corrupt intent: nothing committed
+        return recover_state(directory)
+
+    post_state = _read_segment(directory, 0)
+    state = post_state if post_state is not None else intent.get("pre_state")
+    # state.json first, then the intent: a crash between the two leaves the
+    # intent in place and the next recovery simply redoes this (idempotent).
+    # The other order could expose the post-state once and then lose it.
+    if state is not None:
+        _save_state_file(directory, state)
+    _clear_intent(directory)
+    seg_path = _segment_path(directory, 0)
+    if seg_path.exists():
+        seg_path.unlink()
+    return state
+
+
+def durably_apply(
+    directory: Path, operation_name: str, state_fn, apply_fn, on_abort=None
+) -> Any:
+    """Run ``apply_fn`` so that a crash leaves exactly the pre- or post-state.
+
+    ``state_fn`` must return the buffer's full state as a JSON-serialisable
+    dict; it is called once before and once after ``apply_fn``. Protocol:
+
+      1. write intent (operation name + pre-state) to intent.json.tmp, fsync
+      2. apply the operation in memory
+      3. write the post-state to seg_0, fsync
+      4. rename intent.json.tmp -> intent.json  (the atomic commit point)
+      5. fsync the directory
+      6. write state.json, then remove the intent and the segment
+
+    If anything raises before the commit point (``apply_fn`` itself, or
+    writing the segment), the intent is removed, ``on_abort(pre_state)``
+    is called so the caller can roll its memory back to the pre-state, and
+    the error propagates. An operation that raises *after* mutating (for
+    example a sample that evicts stale entries and then finds the buffer
+    empty) is therefore undone in memory too, and memory never diverges
+    from disk.
+    """
+    pre_state = state_fn()
+    _write_intent(directory, {"op": operation_name, "pre_state": pre_state})
+    try:
+        result = apply_fn()
+        post_state = state_fn()
+        _write_segment(directory, 0, post_state)
+        _commit_intent(directory)
+    except BaseException:
+        _clear_intent(directory)
+        seg_path = _segment_path(directory, 0)
+        if seg_path.exists():
+            seg_path.unlink()
+        if on_abort is not None:
+            on_abort(pre_state)
+        raise
+
+    _save_state_file(directory, post_state)
+    _clear_intent(directory)
+    seg_path = _segment_path(directory, 0)
+    if seg_path.exists():
+        seg_path.unlink()
+    return result
+
+
+# ---------------------------------------------------------------------------
 # DurableBuffer
 # ---------------------------------------------------------------------------
 
@@ -325,98 +458,27 @@ class DurableBuffer:
         self._buf = buf
 
     def _recover_or_init(self):
-        """Recover from any on-disk state or initialize fresh."""
-        intent_file = self.directory / _INTENT_FILE
-        intent_tmp = self.directory / _INTENT_TMP
+        """Recover from any on-disk state or initialize fresh.
 
-        if not intent_file.exists():
-            # No committed intent: clean state (or fresh)
-            if intent_tmp.exists():
-                intent_tmp.unlink()
-            state_file = self.directory / "state.json"
-            if state_file.exists():
-                try:
-                    state = json.loads(state_file.read_bytes())
-                    buf = self._make_fresh_buffer()
-                    self._buf = buf
-                    self._apply_state(state)
-                    return self._buf
-                except (json.JSONDecodeError, KeyError):
-                    pass
-            return self._make_fresh_buffer()
-
-        # intent.json exists — check if post-commit recovery is possible
-        try:
-            intent = json.loads(intent_file.read_bytes())
-        except (json.JSONDecodeError, OSError):
-            # Corrupt intent: discard
-            _clear_intent(self.directory)
-            return self._recover_or_init()
-
-        post_state = _read_segment(self.directory, 0)
-        if post_state is not None:
-            # Post-commit: apply the operation
-            self._buf = self._make_fresh_buffer()
-            self._apply_state(post_state)
-            _clear_intent(self.directory)
-            self._save_state()
-            return self._buf
-        else:
-            # Pre-commit: restore from pre-state if available
-            pre_state = intent.get("pre_state")
-            _clear_intent(self.directory)
-            if pre_state is not None:
+        An unreadable or structurally invalid state starts fresh, matching
+        the original behaviour of this buffer.
+        """
+        state = recover_state(self.directory)
+        self._buf = self._make_fresh_buffer()
+        if state is not None:
+            try:
+                self._apply_state(state)
+            except (KeyError, ValueError, TypeError):
                 self._buf = self._make_fresh_buffer()
-                self._apply_state(pre_state)
-                self._save_state()
-                return self._buf
-            return self._make_fresh_buffer()
+        return self._buf
 
     def _save_state(self) -> None:
         """Atomically save current state to state.json."""
-        state = self._state_dict()
-        data = json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        _atomic_write(self.directory / "state.json", data, self.directory)
+        _save_state_file(self.directory, self._state_dict())
 
     def _durably_apply(self, operation_name: str, apply_fn) -> Any:
-        """Execute an operation with crash-atomic durability.
-
-        Protocol:
-          1. Write intent (pre_state + operation_name) to intent.json.tmp
-          2. fsync intent
-          3. Compute post_state
-          4. Write post_state to seg_0.json
-          5. fsync seg_0
-          6. rename intent.json.tmp -> intent.json
-          7. fsync parent directory
-          8. Clean up: remove intent.json and seg_0
-          9. Update state.json
-        """
-        pre_state = self._state_dict()
-
-        # Write intent
-        intent = {"op": operation_name, "pre_state": pre_state}
-        _write_intent(self.directory, intent)
-
-        # Apply the operation to the in-memory buffer
-        result = apply_fn()
-
-        # Write post-state segment
-        post_state = self._state_dict()
-        _write_segment(self.directory, 0, post_state)
-
-        # Commit (rename)
-        _commit_intent(self.directory)
-
-        # Clean up temp files
-        seg_path = _segment_path(self.directory, 0)
-        if seg_path.exists():
-            seg_path.unlink()
-        _clear_intent(self.directory)
-
-        # Persist final state
-        self._save_state()
-        return result
+        """Execute an operation with crash-atomic durability (see ``durably_apply``)."""
+        return durably_apply(self.directory, operation_name, self._state_dict, apply_fn)
 
     def insert(self, transition, td_error: Optional[float] = None) -> int:
         """Durably insert a transition."""

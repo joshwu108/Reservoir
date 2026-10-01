@@ -1,6 +1,6 @@
 {
-  "total": 70,
-  "passed": 70,
+  "total": 140,
+  "passed": 140,
   "torn": 0,
   "failed": 0,
   "results": [
@@ -233,8 +233,8 @@
       "op": "insert",
       "cut": "after_rename_before_dir_fsync",
       "seed": 0,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -242,8 +242,8 @@
       "op": "insert",
       "cut": "after_rename_before_dir_fsync",
       "seed": 1,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -251,8 +251,8 @@
       "op": "insert",
       "cut": "after_rename_before_dir_fsync",
       "seed": 2,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -260,8 +260,8 @@
       "op": "insert",
       "cut": "after_rename_before_dir_fsync",
       "seed": 3,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -269,8 +269,8 @@
       "op": "insert",
       "cut": "after_rename_before_dir_fsync",
       "seed": 4,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -278,8 +278,8 @@
       "op": "insert",
       "cut": "after_dir_fsync",
       "seed": 0,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -287,8 +287,8 @@
       "op": "insert",
       "cut": "after_dir_fsync",
       "seed": 1,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -296,8 +296,8 @@
       "op": "insert",
       "cut": "after_dir_fsync",
       "seed": 2,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -305,8 +305,8 @@
       "op": "insert",
       "cut": "after_dir_fsync",
       "seed": 3,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -314,8 +314,8 @@
       "op": "insert",
       "cut": "after_dir_fsync",
       "seed": 4,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -548,13 +548,328 @@
       "op": "update",
       "cut": "after_rename_before_dir_fsync",
       "seed": 0,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "update",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 1,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "update",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 2,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "update",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 3,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "update",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 4,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "update",
+      "cut": "after_dir_fsync",
+      "seed": 0,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "update",
+      "cut": "after_dir_fsync",
+      "seed": 1,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "update",
+      "cut": "after_dir_fsync",
+      "seed": 2,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "update",
+      "cut": "after_dir_fsync",
+      "seed": 3,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "update",
+      "cut": "after_dir_fsync",
+      "seed": 4,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_intent_write",
+      "seed": 0,
       "matches_pre": false,
       "matches_post": true,
       "torn": false,
       "passed": true
     },
     {
-      "op": "update",
+      "op": "rollout_add_group",
+      "cut": "after_intent_write",
+      "seed": 1,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_intent_write",
+      "seed": 2,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_intent_write",
+      "seed": 3,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_intent_write",
+      "seed": 4,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_intent_fsync",
+      "seed": 0,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_intent_fsync",
+      "seed": 1,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_intent_fsync",
+      "seed": 2,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_intent_fsync",
+      "seed": 3,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_intent_fsync",
+      "seed": 4,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "mid_segment_write",
+      "seed": 0,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "mid_segment_write",
+      "seed": 1,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "mid_segment_write",
+      "seed": 2,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "mid_segment_write",
+      "seed": 3,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "mid_segment_write",
+      "seed": 4,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_segment_fsync",
+      "seed": 0,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_segment_fsync",
+      "seed": 1,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_segment_fsync",
+      "seed": 2,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_segment_fsync",
+      "seed": 3,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_segment_fsync",
+      "seed": 4,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "before_rename",
+      "seed": 0,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "before_rename",
+      "seed": 1,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "before_rename",
+      "seed": 2,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "before_rename",
+      "seed": 3,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "before_rename",
+      "seed": 4,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 0,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
       "cut": "after_rename_before_dir_fsync",
       "seed": 1,
       "matches_pre": false,
@@ -563,7 +878,7 @@
       "passed": true
     },
     {
-      "op": "update",
+      "op": "rollout_add_group",
       "cut": "after_rename_before_dir_fsync",
       "seed": 2,
       "matches_pre": false,
@@ -572,7 +887,7 @@
       "passed": true
     },
     {
-      "op": "update",
+      "op": "rollout_add_group",
       "cut": "after_rename_before_dir_fsync",
       "seed": 3,
       "matches_pre": false,
@@ -581,7 +896,7 @@
       "passed": true
     },
     {
-      "op": "update",
+      "op": "rollout_add_group",
       "cut": "after_rename_before_dir_fsync",
       "seed": 4,
       "matches_pre": false,
@@ -590,7 +905,7 @@
       "passed": true
     },
     {
-      "op": "update",
+      "op": "rollout_add_group",
       "cut": "after_dir_fsync",
       "seed": 0,
       "matches_pre": false,
@@ -599,7 +914,7 @@
       "passed": true
     },
     {
-      "op": "update",
+      "op": "rollout_add_group",
       "cut": "after_dir_fsync",
       "seed": 1,
       "matches_pre": false,
@@ -608,7 +923,7 @@
       "passed": true
     },
     {
-      "op": "update",
+      "op": "rollout_add_group",
       "cut": "after_dir_fsync",
       "seed": 2,
       "matches_pre": false,
@@ -617,7 +932,7 @@
       "passed": true
     },
     {
-      "op": "update",
+      "op": "rollout_add_group",
       "cut": "after_dir_fsync",
       "seed": 3,
       "matches_pre": false,
@@ -626,7 +941,322 @@
       "passed": true
     },
     {
-      "op": "update",
+      "op": "rollout_add_group",
+      "cut": "after_dir_fsync",
+      "seed": 4,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_intent_write",
+      "seed": 0,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_intent_write",
+      "seed": 1,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_intent_write",
+      "seed": 2,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_intent_write",
+      "seed": 3,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_intent_write",
+      "seed": 4,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_intent_fsync",
+      "seed": 0,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_intent_fsync",
+      "seed": 1,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_intent_fsync",
+      "seed": 2,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_intent_fsync",
+      "seed": 3,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_intent_fsync",
+      "seed": 4,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "mid_segment_write",
+      "seed": 0,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "mid_segment_write",
+      "seed": 1,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "mid_segment_write",
+      "seed": 2,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "mid_segment_write",
+      "seed": 3,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "mid_segment_write",
+      "seed": 4,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_segment_fsync",
+      "seed": 0,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_segment_fsync",
+      "seed": 1,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_segment_fsync",
+      "seed": 2,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_segment_fsync",
+      "seed": 3,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_segment_fsync",
+      "seed": 4,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "before_rename",
+      "seed": 0,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "before_rename",
+      "seed": 1,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "before_rename",
+      "seed": 2,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "before_rename",
+      "seed": 3,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "before_rename",
+      "seed": 4,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 0,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 1,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 2,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 3,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 4,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_dir_fsync",
+      "seed": 0,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_dir_fsync",
+      "seed": 1,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_dir_fsync",
+      "seed": 2,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_dir_fsync",
+      "seed": 3,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
       "cut": "after_dir_fsync",
       "seed": 4,
       "matches_pre": false,

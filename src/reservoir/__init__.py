@@ -2,7 +2,7 @@
 with Crash Atomicity and Sampling Attestation.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # Exact buffer (pure Python, arbitrary-precision integer arithmetic)
 from reservoir.buffer import ExactPERBuffer
@@ -23,10 +23,20 @@ from reservoir.fast_buffer import FastPERBuffer as PyFastPERBuffer
 # Read-only. Reflects import-time selection. Do not mutate at runtime.
 backend: str = _BACKEND
 
+# LLM-RL rollout replay: exact age-decayed priorities, attested, crash-atomic.
+from reservoir.rollout import Rollout, RolloutGroup
+from reservoir.rollout_buffer import RolloutBatch, RolloutBuffer
+from reservoir.durable_rollout import DurableRolloutBuffer
+
 __all__ = [
     "ExactPERBuffer",
     "FastPERBuffer",
     "PyFastPERBuffer",
+    "Rollout",
+    "RolloutGroup",
+    "RolloutBatch",
+    "RolloutBuffer",
+    "DurableRolloutBuffer",
     "backend",
     "__version__",
 ]

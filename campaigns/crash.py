@@ -7,7 +7,10 @@ recovered logical state against the oracle pre-state and post-state.
 
 Exactly one match required (never a torn hybrid).
 
-Operation types: insert, update
+Operation types:
+  - insert, update            (classic DurableBuffer)
+  - rollout_add_group,        (DurableRolloutBuffer; the add forces stale
+    rollout_update             evictions and a rebase inside one operation)
 Cut points:
   - after_intent_write
   - after_intent_fsync
@@ -38,6 +41,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.reservoir.buffer import ExactPERBuffer, Transition
 from src.reservoir.durable import DurableBuffer
+from reservoir.durable_rollout import DurableRolloutBuffer
+from reservoir.rollout import Rollout
 
 
 # ---------------------------------------------------------------------------
@@ -202,10 +207,86 @@ def run_crash_test(
 
 
 # ---------------------------------------------------------------------------
+# Rollout buffer variant
+# ---------------------------------------------------------------------------
+
+_ROLLOUT_KW = dict(capacity=8, half_life=1, max_policy_age=2)
+
+
+def _rollouts(rewards):
+    return [Rollout(tokens=[1, 2], logprobs=[-0.1, -0.2], reward=r) for r in rewards]
+
+
+def _rollout_prepare(directory: str, seed: int) -> None:
+    """Two groups at versions 0 and 1; the add at version 4 will expire both and rebase."""
+    buf = DurableRolloutBuffer(directory, seed=seed, **_ROLLOUT_KW)
+    buf.add_group("g0", 0, _rollouts([1.0, 0.0, 0.5]))
+    buf.add_group("g1", 1, _rollouts([0.0, 1.0]))
+    buf.close()
+
+
+def _rollout_apply(directory: str, seed: int, op_type: str) -> None:
+    buf = DurableRolloutBuffer(directory, seed=seed, **_ROLLOUT_KW)
+    if op_type == "rollout_add_group":
+        buf.add_group("g4", 4, _rollouts([1.0, 0.0]))
+    else:
+        buf.update_priorities([0, 1], [0.9, 0.1])
+    buf.close()
+
+
+def _rollout_worker(directory: str, seed: int, op_type: str, cut_point: str, cut_byte: int) -> None:
+    os.environ["RESERVOIR_CUT_POINT"] = cut_point
+    os.environ["RESERVOIR_CUT_BYTE_OFFSET"] = str(cut_byte)
+    _rollout_apply(directory, seed, op_type)
+
+
+def _rollout_snapshot(directory: str, seed: int) -> dict:
+    for k in ["RESERVOIR_CUT_POINT", "RESERVOIR_CUT_BYTE_OFFSET"]:
+        os.environ.pop(k, None)
+    buf = DurableRolloutBuffer(directory, seed=seed, **_ROLLOUT_KW)
+    assert buf.verify_trees()
+    state = buf.state_dict()
+    buf.close()
+    return state
+
+
+def run_rollout_crash_test(op_type: str, cut_point: str, seed: int, base_tmpdir: str) -> dict:
+    """Same shape as run_crash_test, for DurableRolloutBuffer."""
+    test_dir = os.path.join(base_tmpdir, f"{op_type}_{cut_point}_{seed}")
+    oracle_dir = test_dir + "_oracle"
+    for k in ["RESERVOIR_CUT_POINT", "RESERVOIR_CUT_BYTE_OFFSET"]:
+        os.environ.pop(k, None)
+
+    _rollout_prepare(test_dir, seed)
+    pre_state = _rollout_snapshot(test_dir, seed)
+    _rollout_prepare(oracle_dir, seed)
+    _rollout_apply(oracle_dir, seed, op_type)
+    post_state = _rollout_snapshot(oracle_dir, seed)
+
+    ctx = multiprocessing.get_context("spawn")
+    p = ctx.Process(target=_rollout_worker, args=(test_dir, seed, op_type, cut_point, 40))
+    p.start()
+    p.join(timeout=60)
+    if p.is_alive():
+        os.kill(p.pid, signal.SIGKILL)
+        p.join(timeout=5)
+
+    recovered = _rollout_snapshot(test_dir, seed)
+    matches_pre = recovered == pre_state
+    matches_post = recovered == post_state
+    return {
+        "op": op_type, "cut": cut_point, "seed": seed,
+        "matches_pre": matches_pre, "matches_post": matches_post,
+        "torn": not matches_pre and not matches_post,
+        "passed": matches_pre or matches_post,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Full campaign
 # ---------------------------------------------------------------------------
 
-OP_TYPES = ["insert", "update"]
+OP_TYPES = ["insert", "update", "rollout_add_group", "rollout_update"]
 
 CUT_POINTS = [
     "after_intent_write",
@@ -234,7 +315,8 @@ def run_campaign() -> dict:
         for op in OP_TYPES:
             for cut in CUT_POINTS:
                 for seed in SEEDS:
-                    result = run_crash_test(op, cut, seed, tmpdir)
+                    runner = run_rollout_crash_test if op.startswith("rollout_") else run_crash_test
+                    result = runner(op, cut, seed, tmpdir)
                     results.append(result)
                     total += 1
                     if result["passed"]:

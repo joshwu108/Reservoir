@@ -107,3 +107,151 @@ def test_size_property():
     ds = _make_dataset(7)
     buf = DatasetBuffer(ds)
     assert buf.size == 7
+
+
+# ---------------------------------------------------------------------------
+# Prompt-level priority strategies (Phase 1, Task 7)
+# ---------------------------------------------------------------------------
+
+from reservoir.priorities import (  # noqa: E402
+    AdvantagePriority,
+    PassRateTargeting,
+    PassRateVariance,
+    PromptPriority,
+)
+from reservoir.rollout import Rollout  # noqa: E402
+
+
+def _rollouts(rewards: list[float]) -> list[Rollout]:
+    return [Rollout(tokens=[1, 2], logprobs=[-0.1, -0.2], reward=r) for r in rewards]
+
+
+def test_strategy_defaults_mode_to_accelerated():
+    buf = DatasetBuffer(_make_dataset(4), priority=PassRateVariance())
+    assert buf.mode == "accelerated"
+    assert isinstance(buf.priority, PromptPriority)
+
+
+def test_no_strategy_keeps_audit_default():
+    buf = DatasetBuffer(_make_dataset(4))
+    assert buf.mode == "audit"
+    assert buf.priority is None
+
+
+def test_explicit_mode_wins_over_strategy_default():
+    buf = DatasetBuffer(_make_dataset(4), priority=PassRateVariance(), mode="audit")
+    assert buf.mode == "audit"
+
+
+def test_invalid_mode_rejected():
+    with pytest.raises(ValueError, match="mode"):
+        DatasetBuffer(_make_dataset(4), mode="turbo")
+
+
+def test_rollout_level_strategy_rejected():
+    with pytest.raises(TypeError, match="PromptPriority"):
+        DatasetBuffer(_make_dataset(4), priority=AdvantagePriority())
+
+
+def test_update_group_sets_priority_to_the_strategy_score():
+    strategy = PassRateVariance(epsilon=1e-6)
+    buf = DatasetBuffer(_make_dataset(4), priority=strategy, priority_cap=1e9)
+    buf.update_group(2, model_version=5, rollouts=_rollouts([1.0, 0.0, 1.0, 0.0]))
+    assert buf.priorities[2] == pytest.approx(0.25 + 1e-6)
+
+
+def test_update_group_honours_custom_success_predicate():
+    buf = DatasetBuffer(_make_dataset(2), priority=PassRateTargeting(epsilon=0.0), priority_cap=1e9)
+    buf.update_group(0, 0, _rollouts([0.9, 0.4]), is_success=lambda r: r.reward >= 0.5)
+    assert buf.priorities[0] == pytest.approx(1.0)  # pass rate 0.5 hits the default target
+
+
+def test_update_group_requires_a_strategy():
+    buf = DatasetBuffer(_make_dataset(2))
+    with pytest.raises(ValueError, match="priority"):
+        buf.update_group(0, 0, _rollouts([1.0]))
+
+
+def test_update_group_validates_index_and_rollouts():
+    buf = DatasetBuffer(_make_dataset(2), priority=PassRateVariance())
+    with pytest.raises(IndexError):
+        buf.update_group(5, 0, _rollouts([1.0]))
+    with pytest.raises(ValueError, match="index"):
+        buf.update_group(1.5, 0, _rollouts([1.0]))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="rollouts"):
+        buf.update_group(0, 0, [])
+
+
+def test_update_group_respects_priority_cap():
+    class Huge(PromptPriority):
+        def score_prompt(self, group) -> float:
+            return 1e6
+
+    buf = DatasetBuffer(_make_dataset(3), priority=Huge(), priority_cap=2.0)
+    buf.update_group(0, 0, _rollouts([1.0]))
+    buf.update_group(1, 0, _rollouts([1.0]))
+    # cap = 2 * median of positive raw priorities, so nothing can run away
+    assert buf.priorities[1] <= 2.0 * np.median(buf.priorities[buf.priorities > 0]) + 1e-9
+
+
+def test_update_priority_still_works_with_a_strategy():
+    buf = DatasetBuffer(_make_dataset(2), priority=PassRateVariance())
+    buf.update_priority(1, 0.5)
+    assert buf.priorities[1] == pytest.approx(0.5 + 1e-6)
+
+
+def test_cap_ignores_examples_never_updated():
+    # 100 prompts at the epsilon placeholder must not cap the first real score.
+    buf = DatasetBuffer(_make_dataset(100), mode="accelerated")
+    buf.update_priority(0, 1.0)
+    assert buf.priorities[0] == pytest.approx(1.0 + 1e-6)
+    buf.update_priority(1, 1.0)
+    buf.update_priority(2, 1000.0)  # capped against the median of the two updated
+    assert buf.priorities[2] == pytest.approx(10.0 * (1.0 + 1e-6))
+
+
+def test_score_below_epsilon_is_floored_and_tree_agrees():
+    buf = DatasetBuffer(_make_dataset(2), priority=PassRateVariance(epsilon=0.0))
+    buf.update_group(0, 0, _rollouts([1.0, 1.0]))  # score 0
+    buf.update_group(1, 0, _rollouts([1.0, 0.0]))  # score 0.25
+    assert buf.priorities[0] == pytest.approx(1e-6)
+    leaf = lambda i: float(buf._per._tree[buf._per._tree_capacity - 1 + i])  # noqa: E731
+    assert leaf(0) < leaf(1)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), "0.5", None, True])
+def test_update_priority_rejects_non_finite_loss(bad):
+    buf = DatasetBuffer(_make_dataset(2))
+    with pytest.raises(ValueError, match="loss"):
+        buf.update_priority(0, bad)
+
+
+def test_positional_alpha_beta_still_work():
+    buf = DatasetBuffer(_make_dataset(2), 0.6, 0.4)
+    assert buf.priority is None
+
+
+def test_bad_strategy_score_rejected_and_nothing_changes():
+    class Bad(PromptPriority):
+        def score_prompt(self, group) -> float:
+            return float("nan")
+
+    buf = DatasetBuffer(_make_dataset(2), priority=Bad())
+    before = buf.priorities.copy()
+    with pytest.raises(ValueError, match="Bad"):
+        buf.update_group(0, 0, _rollouts([1.0]))
+    assert np.array_equal(buf.priorities, before)
+
+
+def test_pass_rate_variance_samples_uncertain_prompts_more():
+    random.seed(7)
+    np.random.seed(7)
+    buf = DatasetBuffer(_make_dataset(3), priority=PassRateVariance(epsilon=1e-6), priority_cap=1e9)
+    buf.update_group(0, 0, _rollouts([1.0, 1.0, 1.0, 1.0]))  # all pass  -> epsilon
+    buf.update_group(1, 0, _rollouts([0.0, 0.0, 0.0, 0.0]))  # all fail  -> epsilon
+    buf.update_group(2, 0, _rollouts([1.0, 0.0, 1.0, 0.0]))  # 50% pass -> 0.25
+    counts = [0, 0, 0]
+    for _ in range(2000):
+        counts[buf.sample_indices(1)[0]] += 1
+    assert counts[2] > 1800, counts
+    assert counts[0] < 100 and counts[1] < 100, counts

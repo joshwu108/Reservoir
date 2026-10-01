@@ -293,6 +293,26 @@ class AttestationLog:
         self._head_digest = digest
         return record
 
+    def restore(self, records: list[dict]) -> None:
+        """Replace the log's contents with ``records``, re-verifying every link.
+
+        Used when a buffer is recovered from a saved state. Each record's
+        digest must match its content and chain to the one before, so a
+        corrupt snapshot cannot resurrect a log the checker would reject.
+        Raises ``ValueError`` and leaves the log unchanged otherwise.
+        """
+        head = _GENESIS
+        for i, record in enumerate(records):
+            if not isinstance(record, dict):
+                raise ValueError(f"record {i} is not a dict")
+            if record.get("prev_digest") != head:
+                raise ValueError(f"record {i} does not chain to the previous record")
+            if _digest_record(record) != record.get("digest"):
+                raise ValueError(f"record {i} has a digest that does not match its content")
+            head = record["digest"]
+        self._records = [dict(r) for r in records]
+        self._head_digest = head
+
     def to_json_lines(self) -> str:
         """Serialize all records as newline-separated canonical JSON."""
         lines = []

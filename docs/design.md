@@ -256,10 +256,12 @@ the float64 evaluation of `(N·P(i))^(-β)` is exact Fraction arithmetic.
 
 ## 7. Age-Decayed Priorities in 64 Bits (Phase 1 design spike)
 
-Status: primitive shipped in `src/reservoir/decay.py` with tests in
-`tests/test_decay.py`. Not yet wired into any buffer, the attestation log, the
-checker, or the C extension. Nothing in this section is a training-quality or
-throughput claim.
+Status: primitive in `src/reservoir/decay.py`, wired into
+`DecayedPriorityTree` (`decayed_tree.py`), `RolloutBuffer`
+(`rollout_buffer.py`), the attestation log (§7.4, now implemented), the
+independent checker (`checker/decay_replay.py`) and the durable buffer
+(`durable_rollout.py`). Not in the C extension. Nothing in this section is a
+training-quality or throughput claim.
 
 ### 7.1 Declared semantics
 
@@ -363,7 +365,14 @@ defines t_i as "the global training step when trajectory i was collected" and
 training step. No sentence about resetting t_i was found. The default follows
 the definition; the paper does not state it explicitly.
 
-**Attestation (Question 5) — proposal, not implemented.**
+**Attestation (Question 5) — implemented.** The records below are written by
+`rollout_attest.py` and replayed by `checker/decay_replay.py`, which
+re-derives the decay table and every leaf with its own integer arithmetic.
+The checker also enforces the order `advance_version → evict(stale)* →
+rebase? → writes`, rejects a rebase that is not due or that is skipped, and
+verifies that capacity evictions were necessary (the inserts that follow
+consume exactly the freed slots). 38 forged variants are rejected in the
+mutation campaign.
 
 - New first record `decay_config`: `half_life`, `max_policy_age`, `capacity`,
   `priority_bits`, `priority_frac_bits`, `table_frac_bits`, `rebase_slack`,
@@ -381,12 +390,10 @@ the definition; the paper does not state it explicitly.
   per rebase, not N mutation records.
 - `sample` records are unchanged.
 
-Files that must change when this is wired in (not changed by this spike):
-`attest.py` (`append_mutation` rejects unknown ops and has no fields for
-q/t/B), `checker/verify.py` (unknown op is a `CheckerError`), and
-`sumtree.c`/`sumtree.h` (nodes are `double`; a `uint64_t` variant is needed).
-`ExactMinTree.INFINITY = 2^2048` must become `UINT64_MAX` in a fixed-width
-min-tree.
+Still to change for a C backend: `sumtree.c`/`sumtree.h` (nodes are
+`double`; a `uint64_t` variant is needed) and `ExactMinTree.INFINITY =
+2^2048`, which must become `UINT64_MAX` in a fixed-width min-tree. The
+Python path keeps the big-integer sentinel.
 
 **Quantization loss (Question 6).** The 2^52 scheme keeps every mantissa
 bit for x ≥ 1 and floors below 2^−52. The default 16.16 format has absolute
@@ -475,3 +482,25 @@ N leaf writes.
 
 Not established by this spike: behaviour of variable-length trajectories,
 IS weights under decay, any end-to-end buffer, and any C implementation.
+
+## 8. RolloutBuffer
+
+`RolloutBuffer` (`src/reservoir/rollout_buffer.py`) is the LLM-RL replay
+buffer built on §7. Its rules, each tested in `tests/test_rollout_buffer.py`:
+
+| Rule | Choice | Why |
+|---|---|---|
+| Leaf granularity | One sum-tree leaf per rollout; the `RolloutGroup` is shared metadata | Priorities and updates are per rollout; group statistics (mean reward, pass rate) are what strategies read |
+| Priority pipeline | `score → score ** alpha (float, once) → quantize (16.16) → inflate (§7)` | Two declared float boundaries, then exact. `alpha` defaults to 1.0 for rollouts |
+| Versions | `current_version` only moves forward; `add_group` and `sample` advance it. A group may arrive below the current version if not expired | Asynchronous rollout workers |
+| Staleness | Entries older than `max_policy_age` are evicted on every advance, before any rebase | §7.3 ordering; evict-then-shift keeps the rebase exact |
+| Capacity | Freed slots reused lowest-index first; when short, the lowest-version entries are evicted (ties: insertion order). A group never displaces entries newer than itself: `add_group` raises | A late group must not push out fresher data |
+| Age on update | Kept, unless `reset_age_on_update=True` | §7.4 |
+| Sampling | With replacement; `batch_size` may exceed the live count. Draws keyed on a per-rollout counter, so no two draws share a key whatever batch sizes are used | `ExactPERBuffer`'s `batch * batch_size + k` keys collide when batch sizes vary |
+| IS weights | `(N·P(i))^-β / (N·P_min)^-β`, `P(i)` from the decayed leaf, min over positive leaves | Same formula as §6; zero-weight entries are live but excluded from the minimum |
+| Errors | All validation before any mutation; a bad group, score or index leaves the buffer unchanged | Lets the durable wrapper treat an exception as "nothing happened" |
+
+`DurableRolloutBuffer` (`durable_rollout.py`) commits each operation through
+the §3 protocol with full-state snapshots (`state_dict`/`load_state_dict`),
+including the attestation log; 70 SIGKILL tests in the crash campaign hit
+every cut point during an `add_group` that evicts and rebases.

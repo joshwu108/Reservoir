@@ -67,6 +67,14 @@ from reservoir.draw import draw_uniform_below
 from reservoir.priorities import AdvantagePriority, PriorityStrategy, validated_score
 from reservoir.rollout import Rollout, RolloutGroup, default_is_success
 from reservoir.rollout_attest import AttestTarget, RolloutAttester
+from reservoir.rollout_snapshot import (
+    _group_from_dict,
+    _group_to_dict,
+    _require_list,
+    _snapshot_int,
+    _strategy_fingerprint,
+    _validate_slots,
+)
 from reservoir.sumtree import ExactMinTree
 
 
@@ -145,7 +153,19 @@ class RolloutBuffer:
         version; by default age is measured from collection.
     priority_bits, priority_frac_bits, rebase_slack : int
         Passed to ``DecayParams``; see ``decay.py``.
+    attest_overwrite : bool
+        Replace an existing attestation file instead of refusing it. Only
+        the durable buffer sets this; it rewrites the file from recovered
+        state, so the file is never the source of truth there.
+
+    Snapshots
+    ---------
+    ``state_dict()`` returns the complete state as a JSON-serialisable
+    dict and ``load_state_dict()`` rebuilds a fresh buffer from one. The
+    durable buffer uses them; they are also a plain way to checkpoint.
     """
+
+    STATE_FORMAT = 1
 
     def __init__(
         self,
@@ -162,6 +182,7 @@ class RolloutBuffer:
         priority_bits: int = 32,
         priority_frac_bits: int = 16,
         rebase_slack: int = 0,
+        attest_overwrite: bool = False,
     ) -> None:
         self.priority = _validate_priority(priority)
         self.alpha = _validate_exponent(alpha, "alpha", minimum_exclusive=0.0)
@@ -188,7 +209,9 @@ class RolloutBuffer:
         self._op_counter = 0                      # bumped once per sampled batch; logged
         self._draw_counter = 0                    # bumped once per sampled rollout; keys draws
         self._n_rebases = 0
-        self._attester = RolloutAttester(attest, self._params, self.reset_age_on_update)
+        self._attester = RolloutAttester(
+            attest, self._params, self.reset_age_on_update, overwrite=attest_overwrite
+        )
 
     # -- read-only state ---------------------------------------------------
 
@@ -479,6 +502,111 @@ class RolloutBuffer:
     def close(self) -> None:
         """Close the attestation file, if one was opened."""
         self._attester.close()
+
+    # -- snapshots ---------------------------------------------------------
+
+    def _fingerprint(self) -> dict:
+        """The construction parameters a snapshot must be loaded with."""
+        p = self._params
+        return {
+            "half_life": p.half_life, "max_policy_age": p.max_policy_age,
+            "capacity": p.capacity, "priority_bits": p.priority_bits,
+            "priority_frac_bits": p.priority_frac_bits, "table_frac_bits": p.table_frac_bits,
+            "rebase_slack": p.rebase_slack, "alpha": self.alpha, "beta": self.beta,
+            "seed": self.seed, "buffer_id": self.buffer_id,
+            "reset_age_on_update": self.reset_age_on_update,
+            "priority": _strategy_fingerprint(self.priority),
+        }
+
+    def state_dict(self) -> dict:
+        """Complete buffer state as a JSON-serialisable dict.
+
+        Groups are stored once each with all their rollouts (including any
+        already evicted from the buffer, since group statistics depend on
+        them); live slots reference a group and a member index. Integers
+        that may exceed 2^53 are stored as strings. Rollout metadata must
+        be JSON-serialisable and groups must use the default success
+        predicate, because a callable cannot be saved; both are checked
+        here with a clear error.
+        """
+        groups: list[RolloutGroup] = []
+        group_index: dict[int, int] = {}
+        slots: list[Optional[dict]] = []
+        for position in range(self.capacity):
+            group = self._groups[position]
+            if group is None:
+                slots.append(None)
+                continue
+            if id(group) not in group_index:
+                group_index[id(group)] = len(groups)
+                groups.append(group)
+            rollout = self._rollouts[position]
+            member = next(k for k, r in enumerate(group.rollouts) if r is rollout)
+            q, version = self._tree.entry(position)
+            slots.append({
+                "group": group_index[id(group)], "member": member,
+                "q": str(q), "version": version, "inserted": self._inserted[position],
+            })
+        log = self._attester.log
+        return {
+            "format": self.STATE_FORMAT,
+            "fingerprint": self._fingerprint(),
+            "current_version": self.current_version,
+            "base_epoch": self.base_epoch,
+            "op_counter": self._op_counter,
+            "draw_counter": self._draw_counter,
+            "insert_seq": self._insert_seq,
+            "n_rebases": self._n_rebases,
+            "groups": [_group_to_dict(g) for g in groups],
+            "slots": slots,
+            "attestation": log.records if log is not None else None,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Rebuild this (fresh) buffer from a ``state_dict()``.
+
+        Raises
+        ------
+        ValueError
+            If the buffer is not fresh, the snapshot format or construction
+            parameters do not match, or any value fails validation. A
+            failed load leaves the buffer unusable; construct a new one.
+        """
+        if self.size or self.current_version or self._op_counter or self._insert_seq:
+            raise ValueError("load_state_dict() requires a freshly constructed buffer")
+        if not isinstance(state, dict) or state.get("format") != self.STATE_FORMAT:
+            raise ValueError(f"unsupported snapshot format: {state.get('format') if isinstance(state, dict) else state!r}")
+        if state.get("fingerprint") != self._fingerprint():
+            raise ValueError(
+                "snapshot was written by a buffer with different parameters: "
+                f"{state.get('fingerprint')} vs {self._fingerprint()}"
+            )
+        groups = [_group_from_dict(g) for g in _require_list(state, "groups")]
+        slots = _validate_slots(_require_list(state, "slots"), self.capacity, groups)
+        counters = {name: _snapshot_int(state, name) for name in
+                    ("base_epoch", "current_version", "op_counter", "draw_counter",
+                     "insert_seq", "n_rebases")}
+        inserted_values = [slot["inserted"] for slot in slots.values()]
+        if inserted_values and max(inserted_values) > counters["insert_seq"]:
+            raise ValueError("a slot's insertion counter exceeds insert_seq")
+
+        entries = {pos: (slot["q"], slot["version"]) for pos, slot in slots.items()}
+        self._tree.restore(counters["base_epoch"], counters["current_version"], entries)
+        for position, slot in slots.items():
+            group = groups[slot["group"]]
+            self._groups[position] = group
+            self._rollouts[position] = group.rollouts[slot["member"]]
+            self._inserted[position] = slot["inserted"]
+        self._free = [p for p in range(self.capacity) if p not in entries]
+        heapq.heapify(self._free)
+        self._op_counter = counters["op_counter"]
+        self._draw_counter = counters["draw_counter"]
+        self._insert_seq = counters["insert_seq"]
+        self._n_rebases = counters["n_rebases"]
+        records = state.get("attestation")
+        if records is not None and not isinstance(records, list):
+            raise ValueError("snapshot attestation must be a list of records or null")
+        self._attester.restore(records or [])
 
     def __enter__(self) -> "RolloutBuffer":
         return self

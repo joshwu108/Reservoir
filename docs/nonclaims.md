@@ -63,3 +63,31 @@ within that finite scope only. It does not constitute a proof for all possible
 buffer sizes, priority values, or operation sequences. It is a falsification tool:
 if the model checker finds a counterexample in the small scope, the protocol is wrong.
 If it finds no counterexample, that is evidence (not proof) of correctness.
+
+
+### 9. Age Decay Semantics
+
+Age decay is base-2 with an integer half-life and two floor roundings at
+declared points (design.md §7.1). It is not `p · exp(−Δ/τ)` evaluated in the
+reals; FreshPER's τ is matched only approximately by `h ≈ τ · ln 2`. The
+declared decayed distribution is exact; its closeness to any real-valued
+decay is not claimed.
+
+### 10. Replay and Training Quality
+
+No claim is made that replaying rollouts with any of the shipped priority
+strategies improves GRPO-style training. The strategies implement published
+heuristics; the library guarantees only that the sampling distribution is
+the declared one and is verifiable.
+
+### 11. C Backend and Decayed Priorities
+
+The C extension stores `double` priorities and does not support age decay,
+versions, or the attested rollout path. `RolloutBuffer` is pure Python.
+
+### 12. Durable Rollout Buffer Scope
+
+`DurableRolloutBuffer` writes a full snapshot per operation. It is
+crash-atomic (140/140 SIGKILL tests on macOS/APFS, see §6) but makes no
+throughput claim, does not persist custom success predicates, and requires
+JSON-serialisable rollout metadata.

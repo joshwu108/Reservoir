@@ -149,6 +149,7 @@ class DecayedPriorityTree:
 
     @property
     def params(self) -> DecayParams:
+        """The decay configuration this tree was built with."""
         return self._params
 
     @property
@@ -158,10 +159,12 @@ class DecayedPriorityTree:
 
     @property
     def base_epoch(self) -> int:
+        """Epoch the stored leaves are shifted relative to; advances on each rebase."""
         return self._base_epoch
 
     @property
     def current_version(self) -> int:
+        """Latest version passed to ``advance``; entries are aged against it."""
         return self._current_version
 
     @property
@@ -176,6 +179,7 @@ class DecayedPriorityTree:
 
     @property
     def live_count(self) -> int:
+        """Number of positions holding an entry (zero-weight entries included)."""
         return len(self._entries)
 
     def live_positions(self) -> tuple[int, ...]:
@@ -191,6 +195,7 @@ class DecayedPriorityTree:
         return MappingProxyType(self._entries)
 
     def is_live(self, position: int) -> bool:
+        """True if ``position`` holds an entry."""
         return position in self._entries
 
     def entry(self, position: int) -> tuple[int, int]:
@@ -311,15 +316,50 @@ class DecayedPriorityTree:
             rebase=rebase,
         )
 
+    def restore(
+        self,
+        base_epoch: int,
+        current_version: int,
+        entries: Mapping[int, tuple[int, int]],
+    ) -> None:
+        """Rebuild a fresh tree from saved ``(q, entry_version)`` pairs.
+
+        Used by the durable buffer on recovery. The tree must be empty.
+        Every entry is validated the way ``write`` validates it (live at
+        ``current_version``, shift within budget), so a corrupt snapshot
+        fails here rather than producing a tree that disagrees with the
+        decay formula.
+        """
+        if self._entries or self._current_version or self._base_epoch:
+            raise ValueError("restore() requires a fresh tree")
+        if isinstance(base_epoch, bool) or not isinstance(base_epoch, int) or base_epoch < 0:
+            raise ValueError(f"base_epoch must be a non-negative int, got {base_epoch!r}")
+        if isinstance(current_version, bool) or not isinstance(current_version, int) or current_version < 0:
+            raise ValueError(f"current_version must be a non-negative int, got {current_version!r}")
+        self._base_epoch = base_epoch
+        self._current_version = current_version
+        try:
+            for position, (q, version) in entries.items():
+                self.write(position, q, version)
+        except ValueError:
+            self._entries.clear()
+            self._sum = ExactSumTree(self._params.capacity)
+            self._min = ExactMinTree(self._params.capacity)
+            self._base_epoch = 0
+            self._current_version = 0
+            raise
+
     # -- internals ---------------------------------------------------------
 
     def _require_position(self, position: int) -> None:
+        """ValueError unless ``position`` is an int within the tree's capacity."""
         if isinstance(position, bool) or not isinstance(position, int):
             raise ValueError(f"position must be an int, got {position!r}")
         if not (0 <= position < self.capacity):
             raise ValueError(f"position {position} out of range [0, {self.capacity})")
 
     def _require_live(self, position: int) -> None:
+        """ValueError unless ``position`` is in range and holds an entry."""
         self._require_position(position)
         if position not in self._entries:
             raise ValueError(f"position {position} holds no live entry")

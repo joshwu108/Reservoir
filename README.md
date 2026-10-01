@@ -5,8 +5,9 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 
-> **Status:** this README describes the target interface. Not everything below is
-> implemented yet.
+> **Status:** the rollout buffer, priority strategies, age decay, attestation,
+> checker and durable buffer below are implemented and tested. The TRL and verl
+> integrations and the Stable-Baselines3 / TorchRL adapters are not yet.
 
 Generating rollouts is the most expensive part of GRPO-style training, and the
 standard recipe uses each rollout once and throws it away. Reservoir is a replay
@@ -100,7 +101,9 @@ class RewardGap(PriorityStrategy):
 
 **Age decay** is exact. Priorities decay by half-life in model versions, and
 the decayed distribution is the declared distribution the checker verifies.
-See [`docs/design.md`](docs/design.md).
+The decay is base-2 with an integer half-life, not `exp(-age/tau)`; see
+[`docs/design.md`](docs/design.md) §7 for the arithmetic and §8 for the
+buffer's rules on eviction, versions and updates.
 
 **Prompt-level sampling** is available through `DatasetBuffer`, for choosing
 which prompts to generate rollouts for in the first place:
@@ -111,6 +114,8 @@ from reservoir.priorities import PassRateVariance
 
 prompts = DatasetBuffer(dataset, priority=PassRateVariance())
 next_prompts = prompts.sample_indices(batch_size=128)
+# after generating a group for prompt i:
+prompts.update_group(i, model_version=step, rollouts=group_rollouts)
 ```
 
 ---
@@ -149,12 +154,19 @@ boundary; see [`docs/nonclaims.md`](docs/nonclaims.md).
 ## Durable buffers
 
 ```python
-buf = RolloutBuffer(capacity=50_000, directory="run-01/buffer")
+from reservoir import DurableRolloutBuffer
+
+buf = DurableRolloutBuffer("run-01/buffer", capacity=50_000, half_life=4,
+                           max_policy_age=16, seed=0, attest="run-01/attest.jsonl")
 ```
 
-Every operation is committed through a write-ahead log. If the process is
-killed, reopening the same directory recovers the last committed state, with
-no torn entries.
+Every operation is committed through a write-ahead log before it returns,
+including the stale evictions and rebase an operation may trigger. If the
+process is killed, reopening the same directory with the same parameters
+recovers the last committed state: the same live rollouts, the same next
+draw, and the same attestation chain, with no torn entries. Each operation
+writes a full snapshot, so cost grows with buffer size; an incremental log
+is future work.
 
 ---
 
@@ -274,7 +286,7 @@ report.to_html("forgetting_report.html")
 | Claim | Evidence |
 |-------|----------|
 | Sampling is deterministic and reproducible under a keyed draw | Property tests against a brute-force reference |
-| The durable buffer is failure-atomic under SIGKILL | 70/70 crash tests, zero torn states |
+| The durable buffers are failure-atomic under SIGKILL | 140/140 crash tests across both buffers, zero torn states; the rollout cases crash mid-rebase |
 | The independent checker rejects forged logs | 101/101 mutants rejected, 38 of them age-decay protocol forgeries |
 | The lifecycle protocol is safe within a finite scope | TLA+ model, 44,611 states |
 
