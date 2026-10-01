@@ -275,7 +275,7 @@ report.to_html("forgetting_report.html")
 |-------|----------|
 | Sampling is deterministic and reproducible under a keyed draw | Property tests against a brute-force reference |
 | The durable buffer is failure-atomic under SIGKILL | 70/70 crash tests, zero torn states |
-| The independent checker rejects forged logs | 63/63 mutants rejected |
+| The independent checker rejects forged logs | 89/89 mutants rejected, 26 of them age-decay protocol forgeries |
 | The lifecycle protocol is safe within a finite scope | TLA+ model, 44,611 states |
 
 Reservoir reports negative results. A pre-registered search for

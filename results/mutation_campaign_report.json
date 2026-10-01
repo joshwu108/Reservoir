@@ -1,7 +1,7 @@
 {
   "campaign": "T4_mutation",
-  "total_mutants": 63,
-  "rejected": 63,
+  "total_mutants": 89,
+  "rejected": 89,
   "survived": [],
   "categories": [
     {
@@ -38,6 +38,11 @@
       "name": "stale_suffix_replay",
       "total": 7,
       "rejected": 7
+    },
+    {
+      "name": "decay",
+      "total": 26,
+      "rejected": 26
     }
   ],
   "pass": true

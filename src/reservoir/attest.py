@@ -8,14 +8,30 @@ Both are chained via BLAKE2b digests into a single log.
 Schema (canonical JSON — sorted keys, no spaces):
   MutationRecord:
     digest, op, index, old_priority_int, new_priority_int, op_counter, prev_digest
+    Optional, present together when the buffer uses age decay:
+      base_priority_int, entry_version, base_epoch
+    Optional on "evict" only: reason ("stale" | "capacity" | "explicit")
 
   SampleAttestation:
     digest, op_counter, root_total, samples[...], prev_digest
 
-Integers are encoded as strings to avoid JSON precision limits.
-Digests are hex-encoded BLAKE2b-256 of canonical UTF-8 encoding.
+  Age-decay records (only in logs of a decayed buffer):
+    decay_config    — must be the first record; the parameters the checker
+                      needs to recompute every leaf (half_life, max_policy_age,
+                      capacity, bit widths, rebase_slack, reset_age_on_update)
+    advance_version — old_version, new_version; expired entries must be
+                      evicted (reason "stale") before any other record
+    rebase          — old_base_epoch, new_base_epoch, root_total_before,
+                      root_total_after; one record for the whole shift
 
-See docs/design.md §4 for the full schema.
+Optional fields are absent, not null, when unused, so a log written
+without decay is byte-for-byte identical to one written before the
+extension existed.
+
+Integers are encoded as strings to avoid JSON precision limits; booleans
+stay booleans. Digests are hex-encoded BLAKE2b-256 of canonical UTF-8.
+
+See docs/design.md §4 and §7.4 for the full schema.
 """
 
 from __future__ import annotations
@@ -28,6 +44,19 @@ from typing import Optional
 # Domain separator for attestation hashing
 _PERSON = b"attest\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"  # 16 bytes
 _GENESIS = "genesis"
+
+_MUTATION_OPS = ("insert", "update", "evict")
+_EVICT_REASONS = ("stale", "capacity", "explicit")
+_DECAY_FIELDS = ("base_priority_int", "entry_version", "base_epoch")
+
+
+def _require_int(value: object, name: str, minimum: int = 0) -> int:
+    """A true int (not bool) >= minimum, else ValueError naming the field."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an int, got {value!r}")
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}")
+    return value
 
 
 def _canonical_json(obj: dict) -> bytes:
@@ -77,6 +106,11 @@ class AttestationLog:
         old_priority_int: int,
         new_priority_int: int,
         op_counter: int,
+        *,
+        base_priority_int: Optional[int] = None,
+        entry_version: Optional[int] = None,
+        base_epoch: Optional[int] = None,
+        reason: Optional[str] = None,
     ) -> dict:
         """Append a MutationRecord and return it.
 
@@ -92,13 +126,20 @@ class AttestationLog:
             Priority integer after this operation.
         op_counter : int
             Buffer's monotone operation counter at this point.
+        base_priority_int, entry_version, base_epoch : int, keyword-only
+            The decay inputs (q, t, B) from which ``new_priority_int`` is
+            derived. Given all together or not at all. With them, the
+            checker recomputes the leaf instead of trusting it.
+        reason : str, keyword-only
+            Why an entry was evicted; "evict" only, and only together with
+            the decay fields.
 
         Returns
         -------
         dict
             The complete MutationRecord with digest.
         """
-        if op not in ("insert", "update", "evict"):
+        if op not in _MUTATION_OPS:
             raise ValueError(f"Unknown op: {op!r}")
 
         record = {
@@ -109,9 +150,94 @@ class AttestationLog:
             "op_counter": op_counter,
             "prev_digest": self._head_digest,
         }
+        record.update(
+            _decay_fields(op, base_priority_int, entry_version, base_epoch, reason)
+        )
+        return self._commit(record)
+
+    def append_decay_config(
+        self,
+        half_life: int,
+        max_policy_age: int,
+        capacity: int,
+        priority_bits: int,
+        priority_frac_bits: int,
+        table_frac_bits: int,
+        rebase_slack: int,
+        reset_age_on_update: bool,
+    ) -> dict:
+        """Append the decay configuration. Must be the very first record.
+
+        The checker derives the decay table from ``half_life`` and
+        ``table_frac_bits`` itself; the table is never shipped.
+        """
+        if self._records:
+            raise ValueError("decay_config must be the first record of the log")
+        if not isinstance(reset_age_on_update, bool):
+            raise ValueError(
+                f"reset_age_on_update must be a bool, got {reset_age_on_update!r}"
+            )
+        record = {
+            "op": "decay_config",
+            "half_life": str(_require_int(half_life, "half_life", 1)),
+            "max_policy_age": str(_require_int(max_policy_age, "max_policy_age", 0)),
+            "capacity": str(_require_int(capacity, "capacity", 1)),
+            "priority_bits": str(_require_int(priority_bits, "priority_bits", 1)),
+            "priority_frac_bits": str(_require_int(priority_frac_bits, "priority_frac_bits", 0)),
+            "table_frac_bits": str(_require_int(table_frac_bits, "table_frac_bits", 1)),
+            "rebase_slack": str(_require_int(rebase_slack, "rebase_slack", 0)),
+            "reset_age_on_update": reset_age_on_update,
+            "prev_digest": self._head_digest,
+        }
+        return self._commit(record)
+
+    def append_advance_version(self, old_version: int, new_version: int, op_counter: int) -> dict:
+        """Append an advance_version record: the buffer moved from old to new version."""
+        _require_int(old_version, "old_version", 0)
+        _require_int(new_version, "new_version", 0)
+        if new_version < old_version:
+            raise ValueError(
+                f"new_version ({new_version}) must be >= old_version ({old_version})"
+            )
+        record = {
+            "op": "advance_version",
+            "old_version": str(old_version),
+            "new_version": str(new_version),
+            "op_counter": op_counter,
+            "prev_digest": self._head_digest,
+        }
+        return self._commit(record)
+
+    def append_rebase(
+        self,
+        old_base_epoch: int,
+        new_base_epoch: int,
+        root_total_before: int,
+        root_total_after: int,
+        op_counter: int,
+    ) -> dict:
+        """Append a rebase record: every leaf was right-shifted by the epoch difference."""
+        _require_int(old_base_epoch, "old_base_epoch", 0)
+        _require_int(new_base_epoch, "new_base_epoch", 0)
+        if new_base_epoch <= old_base_epoch:
+            raise ValueError(
+                f"new_base_epoch ({new_base_epoch}) must be > old_base_epoch ({old_base_epoch})"
+            )
+        record = {
+            "op": "rebase",
+            "old_base_epoch": str(old_base_epoch),
+            "new_base_epoch": str(new_base_epoch),
+            "root_total_before": str(_require_int(root_total_before, "root_total_before", 0)),
+            "root_total_after": str(_require_int(root_total_after, "root_total_after", 0)),
+            "op_counter": op_counter,
+            "prev_digest": self._head_digest,
+        }
+        return self._commit(record)
+
+    def _commit(self, record: dict) -> dict:
+        """Digest the record, link it to the chain head, and store it."""
         digest = _digest_record(record)
         record["digest"] = digest
-
         self._records.append(record)
         self._head_digest = digest
         return record
@@ -185,6 +311,42 @@ class AttestationLog:
             log._records.append(record)
             log._head_digest = record["digest"]
         return log
+
+
+def _decay_fields(
+    op: str,
+    base_priority_int: Optional[int],
+    entry_version: Optional[int],
+    base_epoch: Optional[int],
+    reason: Optional[str],
+) -> dict:
+    """Validate the optional decay fields of a mutation and return those to add.
+
+    Returns an empty dict for a legacy record so its serialisation (and
+    digest) is unchanged.
+    """
+    given = {
+        "base_priority_int": base_priority_int,
+        "entry_version": entry_version,
+        "base_epoch": base_epoch,
+    }
+    present = [name for name, value in given.items() if value is not None]
+    if not present:
+        if reason is not None:
+            raise ValueError("reason requires the decay fields base_priority_int, entry_version, base_epoch")
+        return {}
+    for name in _DECAY_FIELDS:
+        if given[name] is None:
+            raise ValueError(f"{name} is required when any decay field is given")
+        _require_int(given[name], name, 0)
+    fields = {name: str(given[name]) for name in _DECAY_FIELDS}
+    if reason is not None:
+        if op != "evict":
+            raise ValueError(f"reason is only valid on evict records, not {op!r}")
+        if reason not in _EVICT_REASONS:
+            raise ValueError(f"reason must be one of {_EVICT_REASONS}, got {reason!r}")
+        fields["reason"] = reason
+    return fields
 
 
 def make_sample_entry(

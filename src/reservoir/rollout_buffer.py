@@ -188,7 +188,7 @@ class RolloutBuffer:
         self._op_counter = 0                      # bumped once per sampled batch; logged
         self._draw_counter = 0                    # bumped once per sampled rollout; keys draws
         self._n_rebases = 0
-        self._attester = RolloutAttester(attest)
+        self._attester = RolloutAttester(attest, self._params, self.reset_age_on_update)
 
     # -- read-only state ---------------------------------------------------
 

@@ -29,21 +29,22 @@ from checker.verify import CheckerError, verify_chain, verify_json_lines
 # ---------------------------------------------------------------------------
 
 class TestCheckerImportIsolation:
-    def test_checker_does_not_import_src_reservoir(self):
-        """checker/verify.py must not import from src/reservoir."""
-        checker_path = Path(__file__).parent.parent / "checker" / "verify.py"
+    @pytest.mark.parametrize("filename", ["verify.py", "decay_replay.py"])
+    def test_checker_does_not_import_src_reservoir(self, filename: str):
+        """Nothing under checker/ may import from src/reservoir."""
+        checker_path = Path(__file__).parent.parent / "checker" / filename
         source = checker_path.read_text()
         tree = ast.parse(source)
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     assert "reservoir" not in alias.name, (
-                        f"checker/verify.py imports reservoir: {alias.name}"
+                        f"checker/{filename} imports reservoir: {alias.name}"
                     )
             elif isinstance(node, ast.ImportFrom):
                 module = node.module or ""
                 assert "reservoir" not in module, (
-                    f"checker/verify.py imports from reservoir: {module}"
+                    f"checker/{filename} imports from reservoir: {module}"
                 )
 
 

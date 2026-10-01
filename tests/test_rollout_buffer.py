@@ -88,9 +88,7 @@ class TestConstruction:
         buf.add_group("p", 0, rollouts([1.0, 0.0]))
         buf.close()
         lines = path.read_text().strip().split("\n")
-        assert len(lines) == 2
-        for line in lines:
-            assert json.loads(line)["op"] == "insert"
+        assert [json.loads(line)["op"] for line in lines] == ["decay_config", "insert", "insert"]
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +450,8 @@ class TestLifecycle:
         buf.add_group("p", 0, rollouts([1.0, 0.0, 0.5]))
         buf.sample(2)
         records = [dict(r) for r in log.records]
-        records[0]["new_priority_int"] = str(int(records[0]["new_priority_int"]) + 1)
+        assert records[1]["op"] == "insert"
+        records[1]["new_priority_int"] = str(int(records[1]["new_priority_int"]) + 1)
         tampered = "\n".join(json.dumps(r, sort_keys=True, separators=(",", ":")) for r in records)
         with pytest.raises(CheckerError):
             verify_json_lines(tampered, buf.capacity)

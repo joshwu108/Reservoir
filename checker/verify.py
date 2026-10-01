@@ -13,27 +13,37 @@ What it verifies:
 5. IS weight numerators/denominators are in reduced form (GCD == 1).
 6. Probability num/den pairs are in reduced form.
 7. Sample root_total matches the reconstructed tree's total at that point.
+8. For a log that starts with a decay_config record: every mutation's leaf
+   equals the age-decay formula applied to its recorded (q, version, base
+   epoch), expired entries are evicted right after each advance_version,
+   and every rebase is exact and lands on the canonical base epoch
+   (see checker/decay_replay.py).
 
 Any inconsistency raises CheckerError.
+
+Command line::
+
+    python -m checker.verify run-01/attest.jsonl              # decayed log
+    python -m checker.verify legacy.jsonl --capacity 1024     # log without decay_config
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import math
+import sys
 from fractions import Fraction
 from math import gcd
+from typing import Optional
 
+from checker.decay_replay import CheckerError, DecayState, has_decay_fields, parse_config
 
 # Domain separator — must match attest.py exactly
 _PERSON = b"attest\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
 _GENESIS = "genesis"
 _HASH_BYTES = 32
-
-
-class CheckerError(Exception):
-    """Raised when any attestation check fails."""
 
 
 def _canonical_json(obj: dict) -> bytes:
@@ -93,6 +103,20 @@ class _SumTree:
     def get(self, pos: int) -> int:
         return self._tree[self._leaf_idx(pos)]
 
+    def shift_all(self, shift: int, idx: int) -> None:
+        """Right-shift every node by ``shift`` bits; a dropped set bit is an error.
+
+        Valid because every live leaf is a multiple of 2^shift after the
+        stale evictions, so every internal sum is too.
+        """
+        mask = (1 << shift) - 1
+        for i, node in enumerate(self._tree):
+            if node & mask:
+                raise CheckerError(
+                    f"Record {idx}: rebase by {shift} would drop set bits of node {i} ({node})"
+                )
+        self._tree = [node >> shift for node in self._tree]
+
     def prefix_sum_locate(self, target: int) -> int:
         if self.total == 0 or target < 0 or target >= self.total:
             raise CheckerError(
@@ -113,15 +137,17 @@ class _SumTree:
 # Verification entry point
 # ---------------------------------------------------------------------------
 
-def verify_chain(records: list[dict], capacity: int) -> None:
+def verify_chain(records: list[dict], capacity: Optional[int] = None) -> None:
     """Verify the entire attestation chain from a list of records.
 
     Parameters
     ----------
     records : list[dict]
-        Attestation records in chain order (MutationRecord or SampleAttestation).
-    capacity : int
-        Buffer capacity (used to initialize the replay sum-tree).
+        Attestation records in chain order.
+    capacity : int, optional
+        Buffer capacity for the replay sum-tree. Required for a log without
+        a leading ``decay_config`` record; if given for a log that has one,
+        it must agree with the recorded capacity.
 
     Raises
     ------
@@ -130,6 +156,12 @@ def verify_chain(records: list[dict], capacity: int) -> None:
     """
     if not records:
         return  # Empty chain is valid
+
+    decay = _decay_state(records[0], capacity)
+    if decay is not None:
+        capacity = decay.cfg["capacity"]
+    if capacity is None:
+        raise CheckerError("capacity is required: the log has no decay_config record")
 
     tree = _SumTree(capacity)
     # priorities[pos] = current integerized priority at position pos
@@ -155,18 +187,81 @@ def verify_chain(records: list[dict], capacity: int) -> None:
                 f"Expected {prev_digest!r}, got {record_prev!r}"
             )
 
-        op = record.get("op")
-
-        if op in ("insert", "update", "evict"):
-            _verify_mutation(record, record_idx, tree, priorities)
-
-        elif op == "sample":
-            _verify_sample(record, record_idx, tree, priorities)
-
-        else:
-            raise CheckerError(f"Record {record_idx}: unknown op {op!r}")
-
+        _verify_record(record, record_idx, tree, priorities, decay)
         prev_digest = actual_digest
+
+    if decay is not None:
+        decay.require_no_pending(len(records), "end of log")
+
+
+def _verify_record(
+    record: dict,
+    idx: int,
+    tree: _SumTree,
+    priorities: dict[int, int],
+    decay: Optional[DecayState],
+) -> None:
+    """Semantic checks for one record (digest and chain linkage already passed)."""
+    op = record.get("op")
+
+    if op == "decay_config":
+        if idx != 0:
+            raise CheckerError(f"Record {idx}: decay_config must be the first record")
+
+    elif op in ("insert", "update", "evict"):
+        _verify_mutation(record, idx, tree, priorities)
+        if has_decay_fields(record):
+            _require_decay(decay, idx, op)
+            _guard_pending(decay, record, idx)
+            decay.on_mutation(record, idx, tree)  # type: ignore[union-attr]
+        elif decay is not None:
+            raise CheckerError(f"Record {idx}: {op} without decay fields in a decayed log")
+
+    elif op == "sample":
+        if decay is not None:
+            decay.require_no_pending(idx, "sample")
+        _verify_sample(record, idx, tree, priorities)
+
+    elif op == "advance_version":
+        _require_decay(decay, idx, op)
+        decay.require_no_pending(idx, op)  # type: ignore[union-attr]
+        decay.on_advance(record, idx)  # type: ignore[union-attr]
+
+    elif op == "rebase":
+        _require_decay(decay, idx, op)
+        decay.require_no_pending(idx, op)  # type: ignore[union-attr]
+        decay.on_rebase(record, idx, tree)  # type: ignore[union-attr]
+
+    else:
+        raise CheckerError(f"Record {idx}: unknown op {op!r}")
+
+
+def _decay_state(first: dict, capacity: Optional[int]) -> Optional[DecayState]:
+    """Build the decay replay state if the log opens with decay_config."""
+    if first.get("op") != "decay_config":
+        return None
+    cfg = parse_config(first, 0)
+    if capacity is not None and capacity != cfg["capacity"]:
+        raise CheckerError(
+            f"capacity argument {capacity} disagrees with decay_config capacity {cfg['capacity']}"
+        )
+    return DecayState(cfg)
+
+
+def _require_decay(decay: Optional[DecayState], idx: int, op: str) -> None:
+    if decay is None:
+        raise CheckerError(
+            f"Record {idx}: {op} requires a decay_config record at the start of the log"
+        )
+
+
+def _guard_pending(decay: Optional[DecayState], record: dict, idx: int) -> None:
+    """While expired entries await eviction, only their stale evicts may appear."""
+    if decay is None or not decay.pending_stale:
+        return
+    is_stale_evict = record["op"] == "evict" and record.get("reason") == "stale"
+    if not is_stale_evict or record["index"] not in decay.pending_stale:
+        decay.require_no_pending(idx, f"{record['op']} at position {record['index']}")
 
 
 def _verify_mutation(
@@ -287,15 +382,15 @@ def _verify_sample(
             )
 
 
-def verify_json_lines(data: str, capacity: int) -> None:
+def verify_json_lines(data: str, capacity: Optional[int] = None) -> None:
     """Verify an attestation chain from newline-separated JSON.
 
     Parameters
     ----------
     data : str
         Newline-separated JSON records (as produced by AttestationLog.to_json_lines).
-    capacity : int
-        Buffer capacity for tree replay.
+    capacity : int, optional
+        Buffer capacity for tree replay; see ``verify_chain``.
 
     Raises
     ------
@@ -308,3 +403,31 @@ def verify_json_lines(data: str, capacity: int) -> None:
             continue
         records.append(json.loads(line))
     verify_chain(records, capacity)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """Command-line entry point: exit 0 if the log verifies, 1 otherwise."""
+    parser = argparse.ArgumentParser(
+        prog="python -m checker.verify",
+        description="Independently verify a reservoir attestation log.",
+    )
+    parser.add_argument("path", help="JSON-lines attestation log")
+    parser.add_argument(
+        "--capacity", type=int, default=None,
+        help="buffer capacity; required for logs without a decay_config record",
+    )
+    args = parser.parse_args(argv)
+    try:
+        with open(args.path, encoding="utf-8") as f:
+            data = f.read()
+        n_records = sum(1 for line in data.strip().split("\n") if line)
+        verify_json_lines(data, args.capacity)
+    except (OSError, ValueError, CheckerError) as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 1
+    print(f"OK: {n_records} records verified")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

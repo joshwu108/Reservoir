@@ -434,7 +434,120 @@ def run_mutation_campaign() -> dict:
 
     run_category("stale_suffix_replay", category7)
 
+    # -----------------------------------------------------------------------
+    # Category 8: Age-decay protocol forgeries
+    # Built from a RolloutBuffer log (decay_config + advance_version + rebase
+    # + decay fields). Every mutant is re-chained so only the semantic replay
+    # in checker/decay_replay.py can catch it.
+    # -----------------------------------------------------------------------
+    run_category("decay", _decay_mutants())
+
     return results
+
+
+def _build_decay_chain(seed: int = 11) -> list[dict]:
+    """A RolloutBuffer run with inserts, updates, stale/capacity evictions and rebases."""
+    # The buffer type-checks its log against reservoir.attest.AttestationLog;
+    # this file imports the legacy modules as src.reservoir.*, which Python
+    # treats as a different module, so import the matching class here.
+    from reservoir.attest import AttestationLog as _BufferLog
+    from reservoir.rollout import Rollout
+    from reservoir.rollout_buffer import RolloutBuffer
+
+    log = _BufferLog()
+    buf = RolloutBuffer(capacity=8, half_life=1, max_policy_age=2, seed=seed, attest=log)
+    for v in range(10):
+        buf.add_group(
+            f"g{v}", v,
+            [Rollout(tokens=[1, 2], logprobs=[-0.1, -0.2], reward=r) for r in (1.0, 0.0, 0.5)],
+        )
+        batch = buf.sample(4, current_version=v)
+        buf.update_priorities(batch.indices[:2], [0.3, 0.6])
+    assert buf.n_rebases >= 1
+    records = [dict(r) for r in log.records]
+    verify_chain(records)  # baseline must be valid
+    return records
+
+
+def _first(records: list[dict], op: str, **match) -> int:
+    for i, r in enumerate(records):
+        if r["op"] == op and all(r.get(k) == v for k, v in match.items()):
+            return i
+    raise RuntimeError(f"baseline has no {op} record matching {match}")
+
+
+def _bump(records: list[dict], idx: int, field: str, delta: int = 1) -> list[dict]:
+    """Copy records, add ``delta`` to an integer-as-string field, re-chain from idx."""
+    mutant = copy.deepcopy(records)
+    mutant[idx][field] = str(int(mutant[idx][field]) + delta)
+    return _recompute_digests_from(mutant, idx)
+
+
+def _decay_mutants() -> list[tuple[list[dict], str]]:
+    """One mutant per rule the decay replay enforces, plus a few variants."""
+    base = _build_decay_chain()
+    mutants: list[tuple[list[dict], str]] = []
+
+    # config placement / presence
+    moved = base[1:2] + base[0:1] + base[2:]
+    mutants.append((_recompute_digests_from(moved, 0), "decay_config_not_first"))
+    mutants.append((_recompute_digests_from(copy.deepcopy(base[1:]), 0), "decay_config_removed"))
+    cfg_tamper = copy.deepcopy(base)
+    cfg_tamper[0]["half_life"] = "2"
+    mutants.append((_recompute_digests_from(cfg_tamper, 0), "decay_config_half_life_changed"))
+
+    # leaf must equal the recomputed decay formula
+    for n, i in enumerate([j for j, r in enumerate(base) if r["op"] == "insert"][:3]):
+        mutants.append((_bump(base, i, "new_priority_int"), f"insert_leaf_plus_one_{n}"))
+        mutants.append((_bump(base, i, "base_priority_int"), f"insert_q_plus_one_{n}"))
+    u = _first(base, "update")
+    mutants.append((_bump(base, u, "new_priority_int", -1), "update_leaf_minus_one"))
+    mutants.append((_bump(base, u, "base_priority_int", 7), "update_q_plus_seven"))
+
+    # epoch / version bookkeeping
+    i = _first(base, "insert")
+    mutants.append((_bump(base, i, "base_epoch"), "insert_wrong_base_epoch"))
+    mutants.append((_bump(base, i, "entry_version"), "insert_version_newer_than_current"))
+    mutants.append((_bump(base, u, "entry_version"), "update_version_changed_without_reset"))
+    advances = [j for j, r in enumerate(base) if r["op"] == "advance_version"]
+    mutants.append((_bump(base, advances[1], "new_version", -1), "advance_version_backwards"))
+    adv = copy.deepcopy(base)
+    adv[advances[1]]["old_version"] = str(int(adv[advances[1]]["old_version"]) + 1)
+    adv[advances[1]]["new_version"] = str(int(adv[advances[1]]["new_version"]) + 1)
+    mutants.append((_recompute_digests_from(adv, advances[1]), "advance_version_old_mismatch"))
+
+    # staleness protocol
+    s = _first(base, "evict", reason="stale")
+    deleted = copy.deepcopy(base)
+    deleted.pop(s)
+    mutants.append((_recompute_digests_from(deleted, s), "expired_entry_never_evicted"))
+    relabel = copy.deepcopy(base)
+    relabel[s]["reason"] = "capacity"
+    mutants.append((_recompute_digests_from(relabel, s), "stale_evict_relabelled_capacity"))
+    c = _first(base, "evict", reason="capacity")
+    relabel2 = copy.deepcopy(base)
+    relabel2[c]["reason"] = "stale"
+    mutants.append((_recompute_digests_from(relabel2, c), "live_entry_evicted_as_stale"))
+    noreason = copy.deepcopy(base)
+    del noreason[c]["reason"]
+    mutants.append((_recompute_digests_from(noreason, c), "evict_reason_missing"))
+
+    # rebase
+    r = _first(base, "rebase")
+    swapped = copy.deepcopy(base)
+    swapped[r - 1], swapped[r] = swapped[r], swapped[r - 1]
+    mutants.append((_recompute_digests_from(swapped, r - 1), "rebase_before_last_stale_evict"))
+    mutants.append((_bump(base, r, "new_base_epoch"), "rebase_non_canonical_epoch"))
+    mutants.append((_bump(base, r, "root_total_after"), "rebase_total_after_wrong"))
+    mutants.append((_bump(base, r, "root_total_before"), "rebase_total_before_wrong"))
+    removed = copy.deepcopy(base)
+    removed.pop(r)
+    mutants.append((_recompute_digests_from(removed, r), "rebase_record_removed"))
+
+    # sample after a rebase must use the shifted tree
+    smp = next(j for j in range(r, len(base)) if base[j]["op"] == "sample")
+    mutants.append((_bump(base, smp, "root_total", 1), "sample_total_ignores_rebase"))
+    return mutants
 
 
 def main() -> None:
