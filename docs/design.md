@@ -504,3 +504,130 @@ buffer built on §7. Its rules, each tested in `tests/test_rollout_buffer.py`:
 the §3 protocol with full-state snapshots (`state_dict`/`load_state_dict`),
 including the attestation log; 70 SIGKILL tests in the crash campaign hit
 every cut point during an `add_group` that evicts and rebases.
+
+## 9. TRL Integration
+
+`reservoir.integrations.trl` (`ReservoirReplay`, `ReservoirGRPOTrainer`)
+connects `RolloutBuffer` to TRL's `GRPOTrainer`. Tested against TRL 1.13.0;
+`_trl_compat.require_trl` refuses a TRL whose `GRPOTrainer` lacks any member
+the adapter relies on and warns on an untested version.
+
+### 9.1 Why not `GRPOWithReplayBufferTrainer`
+
+TRL's experimental `GRPOWithReplayBufferTrainer` was removed from TRL's main
+branch on 2026-09-10 (PR #7132); 1.13.0 is the last release that ships it. At
+that version its constructor has no `replay_buffer` argument, and the trainer
+passes 1-D per-sample tensors to replay helpers that expect
+`(num_groups, num_generations)`, so `group_std_rewards.max(dim=0).values > 0`
+collapses to a scalar: only group 0 of each batch is ever buffered, with a
+single float as its "advantages", and replacement happens only when the whole
+batch has zero variance (issue #6804). That defect lives in the trainer, not
+in its buffer object, so a buffer swap cannot fix it. Under the default
+configuration the trainer also computes no behavior logprobs, which `Rollout`
+requires. The adapter therefore attaches to the stable `GRPOTrainer` instead.
+
+### 9.2 Attachment point
+
+`GRPOTrainer._prepare_inputs` calls `_generate_and_score_completions` once
+per generation step and feeds the dict it returns, shuffled and split into
+micro-batches, to `_compute_loss`. `ReservoirReplayMixin` overrides that one
+method: it calls the original and passes the result to
+`ReservoirReplay.mix(output, trainer)` in train mode. No TRL method body is
+copied; the adapter reads and rewrites only the keys the loss consumes:
+
+| key | shape, meaning |
+|---|---|
+| `prompt_ids`, `prompt_mask` | `(B, Lp)` long, left-padded (suffix mask) |
+| `completion_ids`, `completion_mask` | `(B, Lc)` long, right-padded prefix mask; all zeros for a masked truncated completion |
+| `advantages` | `(B,)` float32, group-centred; a zero-variance group is exactly `0.0` in every row |
+| `old_per_token_logps` | `(B, Lc)` float, optional |
+| `ref_per_token_logps` | `(B, Lc)` float, present iff `beta != 0` |
+| `num_items_in_batch` | 0-d tensor, loss normaliser for the dapo/cispo/vespo losses |
+
+Rows `[g·G, (g+1)·G)` are the `G = num_generations` completions of prompt
+`g`; the shuffle happens after the hook. `ReservoirReplayCallback` raises at
+the end of the first optimizer step if the hook never ran, so a TRL rename of
+the overridden method cannot silently disable replay.
+
+### 9.3 Field mapping
+
+| TRL (row `r` of group `g`) | Reservoir |
+|---|---|
+| `completion_ids[r][:n]`, `n` = prefix length of `completion_mask[r]` | `Rollout.tokens` |
+| `old_per_token_logps[r][:n]` (TRL's, or computed by the adapter) | `Rollout.logprobs` |
+| `advantages[r]` | `Rollout.reward` |
+| unpadded `prompt_ids[r]`, `r`, `global_step` | `Rollout.metadata["prompt_ids"]`, `["row"]`, `["global_step"]` |
+| `ref_per_token_logps[r][:n]` when present | `Rollout.metadata["ref_logprobs"]` |
+| rows of group `g` with a non-empty mask | one `RolloutGroup`; `prompt_id` = BLAKE2b of the prompt ids |
+| `trainer.state.global_step` | `model_version` of `add_group`, `current_version` of `sample` |
+
+`Rollout.reward` holds TRL's advantage rather than the raw reward because
+the raw reward is not part of the loss contract and the advantage is the
+value the loss consumes on replay. The default priority is therefore
+`StoredAdvantagePriority` (`|reward| + ε`), the group-relative magnitude TRL
+has already centred; `AdvantagePriority` would re-centre on the rows that
+survived truncation.
+
+### 9.4 One generation step
+
+1. Refuse what the adapter does not handle: `global_step` below the buffer's
+   version, more than one process, `loss_type == "vespo"` with `beta > 0`,
+   or any of the tool, vLLM or vision keys.
+2. Behavior logprobs: use `old_per_token_logps` if TRL computed it (it does
+   so only when generation and optimizer steps are misaligned, or under vLLM
+   importance correction); otherwise one no-grad forward through
+   `trainer._get_per_token_logps_and_entropies`. Values in `(0, 10⁻³]` are
+   clamped to 0 and counted; larger or non-finite values raise naming the
+   row.
+3. Store: `add_group(prompt_id, global_step, rollouts)` for every live group.
+   Dead groups (all advantages `0.0`) and rows with an empty mask are
+   skipped and counted.
+4. Advance the buffer to `global_step` (stale eviction, rebase if due).
+5. Replay: with `d` dead rows and a non-empty buffer,
+   `sample(d, current_version=global_step)`; each sampled rollout is written
+   row-wise into a dead row (prompt right-aligned, completion left-aligned,
+   masks rebuilt, logprobs and ref logprobs filled), the batch is padded
+   first if a replayed sequence is longer than the current width, and
+   `num_items_in_batch` is recomputed from the final mask. A row in one dead
+   slot may come from any prompt; the loss does not need group contiguity.
+6. A step with nothing to replay returns the dict TRL produced, unchanged
+   (the extra forward of step 2 may still have run; nonclaims §14).
+
+Every function in `_trl_rows.py` returns new tensors; TRL's own tensors are
+reused across micro-steps and are never modified in place.
+
+### 9.5 Importance weights
+
+TRL's loss has no per-sample weight slot. For every supported loss type the
+per-token loss is positively homogeneous of degree 1 in the advantage:
+`−min(ρA, clip(ρ)A) = −w·min(ρA', clip(ρ)A')` with `A = w·A'` and `w > 0`,
+and likewise for the cispo, sapo, bnpo, dr_grpo, dapo and luspo variants. So
+multiplying a replayed row's advantage by its IS weight `w ∈ (0, 1]` is
+exactly the IS-weighted policy-gradient term; the KL term stays unweighted,
+as in classic PER. `vespo` feeds the advantage into a non-linear gamma
+weight and is refused unless `beta = 0`. `float(w)` and the multiply are
+the declared float boundary, as in §6.
+
+### 9.6 What the log records
+
+Per generation step the log gains one `insert` per stored row (with
+`entry_version = global_step`), one `advance_version` when the step moved
+and the `evict`/`rebase` records that follow from it, and one `sample`
+record per step that replayed rows. Generation, reward functions and TRL's
+shuffle are outside the log. Draws are keyed BLAKE2b values and never touch
+the torch RNG, so the adapter does not perturb the rest of the run the way
+`torch.multinomial` in TRL's buffer did.
+
+### 9.7 TRL quirks the design works around
+
+- The removed trainer's `update_with_replay_buffer` also ran on eval
+  batches, crashed on `for item in None` when its buffer was empty, trimmed
+  left-padded prompts from the wrong side, and raised `TypeError` on equal
+  heap scores. The adapter is train-only, treats an empty buffer as "leave
+  dead groups alone", slices by mask side, and has no heap.
+- `old_per_token_logps` is absent under the default configuration; a
+  missing value becomes `per_token_logps.detach()` in the loss, i.e. ratio
+  1 and no clipping for replayed rows. The adapter supplies it whenever rows
+  are replayed.
+- `mask_truncated_completions=True` zeroes a row's whole mask; such rows
+  cannot form a `Rollout` and are skipped.

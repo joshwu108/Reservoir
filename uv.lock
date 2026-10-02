@@ -2924,7 +2924,7 @@ wheels = [
 
 [[package]]
 name = "reservoir"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "gymnasium" },
@@ -2957,6 +2957,10 @@ prefcheck = [
     { name = "transformers" },
     { name = "trl" },
 ]
+trl = [
+    { name = "transformers" },
+    { name = "trl" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -2986,9 +2990,11 @@ requires-dist = [
     { name = "torch", specifier = ">=2.0.0" },
     { name = "transformers", marker = "extra == 'anchor'", specifier = ">=4.40" },
     { name = "transformers", marker = "extra == 'prefcheck'", specifier = ">=4.40" },
+    { name = "transformers", marker = "extra == 'trl'", specifier = ">=4.56.2" },
     { name = "trl", marker = "extra == 'prefcheck'", specifier = ">=0.11" },
+    { name = "trl", marker = "extra == 'trl'", specifier = "==1.13.0" },
 ]
-provides-extras = ["dev", "atari", "prefcheck", "anchor"]
+provides-extras = ["dev", "atari", "trl", "prefcheck", "anchor"]
 
 [package.metadata.requires-dev]
 dev = [

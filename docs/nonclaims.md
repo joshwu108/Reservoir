@@ -91,3 +91,28 @@ versions, or the attested rollout path. `RolloutBuffer` is pure Python.
 crash-atomic (140/140 SIGKILL tests on macOS/APFS, see §6) but makes no
 throughput claim, does not persist custom success predicates, and requires
 JSON-serialisable rollout metadata.
+
+### 13. Replay in TRL and Training Quality
+
+`ReservoirGRPOTrainer` is not claimed to improve or stabilise GRPO training.
+The runs under `benchmarks/modal/results/trl_replay_*` are integration
+checks on a test-size model that cannot learn the task: they show that the
+adapter survives TRL's real call path, that dead groups are replaced, and
+that the attestation log verifies. Loss curves in those files are recorded,
+not interpreted, and TRL's reward statistics (`reward`, `reward_std`,
+`frac_reward_zero_std`) are computed before the hook replaces dead rows, so
+they describe the generated batch rather than the batch trained on.
+
+### 14. TRL Integration Scope
+
+The adapter is tested against TRL 1.13.0 only, text-only, single process.
+It does not handle tool masks, vLLM importance-sampling ratios, vision
+inputs or multi-process training, and refuses them rather than guessing.
+Generation, reward computation and TRL's own row shuffling are outside the
+attestation log; the log covers what the buffer stored, drew and evicted.
+Behavior logprobs stored for replay are those of the training model at
+generation time; when TRL does not compute them the adapter runs one extra
+no-grad forward, which under dropout consumes RNG state, so a step without
+replay is not promised to be bit-identical to a plain `GRPOTrainer` step.
+Priorities are fixed at insertion; the adapter does not re-score replayed
+rows from their training loss.

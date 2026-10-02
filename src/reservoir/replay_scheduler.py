@@ -3,8 +3,6 @@ reservoir.replay_scheduler — Prioritized replay of forgotten anchor examples.
 
 Uses numpy-based priority sampling with IS weight correction (same math as
 FastPERBuffer's sum-tree but adapted for generic anchor dict storage).
-
-See DECISIONS_B.md for rationale on IS weight approximation.
 """
 
 from __future__ import annotations

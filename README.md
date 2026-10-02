@@ -6,8 +6,9 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 
 > **Status:** the rollout buffer, priority strategies, age decay, attestation,
-> checker and durable buffer below are implemented and tested. The TRL and verl
-> integrations and the Stable-Baselines3 / TorchRL adapters are not yet.
+> checker, durable buffer and the TRL integration below are implemented and
+> tested. The verl integration and the Stable-Baselines3 / TorchRL adapters
+> are not yet.
 
 Generating rollouts is the most expensive part of GRPO-style training, and the
 standard recipe uses each rollout once and throws it away. Reservoir is a replay
@@ -175,20 +176,43 @@ is future work.
 ### TRL
 
 ```bash
-pip install "reservoir[trl]"
+pip install "reservoir[trl]"      # pins trl==1.13.0
 ```
 
 ```python
-from reservoir.integrations.trl import ReservoirReplay
+from trl import GRPOConfig
+from reservoir.integrations.trl import ReservoirGRPOTrainer, ReservoirReplay
 
-trainer = GRPOWithReplayBufferTrainer(
+trainer = ReservoirGRPOTrainer(
     model=model,
-    args=args,
+    args=GRPOConfig(...),
     train_dataset=dataset,
-    replay_buffer=ReservoirReplay(capacity=50_000, half_life=4),
+    reward_funcs=[reward],
+    replay_buffer=ReservoirReplay(capacity=50_000, half_life=4, max_policy_age=16,
+                                  seed=0, attest="run-01/attest.jsonl"),
 )
 trainer.train()
 ```
+
+`ReservoirGRPOTrainer` is `GRPOTrainer` plus one override: after each
+generation step it stores every non-empty completion of a prompt whose rewards varied,
+and fills the rows of prompts whose rewards were all equal (which contribute no
+gradient) with rollouts replayed from the buffer. Replayed rows carry their
+behavior logprobs, so the loss applies a real off-policy ratio, and their
+advantages are multiplied by the importance-sampling weight. Versions,
+half-life and `max_policy_age` are counted in optimizer steps. Every insertion,
+draw and eviction goes to the attestation log; `python -m checker.verify`
+checks it. A step with nothing to replay returns the batch TRL produced
+unchanged (see [`docs/nonclaims.md`](docs/nonclaims.md) §14 for the one
+RNG caveat).
+
+Scope: text-only, single process, TRL 1.13.0. The adapter refuses batches
+with tool masks, vLLM importance-sampling ratios or vision inputs, and fails
+with a clear message if the installed TRL lacks the trainer members it relies
+on. It does not target TRL's experimental `GRPOWithReplayBufferTrainer`: TRL
+removed that trainer after 1.13.0, and in 1.13.0 the trainer fed its buffer
+only the first group of each batch. See [`docs/design.md`](docs/design.md)
+§9 for the interface mapping.
 
 ### verl
 

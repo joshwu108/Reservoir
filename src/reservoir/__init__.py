@@ -40,7 +40,7 @@ See ``rollout_buffer.py`` ("Call structure"), ``decayed_tree.py`` and
 this layout, one file per module.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 # Exact buffer (pure Python, arbitrary-precision integer arithmetic)
 from reservoir.buffer import ExactPERBuffer
