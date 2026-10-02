@@ -274,6 +274,7 @@ def _decay_state(first: dict, capacity: Optional[int]) -> Optional[DecayState]:
 
 
 def _require_decay(decay: Optional[DecayState], idx: int, op: str) -> None:
+    """Decay-only records and fields are errors in a log that has no decay_config."""
     if decay is None:
         raise CheckerError(
             f"Record {idx}: {op} requires a decay_config record at the start of the log"

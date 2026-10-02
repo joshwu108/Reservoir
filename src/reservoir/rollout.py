@@ -59,8 +59,8 @@ _EMPTY_METADATA: Mapping[str, Any] = MappingProxyType({})
 # access to ``mean_reward`` or ``reward_std`` instead of at construction.
 # With |reward| <= 2^500, a sum or difference of two rewards is at most
 # 2^501 and its square at most 2^1002, both below the float64 limit of
-# 2^1024. Real rewards (0/1 correctness, small shaped scores) are nowhere
-# near this; the bound exists only so the statistics can never overflow.
+# 2^1024. Typical rewards (0/1 correctness, small shaped scores) are far
+# below this bound, which exists only so the statistics cannot overflow.
 MAX_ABS_REWARD: Final[float] = float(1 << 500)
 
 
@@ -97,9 +97,9 @@ def _is_scalar_sequence(value: object) -> bool:
 
     Any sized iterable qualifies, so numpy arrays and torch tensors pass
     even though they are not ``collections.abc.Sequence``. Strings, bytes,
-    mappings and sets are refused on purpose: iterating them would
-    silently yield characters, keys, or elements in arbitrary order.
-    Element types are checked separately by the caller.
+    mappings and sets are rejected: iterating them would yield characters,
+    keys, or elements in arbitrary order. Element types are checked by the
+    caller.
     """
     if isinstance(value, (str, bytes, bytearray, Mapping, Set)):
         return False
@@ -212,9 +212,8 @@ class Rollout:
         logprobs = _validate_logprobs(self.logprobs, len(tokens))
         reward = _validate_reward(self.reward)
         metadata = _validate_metadata(self.metadata)
-        # A frozen dataclass blocks ``self.x = ...`` even inside __post_init__,
-        # so the validated, normalized copies are stored via object.__setattr__.
-        # This is the standard pattern and the only place it is used.
+        # A frozen dataclass blocks ``self.x = ...`` inside __post_init__ as
+        # well; validated copies are stored through object.__setattr__.
         object.__setattr__(self, "tokens", tokens)
         object.__setattr__(self, "logprobs", logprobs)
         object.__setattr__(self, "reward", reward)

@@ -380,7 +380,7 @@ class DecayedPriorityTree:
         stale entries first), hence so is every internal sum, so shifting
         the whole array keeps the sum-tree invariant without re-propagating.
         ``rebase_priority`` checks the divisibility of each node and raises
-        if a bit would be lost; that would be a bug, not a user error.
+        if a bit would be lost, which would indicate an internal error.
 
         The min-tree is monotone under a right shift, so its internal
         nodes stay consistent too. INFINITY sentinels are left alone.

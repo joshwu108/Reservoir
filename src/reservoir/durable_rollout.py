@@ -194,10 +194,12 @@ class DurableRolloutBuffer:
 
     @property
     def capacity(self) -> int:
+        """Slot count (power of two)."""
         return self._buf.capacity
 
     @property
     def size(self) -> int:
+        """Number of live rollouts."""
         return self._buf.size
 
     def __len__(self) -> int:
@@ -205,44 +207,56 @@ class DurableRolloutBuffer:
 
     @property
     def total(self) -> int:
+        """Sum of decayed leaves, the sampling denominator."""
         return self._buf.total
 
     @property
     def current_version(self) -> int:
+        """Latest committed model version."""
         return self._buf.current_version
 
     @property
     def base_epoch(self) -> int:
+        """Epoch the leaves are shifted relative to."""
         return self._buf.base_epoch
 
     @property
     def n_rebases(self) -> int:
+        """Rebases performed so far."""
         return self._buf.n_rebases
 
     @property
     def params(self):
+        """The validated decay configuration."""
         return self._buf.params
 
     @property
     def attestation_log(self):
+        """The in-memory attestation log, or None."""
         return self._buf.attestation_log
 
     def live_positions(self) -> tuple[int, ...]:
+        """Slots holding a rollout, ascending."""
         return self._buf.live_positions()
 
     def entry(self, position: int):
+        """``(rollout, group)`` at a live slot."""
         return self._buf.entry(position)
 
     def leaf(self, position: int) -> int:
+        """Decayed leaf at a slot, 0 if empty."""
         return self._buf.leaf(position)
 
     def base_priority(self, position: int) -> int:
+        """Fixed-point q of a live slot."""
         return self._buf.base_priority(position)
 
     def entry_version(self, position: int) -> int:
+        """Version a live slot is aged from."""
         return self._buf.entry_version(position)
 
     def verify_trees(self) -> bool:
+        """Recompute both trees' internal nodes; AssertionError on mismatch."""
         return self._buf.verify_trees()
 
     def state_dict(self) -> dict:

@@ -214,6 +214,7 @@ _ROLLOUT_KW = dict(capacity=8, half_life=1, max_policy_age=2)
 
 
 def _rollouts(rewards):
+    """Minimal two-token rollouts with the given rewards."""
     return [Rollout(tokens=[1, 2], logprobs=[-0.1, -0.2], reward=r) for r in rewards]
 
 
@@ -226,6 +227,7 @@ def _rollout_prepare(directory: str, seed: int) -> None:
 
 
 def _rollout_apply(directory: str, seed: int, op_type: str) -> None:
+    """The operation under test: a group add that evicts and rebases, or a priority update."""
     buf = DurableRolloutBuffer(directory, seed=seed, **_ROLLOUT_KW)
     if op_type == "rollout_add_group":
         buf.add_group("g4", 4, _rollouts([1.0, 0.0]))
@@ -235,12 +237,14 @@ def _rollout_apply(directory: str, seed: int, op_type: str) -> None:
 
 
 def _rollout_worker(directory: str, seed: int, op_type: str, cut_point: str, cut_byte: int) -> None:
+    """Child process body: arm the cut point, then run the operation until SIGKILL."""
     os.environ["RESERVOIR_CUT_POINT"] = cut_point
     os.environ["RESERVOIR_CUT_BYTE_OFFSET"] = str(cut_byte)
     _rollout_apply(directory, seed, op_type)
 
 
 def _rollout_snapshot(directory: str, seed: int) -> dict:
+    """Recover the directory with cut points disarmed and return its full state."""
     for k in ["RESERVOIR_CUT_POINT", "RESERVOIR_CUT_BYTE_OFFSET"]:
         os.environ.pop(k, None)
     buf = DurableRolloutBuffer(directory, seed=seed, **_ROLLOUT_KW)

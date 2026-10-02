@@ -1,5 +1,43 @@
 """reservoir: Certified Exact Prioritized Experience Replay
 with Crash Atomicity and Sampling Attestation.
+
+Package layout
+--------------
+Two product surfaces share one exact core.
+
+LLM-RL rollout replay (the newer surface; README quick start):
+    rollout.py          Rollout / RolloutGroup value types. Validation lives here.
+    priorities.py       Pluggable scoring: a float score per rollout or per prompt.
+    decay.py            Pure integer math for age-decayed priorities (design.md §7).
+    decayed_tree.py     Sum-tree + min-tree holding (q, version) per leaf; evicts
+                        stale entries and rebases. The only mutable tree state.
+    rollout_buffer.py   RolloutBuffer: add_group / sample / update_priorities on top
+                        of the tree. Keyed draws, IS weights, slot allocation.
+    rollout_attest.py   Turns buffer events into attestation records.
+    rollout_snapshot.py state_dict / load_state_dict serialisation and validation.
+    durable_rollout.py  Crash-atomic wrapper around RolloutBuffer.
+    dataset_buffer.py   Which prompts to generate rollouts for next (float, numpy).
+
+Classic transition replay (the original surface):
+    buffer.py           ExactPERBuffer: big-integer PER over (s, a, r, s', done).
+    fast_buffer.py / c_buffer.py   Float PER for real training; C-backed when built.
+    sumtree.py          ExactSumTree / ExactMinTree used by both exact buffers.
+    rational.py         float -> exact integer priority (the alpha boundary).
+    durable.py          The intent/segment/commit protocol and DurableBuffer.
+    nstep.py, her.py, gym_wrapper.py   Wrappers over the fast buffer.
+
+Shared:
+    draw.py             Keyed BLAKE2b uniform draws; no RNG anywhere else.
+    attest.py           Hash-chained attestation log records.
+    checker/            Independent verifier. Imports nothing from this package.
+
+Fine-tuning tools (separate from replay): prefcheck.py, trajectory.py,
+report.py (preference-noise detection); anchor_set.py, forgetting_monitor.py,
+replay_scheduler.py (forgetting measurement and replay).
+
+See ``rollout_buffer.py`` ("Call structure"), ``decayed_tree.py`` and
+``decay.py`` with docs/design.md §7 for the replay path. ``tests/`` mirrors
+this layout, one file per module.
 """
 
 __version__ = "0.3.0"

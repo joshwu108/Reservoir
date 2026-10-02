@@ -65,7 +65,7 @@ Subclass and implement one method::
 
 ``rollout`` is a ``Rollout`` and ``group`` the ``RolloutGroup`` it belongs
 to; ``group.mean_reward``, ``group.pass_rate`` and ``group.advantages``
-are the usual inputs. Return any finite float >= 0.
+are typical inputs. Return any finite float >= 0.
 
 Validation contract
 -------------------
@@ -85,9 +85,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Final
 
-# _require_finite_float is shared with rollout.py on purpose: both modules
-# must turn the same bad inputs (NaN, inf, bool, ints too big for a float)
-# into the same ValueError, so there is one implementation.
+# Shared with rollout.py so both modules map the same invalid inputs (NaN,
+# inf, bool, integers too large for a float) to the same ValueError.
 from reservoir.rollout import Rollout, RolloutGroup, _require_finite_float
 
 DEFAULT_EPSILON: Final[float] = 1e-6
@@ -219,6 +218,7 @@ class AdvantagePriority(PriorityStrategy):
         object.__setattr__(self, "epsilon", _require_epsilon(self.epsilon))
 
     def score(self, rollout: Rollout, group: RolloutGroup) -> float:
+        """How far this rollout's reward sits from its group's mean, plus epsilon."""
         return abs(rollout.reward - group.mean_reward) + self.epsilon
 
 
@@ -260,10 +260,12 @@ class PassRateTargeting(PriorityStrategy, PromptPriority):
         object.__setattr__(self, "epsilon", _require_epsilon(self.epsilon))
 
     def score_prompt(self, group: RolloutGroup) -> float:
+        """Gaussian bump: 1 at the target pass rate, falling off with ``width``."""
         z = (group.pass_rate - self.target) / self.width
         return math.exp(-0.5 * z * z) + self.epsilon
 
     def score(self, rollout: Rollout, group: RolloutGroup) -> float:
+        """Same value for every rollout in the group; the score is group-level."""
         return self.score_prompt(group)
 
 
@@ -285,10 +287,12 @@ class PassRateVariance(PriorityStrategy, PromptPriority):
         object.__setattr__(self, "epsilon", _require_epsilon(self.epsilon))
 
     def score_prompt(self, group: RolloutGroup) -> float:
+        """Bernoulli variance of the pass rate: 0.25 at 50%, 0 at all-pass or all-fail."""
         p = group.pass_rate
         return p * (1.0 - p) + self.epsilon
 
     def score(self, rollout: Rollout, group: RolloutGroup) -> float:
+        """Same value for every rollout in the group; the score is group-level."""
         return self.score_prompt(group)
 
 

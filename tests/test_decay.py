@@ -121,18 +121,14 @@ def params_and_entries(draw: st.DrawFn) -> tuple[DecayParams, int, list[tuple[in
 def rebase_case(draw: st.DrawFn) -> tuple[DecayParams, int, list[tuple[int, int]], int]:
     """Valid params, current version, live entries, and a version advance.
 
-    Used by the rebase test. The old version of this strategy drew
-    ``advance`` independently and then ``assume``-filtered away every case
-    where all entries expired, which was most of them and tripped
-    Hypothesis's filter_too_much health check. This one *constructs* a
-    valid case instead:
+    Constructed rather than filtered, so Hypothesis never discards draws:
 
-    - one "survivor" entry has a positive base priority q and is written
-      recently enough that it is still live after the advance, so the
-      rebased tree always has a non-zero total;
-    - ``max_policy_age`` starts at 1 because with 0 any advance >= 1
-      expires every entry and no survivor is possible;
-    - the entries are shuffled so the survivor is not always leaf 0.
+    - one entry has a positive base priority and is written recently
+      enough to survive the advance, so the rebased tree has a non-zero
+      total;
+    - ``max_policy_age`` is at least 1, since with 0 any advance expires
+      every entry;
+    - entries are shuffled so the survivor is not always leaf 0.
     """
     half_life = draw(st.integers(1, 24))
     capacity = draw(st.integers(1, 16))

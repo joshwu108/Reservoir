@@ -45,8 +45,8 @@ The config is checked against the same bit budget the library enforces
 and ``priority_bits + 1 + max_shift + ceil(log2 capacity) <= 64`` for the
 tree, with ``max_shift = ceil(max_policy_age / half_life) + rebase_slack``.
 ``half_life`` is capped at 1024 because building the table is O(h * F)
-big-integer work; without the cap a hostile config could stall the
-checker.
+big-integer work; without the cap an adversarial configuration could
+stall the checker.
 
 ``DecayState`` holds the replay state; ``verify.py`` calls its ``on_*``
 methods as it walks the chain.
@@ -83,8 +83,8 @@ def decay_table(half_life: int, table_frac_bits: int) -> tuple[int, ...]:
     T[k] is the unique integer in [2^F, 2^(F+1)) with
     T[k]^h <= 2^(k + F*h) < (T[k] + 1)^h. Each entry is found by binary
     search over that interval, checking the inequality with exact integer
-    powers. Deliberately not the library's hinted search: a different
-    algorithm reaching the same numbers is the point.
+    powers. This is implemented independently of the library's table
+    construction so that agreement between the two is an external check.
     """
     one = 1 << table_frac_bits
     table = []
@@ -136,6 +136,7 @@ def canonical_base_epoch(current_version: int, cfg: dict) -> int:
 
 
 def is_expired(entry_version: int, current_version: int, cfg: dict) -> bool:
+    """An entry is live for exactly max_policy_age versions after it was written."""
     return current_version - entry_version > cfg["max_policy_age"]
 
 
@@ -149,6 +150,7 @@ _TABLE_CACHE: dict[tuple[int, int], tuple[int, ...]] = {}
 
 
 def _table_for(cfg: dict) -> tuple[int, ...]:
+    """The decay table for a config, built once per (half_life, table_frac_bits)."""
     key = (cfg["half_life"], cfg["table_frac_bits"])
     if key not in _TABLE_CACHE:
         _TABLE_CACHE[key] = decay_table(*key)
@@ -164,8 +166,8 @@ def _int_field(record: dict, name: str, idx: int) -> int:
 
     The library writes integers as ``str(int)`` to avoid JSON precision
     limits. Only that exact form is accepted: a JSON number, a boolean,
-    a sign, whitespace or underscores would all be a forgery or a bug,
-    even though ``int()`` would happily parse some of them.
+    a sign, whitespace or underscores are rejected even though ``int()``
+    would accept some of them.
     """
     value = record.get(name)
     if not isinstance(value, str) or not value.isascii() or not value.isdigit():
@@ -180,9 +182,9 @@ def parse_config(record: dict, idx: int) -> dict:
     """Validate a decay_config record and return its parameters as a dict.
 
     Adds the derived ``max_shift`` and ``capacity_bits``. Enforces the
-    bit budget so a hostile config cannot make the replay accept leaves
-    the library could never store, and caps ``half_life`` so the table
-    build stays cheap.
+    bit budget so an adversarial configuration cannot make the replay
+    accept leaves the library could never store, and caps ``half_life``
+    so the table build stays cheap.
     """
     cfg = {name: _int_field(record, name, idx) for name in _CONFIG_INT_FIELDS}
     if cfg["half_life"] < 1 or cfg["capacity"] < 1:
@@ -212,6 +214,7 @@ def parse_config(record: dict, idx: int) -> dict:
 
 
 def has_decay_fields(record: dict) -> bool:
+    """True if a mutation record carries (q, entry_version, base_epoch): a decayed log."""
     return any(name in record for name in _DECAY_FIELDS)
 
 
@@ -271,6 +274,7 @@ class DecayState:
             )
 
     def require_ready_for_rebase(self, idx: int) -> None:
+        """A rebase is valid only after the stale evictions and only if one is due."""
         if self.pending_stale:
             raise CheckerError(
                 f"Record {idx}: rebase before expired entries at positions "
@@ -320,6 +324,8 @@ class DecayState:
     # -- record handlers ---------------------------------------------------
 
     def on_advance(self, record: dict, idx: int) -> None:
+        """Move the replay to the new version and compute what must now happen:
+        which entries are pending stale eviction, and whether a rebase is due."""
         old = _int_field(record, "old_version", idx)
         new = _int_field(record, "new_version", idx)
         if old != self.current_version:
@@ -336,6 +342,8 @@ class DecayState:
         self.pending_rebase = rebase_is_due(new, self.base_epoch, self.cfg)
 
     def on_rebase(self, record: dict, idx: int, tree) -> None:
+        """Check the rebase lands on the canonical epoch, shift the replayed tree
+        exactly, and confirm the recorded totals before and after."""
         old = _int_field(record, "old_base_epoch", idx)
         new = _int_field(record, "new_base_epoch", idx)
         before = _int_field(record, "root_total_before", idx)
@@ -404,6 +412,8 @@ class DecayState:
         self.entries[pos] = (q, t)
 
     def _check_update_version(self, idx: int, pos: int, t: int) -> None:
+        """An update keeps the entry's version, or re-stamps it to the current one
+        when the config says reset_age_on_update; anything else is a forgery."""
         stored_t = self.entries[pos][1]
         if self.cfg["reset_age_on_update"]:
             if t != self.current_version:
@@ -419,6 +429,9 @@ class DecayState:
     def _on_evict(
         self, record: dict, idx: int, pos: int, q: int, t: int, new_leaf: int, tree
     ) -> None:
+        """An evict must name a live entry with its true (q, t), zero the leaf, and
+        give a reason the current state allows: "stale" only for an expired entry,
+        "capacity" only for the oldest one, none while evictions are pending."""
         if pos not in self.entries:
             raise CheckerError(f"Record {idx}: evict of position {pos} with no live entry")
         if new_leaf != 0:

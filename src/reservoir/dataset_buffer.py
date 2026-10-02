@@ -128,7 +128,7 @@ class DatasetBuffer:
 
     @property
     def mode(self) -> str:
-        """"audit" (uniform sampling) or "accelerated" (prioritized sampling)."""
+        """Sampling mode: ``"audit"`` (uniform) or ``"accelerated"`` (prioritized)."""
         return self._mode
 
     @property

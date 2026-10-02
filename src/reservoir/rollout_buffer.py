@@ -1,8 +1,6 @@
 """
 reservoir.rollout_buffer — Prioritized replay buffer for LLM-RL rollouts.
 
-This is the buffer the README's quick start describes::
-
     buf = RolloutBuffer(capacity=50_000, priority=AdvantagePriority(),
                         half_life=4, max_policy_age=16, seed=0)
     buf.add_group(prompt_id, model_version=step, rollouts=[...])
@@ -43,14 +41,37 @@ entries *newer* than itself: if a late-arriving group would have to
 displace fresher data, ``add_group`` raises and the buffer is unchanged.
 A single group larger than the capacity is an error.
 
+Call structure
+--------------
+``sample(batch_size, current_version)``:
+    advance(current_version)            -> DecayedPriorityTree.advance
+        evict expired entries             (reason "stale")
+        rebase if the shift budget is hit (right-shift every node)
+    draw_uniform_below(total, ...)      -> draw.py, one keyed draw per rollout
+    tree.prefix_sum_locate(draw)        -> sumtree.py, walk root to leaf
+    _is_weight(leaf, total, minimum, n) -> the only float on this path
+    attester.record_sample(...)         -> attest.py append_sample
+
+``add_group(prompt_id, model_version, rollouts)``:
+    RolloutGroup(...)                   -> rollout.py validates every field
+    _check_and_score_group              -> priorities.validated_score, then
+                                           score ** alpha, decay.quantize_priority
+                                           (nothing mutated yet; errors stop here)
+    advance(model_version)              -> as above, if the version is newer
+    _allocate(n)                        -> free-list heap, then oldest-version evicts
+    tree.write(pos, q, version)         -> decay.inflated_priority gives the leaf
+    attester.record_write(event)        -> attest.py append_mutation
+
+``update_priorities(indices, scores)``: validate all, then tree.write per index
+with decay.version_after_update deciding whether the entry's age resets.
+
 Determinism
 -----------
 Draws are keyed BLAKE2b hashes of ``(seed, buffer_id, draw_counter)``
-where ``draw_counter`` increases by one per sampled rollout across the
-buffer's lifetime, so no two draws ever share a key whatever batch sizes
-are used. Two buffers with the same seed and the same sequence of calls
-produce identical batches and identical logs. (``ExactPERBuffer`` keys on
-``batch * batch_size + k``, which collides when batch sizes vary.)
+where ``draw_counter`` increases by one per sampled rollout for the
+lifetime of the buffer, so no two draws share a key regardless of batch
+size. Two buffers with the same seed and the same sequence of calls
+produce identical batches and identical logs.
 """
 
 from __future__ import annotations

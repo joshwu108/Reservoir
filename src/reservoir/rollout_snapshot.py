@@ -3,9 +3,9 @@ reservoir.rollout_snapshot — Serialise and validate RolloutBuffer snapshots.
 
 ``RolloutBuffer.state_dict()`` and ``load_state_dict()`` delegate the
 per-group and per-slot work here. Everything that enters from a snapshot
-is treated as untrusted input: a snapshot is a file on disk that a crash,
-a bad copy or a hand edit can damage, so every index, counter and
-reference is checked before the buffer is rebuilt from it.
+is treated as untrusted input: a snapshot is a file on disk and may have
+been corrupted or edited, so every index, counter and reference is
+checked before the buffer is rebuilt from it.
 
 Nothing here is specific to durability; a snapshot is also a plain
 checkpoint. ``durable_rollout.py`` adds the crash-atomic commit protocol

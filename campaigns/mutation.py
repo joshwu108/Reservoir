@@ -470,6 +470,7 @@ def _build_decay_chain(seed: int = 11) -> list[dict]:
 
 
 def _first(records: list[dict], op: str, **match) -> int:
+    """Index of the first record with this op whose fields equal ``match``."""
     for i, r in enumerate(records):
         if r["op"] == op and all(r.get(k) == v for k, v in match.items()):
             return i

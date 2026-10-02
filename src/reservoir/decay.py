@@ -225,6 +225,12 @@ def _bisect_root_of_power_of_two(exponent: int, degree: int, low: int, high: int
 
 @lru_cache(maxsize=64)
 def _decay_table_cached(half_life: int, table_frac_bits: int) -> tuple[int, ...]:
+    """Build T[0..h-1] once per (h, F).
+
+    T[1] is found by bisection; each later T[k] starts from the previous
+    entry times T[1] (a good guess) and is corrected by exact comparison,
+    so the hint only speeds the search and never changes the result.
+    """
     one = 1 << table_frac_bits
     if half_life == 1:
         return (one,)
