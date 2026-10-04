@@ -72,8 +72,11 @@ tiny Qwen2 test model) three times: **a** and **b** with the same seeds,
 (`results/reproducible_grpo_report.json`, logs under
 `benchmarks/modal/results/repro_cpu_12steps_seed42/`) shows a and b with
 byte-identical logs and manifests and the same head digest, and a and c
-first differing at record 1, an insert, classified `data`. The GPU version
-is `benchmarks/modal/reproducible_grpo_real.py`.
+first differing at record 1, an insert, classified `data`. The GPU
+versions are `benchmarks/modal/reproducible_grpo_real.py` (HF generate on a
+T4, with and without PyTorch's deterministic kernels) and
+`benchmarks/modal/reproducible_grpo_vllm.py` (vLLM batch-invariant mode on
+an A10G, on a 0.5B model); neither has been run yet.
 
 ## Reading a diff
 

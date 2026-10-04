@@ -31,7 +31,8 @@ Usage::
 
 What this does not show: GPU determinism. HF ``generate`` on a GPU is not
 guaranteed to be bitwise reproducible; ``benchmarks/modal/reproducible_grpo_real.py``
-runs the same comparison on a GPU. "PASS" means exactly: a and b have
+(HF generate) and ``benchmarks/modal/reproducible_grpo_vllm.py`` (vLLM
+batch-invariant mode) run the same comparison on a GPU. "PASS" means exactly: a and b have
 byte-identical logs and manifests, and a and c first differ on an insert
 record classified ``data``. No training-quality claim is made
 (docs/nonclaims.md).

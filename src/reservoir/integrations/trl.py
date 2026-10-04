@@ -89,7 +89,14 @@ Scope and guards
 Text-only, single process, tested against TRL 1.13.0 (see
 ``_trl_compat``). Outputs carrying tool masks, vLLM importance-sampling
 ratios or vision inputs raise ``NotImplementedError`` naming the key;
-more than one process raises too. ``ReservoirReplayCallback`` raises at
+more than one process raises too. One vLLM key is tolerated: TRL attaches
+``sampling_per_token_logps`` (the logprobs vLLM reported while sampling)
+to every vLLM batch, but with ``vllm_importance_sampling_correction=False``
+and no ``off_policy_mask_threshold`` the loss never reads it. In that
+case the hook drops the key from the batch (counted in
+``stats["dropped_sampling_logprobs"]``) rather than refusing a batch TRL
+would have trained on identically; replayed rows have no vLLM logprobs
+to put there. With the correction on, the key is refused as before. ``ReservoirReplayCallback`` raises at
 the end of the first optimizer step if the hook never ran, so a TRL
 rename of the overridden method cannot silently disable replay.
 
@@ -145,8 +152,11 @@ UNSUPPORTED_OUTPUT_KEYS: Final[tuple[str, ...]] = (
 
 STAT_NAMES: Final[tuple[str, ...]] = (
     "hook_calls", "ingested_rows", "ingested_groups", "dead_groups", "skipped_rows",
-    "clamped_logprobs", "replaced_rows", "logprob_forwards",
+    "clamped_logprobs", "replaced_rows", "logprob_forwards", "dropped_sampling_logprobs",
 )
+
+SAMPLING_LOGPROBS_KEY: Final[str] = "sampling_per_token_logps"
+"""vLLM's sampling logprobs; dropped when TRL would not use them, refused otherwise."""
 
 
 @dataclass(frozen=True)
@@ -257,6 +267,7 @@ class ReservoirReplay:
         stored before it stay stored and the counters are not updated.
         """
         step = int(trainer.state.global_step)
+        output = self._drop_unused_sampling_logprobs(output, trainer)
         self._check(output, trainer, step)
         self.last_replay = None
         self.stats["hook_calls"] += 1
@@ -269,6 +280,24 @@ class ReservoirReplay:
         if not conversion.dead_rows or self.buffer.size == 0 or self.buffer.total == 0:
             return output
         return self._replay(output, trainer, step, logprobs, conversion.dead_rows)
+
+    def _drop_unused_sampling_logprobs(self, output: dict, trainer: Any) -> dict:
+        """Remove vLLM's sampling logprobs when nothing downstream reads them.
+
+        TRL 1.13.0 consumes ``sampling_per_token_logps`` only for the vLLM
+        importance-sampling correction and for off-policy masking. With
+        both off, the key is dead weight that would otherwise make the
+        adapter refuse the batch. Returns ``output`` itself when there is
+        nothing to drop.
+        """
+        if SAMPLING_LOGPROBS_KEY not in output:
+            return output
+        correction = bool(getattr(trainer, "vllm_importance_sampling_correction", False))
+        masking = getattr(trainer, "off_policy_mask_threshold", None) is not None
+        if correction or masking or "importance_sampling_ratio" in output:
+            return output  # _check refuses it with the usual message
+        self.stats["dropped_sampling_logprobs"] += 1
+        return {k: v for k, v in output.items() if k != SAMPLING_LOGPROBS_KEY}
 
     def _check(self, output: dict, trainer: Any, step: int) -> None:
         """Refuse configurations the adapter does not handle, before touching anything."""

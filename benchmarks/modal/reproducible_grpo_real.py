@@ -1,112 +1,104 @@
 """benchmarks/modal/reproducible_grpo_real.py
 
-The reproducibility demo (``demo/reproducible_grpo.py``) on a GPU, in two
-tiers. Each tier runs the Phase 2 GRPO integration three times, exactly as
-the CPU demo does: **a** and **b** with the same seeds, **c** with a
-different data seed, then verifies every log with its manifest and runs
-``checker.diff`` on the pairs.
+The reproducibility demo (``demo/reproducible_grpo.py``) on a GPU with HF
+``generate``: the same three runs as the CPU demo (**a** and **b** with the
+same seeds, **c** with a different data seed), on a T4, with the Phase 2
+image and model. Every log is verified with its manifest and the pairs are
+compared with ``checker.diff``.
 
-Tier A: ``hf``
-    HF ``generate`` on a T4, the Phase 2 image. HF generation on a GPU is
-    not guaranteed to be bitwise reproducible run to run, so the point of
-    this tier is to *measure* it: either a and b are identical (the GRPO
-    run is bitwise reproducible on this hardware) or ``checker.diff``
-    locates the first insert where the generated data differed and shows
-    that Reservoir's draws were identical up to it. Both outcomes are
-    reported as what they are.
+HF generation on a GPU is not guaranteed to be bitwise reproducible run to
+run, so one invocation runs the triplet twice, in two containers:
 
-Tier B: ``vllm``
-    vLLM in TRL's colocate mode with ``VLLM_BATCH_INVARIANT=1`` (vLLM's
-    batch-invariant kernels, which need compute capability 8.0 or higher,
-    so an A10G or L4, not a T4) and ``vllm_importance_sampling_correction=False``
-    (TRL only adds the vLLM importance-sampling keys the adapter refuses
-    when that correction is on). The expected outcome is identical logs.
-    The vLLM release that co-installs with ``trl==1.13.0`` and
-    ``transformers==5.17.0`` is not known in advance: ``RESERVOIR_VLLM_VERSION``
-    sets the pin for the image and the default below is a starting point
-    for that dependency search, not a tested combination. If no image
-    resolves, this tier is reported as blocked, with the error, and Tier A
-    stands on its own.
+- ``plain``: PyTorch defaults, which is how the Phase 2 integration ran.
+- ``deterministic``: ``CUBLAS_WORKSPACE_CONFIG=:4096:8`` on the image and
+  ``torch.use_deterministic_algorithms(True, warn_only=True)`` plus
+  deterministic cuDNN in the process. The two differ in which kernels
+  PyTorch may pick, so they are kept in separate containers (the cuBLAS
+  setting is read when CUDA initialises).
 
-Results land under ``benchmarks/modal/results/repro_<tier>_<gpu>_<steps>steps_seed<seed>/``
-as ``{a,b,c}/attest.jsonl``, ``{a,b,c}/manifest.jsonl`` and ``report.json``
-in the same shape as the CPU demo's report, and ``tests/test_trl_results.py``
-re-verifies every committed ``repro_*`` directory.
+Each variant ends with one of three verdicts, and all are reported as
+what they are: ``IDENTICAL`` (a and b byte-identical, a and c first
+differ on an insert classified ``data``), ``GENERATION_NONDETERMINISTIC``
+(a and b differ although seeds match; ``checker.diff`` locates the first
+insert where the generated data differed and shows that every draw before
+it was identical), or ``UNEXPECTED``.
+
+The vLLM batch-invariant tier is a separate script,
+``benchmarks/modal/reproducible_grpo_vllm.py``, because it needs a
+different image and model and must not be built when only this tier runs.
+
+Results land under
+``benchmarks/modal/results/repro_hf_t4_<variant>_<steps>steps_seed<seed>/``
+as ``{a,b,c}/attest.jsonl``, ``{a,b,c}/manifest.jsonl`` and
+``report.json``; ``tests/test_trl_results.py`` re-verifies every committed
+``repro_*`` directory.
 
 Usage
 -----
-    modal run benchmarks/modal/reproducible_grpo_real.py --tier hf                    # T4, 12 steps x 3 runs
-    modal run benchmarks/modal/reproducible_grpo_real.py --tier hf --max-steps 40
-    RESERVOIR_VLLM_VERSION=0.11.0 modal run benchmarks/modal/reproducible_grpo_real.py --tier vllm
+    modal run benchmarks/modal/reproducible_grpo_real.py                  # 12 steps x 3 runs x 2 variants
+    modal run benchmarks/modal/reproducible_grpo_real.py --max-steps 40
+    modal run benchmarks/modal/reproducible_grpo_real.py --variants plain
 
-Cost estimate, not yet measured: Tier A about 3 x 10 min on a T4 at $0.59/h
-(about $0.30); Tier B image builds plus 3 x 10 min on an A10G at $1.10/h
-(about $1 to $3 if the image resolves).
+Cost estimate, not yet measured: the tiny model trains 40 steps in about
+ten seconds on CPU, so each container is dominated by start-up and the
+first model download (about two to four minutes on a T4 at $0.59/h);
+expect well under $0.50 for both variants.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 from pathlib import Path
 
 import modal
 
-from benchmarks.modal.trl_replay_real import _DEPS, _repo_src, hf_cache, image, run_grpo
+from benchmarks.modal.trl_replay_real import hf_cache, image, run_grpo
 
-RESULTS_DIR = Path(__file__).parent / "results"
-VLLM_VERSION = os.environ.get("RESERVOIR_VLLM_VERSION", "0.11.0")
-VLLM_GPU = "A10G"
-HF_GPU = "T4"
+REPO = Path(__file__).resolve().parents[2]
+RESULTS_DIR = REPO / "benchmarks" / "modal" / "results"
+GPU = "T4"
 
-vllm_image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .pip_install(*_DEPS, f"vllm=={VLLM_VERSION}")
-    .env({"HF_HOME": "/hf_cache", "VLLM_BATCH_INVARIANT": "1"})
-    .add_local_dir(_repo_src, remote_path="/reservoir_src")
-)
+deterministic_image = image.env({"CUBLAS_WORKSPACE_CONFIG": ":4096:8"})
 
-app = modal.App("reservoir-reproducible-grpo")
-
-VLLM_CONFIG = {
-    "use_vllm": True,
-    "vllm_mode": "colocate",
-    "vllm_importance_sampling_correction": False,
-    "vllm_gpu_memory_utilization": 0.3,
-}
+app = modal.App("reservoir-reproducible-grpo-hf")
 
 
-def run_triplet(max_steps: int, seed: int, buffer_seed: int, extra_config: dict | None = None) -> dict:
-    """Runs a, b (same seeds) and c (data seed + 1); returns the three run records."""
+def run_triplet(max_steps: int, seed: int, buffer_seed: int, *, torch_deterministic: bool = False,
+                extra_config: dict | None = None, model_id: str | None = None) -> dict:
+    """Runs a, b (same seeds) and c (data seed + 1) in this process; returns the three run records."""
     sys.path.insert(0, "/reservoir_src")
     out: dict = {}
     for name, data_seed in (("a", seed), ("b", seed), ("c", seed + 1)):
         started = time.time()
-        result = run_grpo(
+        kwargs = dict(
             max_steps=max_steps, seed=data_seed, buffer_seed=buffer_seed,
             attest_path=f"/tmp/{name}.attest.jsonl", manifest_path=f"/tmp/{name}.manifest.jsonl",
             output_dir=f"/tmp/{name}_trainer", extra_config=extra_config,
+            torch_deterministic=torch_deterministic,
         )
+        if model_id is not None:
+            kwargs["model_id"] = model_id
+        result = run_grpo(**kwargs)
         result["wall_clock_seconds"] = round(time.time() - started, 2)
         result["seed"], result["buffer_seed"] = data_seed, buffer_seed
         out[name] = result
     return out
 
 
-@app.function(gpu=HF_GPU, image=image, volumes={"/hf_cache": hf_cache}, timeout=3600)
-def run_hf(max_steps: int = 12, seed: int = 42, buffer_seed: int = 0) -> dict:
+@app.function(gpu=GPU, image=image, volumes={"/hf_cache": hf_cache}, timeout=3600)
+def run_plain(max_steps: int = 12, seed: int = 42, buffer_seed: int = 0) -> dict:
     return run_triplet(max_steps, seed, buffer_seed)
 
 
-@app.function(gpu=VLLM_GPU, image=vllm_image, volumes={"/hf_cache": hf_cache}, timeout=3600)
-def run_vllm(max_steps: int = 12, seed: int = 42, buffer_seed: int = 0) -> dict:
-    return run_triplet(max_steps, seed, buffer_seed, extra_config=VLLM_CONFIG)
+@app.function(gpu=GPU, image=deterministic_image, volumes={"/hf_cache": hf_cache}, timeout=3600)
+def run_deterministic(max_steps: int = 12, seed: int = 42, buffer_seed: int = 0) -> dict:
+    return run_triplet(max_steps, seed, buffer_seed, torch_deterministic=True)
 
 
-def write_triplet(results: dict, out_dir: Path) -> dict:
-    """Write the three logs and manifests, verify, diff, and return the report."""
+def write_triplet(results: dict, out_dir: Path, label: str) -> dict:
+    """Write the three logs and manifests, verify, diff, and return (and write) the report."""
     from checker.diff import diff_logs
     from checker.transcript import build_transcript
     from checker.verify import verify_json_lines
@@ -120,12 +112,14 @@ def write_triplet(results: dict, out_dir: Path) -> dict:
         manifest.write_text(result["attestation"]["manifest_text"])
         verified = verify_json_lines(attest.read_text(), manifest=manifest.read_text())
         runs[name] = {
-            "attest": str(attest.relative_to(RESULTS_DIR.parents[1])),
-            "manifest": str(manifest.relative_to(RESULTS_DIR.parents[1])),
-            "seed": result["seed"], "buffer_seed": result["buffer_seed"],
+            "attest": str(attest.relative_to(REPO)),
+            "manifest": str(manifest.relative_to(REPO)),
+            "seed": result["seed"], "buffer_seed": result["buffer_seed"], "model": result["model"],
             "head_digest": result["attestation"]["head_digest"], "records": result["attestation"]["records"],
             "examples_committed": len(verified.content.history), "totals": result["totals"],
             "versions": result["versions"], "device": result["config"]["device"],
+            "torch_deterministic": result["config"]["torch_deterministic"],
+            "extra_config": result["config"]["extra_config"],
             "wall_clock_seconds": result["wall_clock_seconds"],
         }
     logs = {n: [json.loads(l) for l in (out_dir / n / "attest.jsonl").read_text().splitlines() if l] for n in runs}
@@ -137,13 +131,12 @@ def write_triplet(results: dict, out_dir: Path) -> dict:
     first = diffs["a_vs_c"]["first_difference"]
     data = diffs["a_vs_c"]["class"] == "data" and first is not None and logs["a"][first]["op"] == "insert"
     report = {
-        "demo": "reproducible_grpo", "device": runs["a"]["device"], "versions": runs["a"]["versions"],
+        "demo": "reproducible_grpo", "variant": label, "device": runs["a"]["device"],
+        "model": runs["a"]["model"], "versions": runs["a"]["versions"],
         "runs": runs, "same_seed_identical": same, "different_data_seed_class": diffs["a_vs_c"]["class"],
         "diffs": diffs,
         "transcript_a": {"sampled_rows": transcript["sampled_rows"], "sources": transcript["sources"],
                          "examples_committed": len(transcript["content"])},
-        # On a GPU, a and b differing is a finding about the generation engine,
-        # not a failure of the comparison: the report says which it was.
         "verdict": "IDENTICAL" if same and data else ("GENERATION_NONDETERMINISTIC" if data else "UNEXPECTED"),
         "verdict_means": {
             "IDENTICAL": "a and b have byte-identical logs and manifests; a and c first differ on an insert "
@@ -158,22 +151,26 @@ def write_triplet(results: dict, out_dir: Path) -> dict:
     return report
 
 
-@app.local_entrypoint()
-def main(tier: str = "hf", max_steps: int = 12, seed: int = 42, buffer_seed: int = 0):
-    if tier == "hf":
-        results = run_hf.remote(max_steps=max_steps, seed=seed, buffer_seed=buffer_seed)
-        gpu = HF_GPU.lower()
-    elif tier == "vllm":
-        results = run_vllm.remote(max_steps=max_steps, seed=seed, buffer_seed=buffer_seed)
-        gpu = VLLM_GPU.lower()
-    else:
-        raise SystemExit(f"--tier must be hf or vllm, got {tier!r}")
-    out_dir = RESULTS_DIR / f"repro_{tier}_{gpu}_{max_steps}steps_seed{seed}"
-    report = write_triplet(results, out_dir)
+def print_report(report: dict, out_dir: Path) -> None:
+    print(f"== {report['variant']} on {report['device']} ({report['model']}) ==")
     for name, run in report["runs"].items():
-        print(f"run {name}: seed={run['seed']} records={run['records']} head={run['head_digest'][:16]}… "
-              f"({run['wall_clock_seconds']}s on {run['device']})")
-    print(f"a vs b: {report['diffs']['a_vs_b']['class']}; a vs c: {report['diffs']['a_vs_c']['class']} "
-          f"at record {report['diffs']['a_vs_c']['first_difference']}")
+        print(f"run {name}: seed={run['seed']} records={run['records']} replaced_rows={run['totals']['replaced_rows']} "
+              f"head={run['head_digest'][:16]}… ({run['wall_clock_seconds']}s)")
+    ab, ac = report["diffs"]["a_vs_b"], report["diffs"]["a_vs_c"]
+    print(f"a vs b: {ab['class']}" + (f" at record {ab['first_difference']}" if not ab["identical"] else ""))
+    print(f"a vs c: {ac['class']} at record {ac['first_difference']}")
     print(f"verdict: {report['verdict']} ({report['verdict_means'][report['verdict']]})")
     print(f"wrote {out_dir / 'report.json'}")
+
+
+@app.local_entrypoint()
+def main(max_steps: int = 12, seed: int = 42, buffer_seed: int = 0, variants: str = "plain,deterministic"):
+    wanted = [v.strip() for v in variants.split(",") if v.strip()]
+    functions = {"plain": run_plain, "deterministic": run_deterministic}
+    unknown = [v for v in wanted if v not in functions]
+    if unknown:
+        raise SystemExit(f"--variants must be from {sorted(functions)}, got {unknown}")
+    for variant in wanted:
+        results = functions[variant].remote(max_steps=max_steps, seed=seed, buffer_seed=buffer_seed)
+        out_dir = RESULTS_DIR / f"repro_hf_{GPU.lower()}_{variant}_{max_steps}steps_seed{seed}"
+        print_report(write_triplet(results, out_dir, variant), out_dir)

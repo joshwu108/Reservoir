@@ -110,15 +110,28 @@ def run_grpo(
     output_dir: str = "/tmp/reservoir_trl_out",
     use_cpu: bool = False,
     extra_config: Optional[dict] = None,
+    model_id: str = MODEL_ID,
+    torch_deterministic: bool = False,
 ) -> dict:
     """Train for ``max_steps`` with replay and return the run record (log and manifest included).
 
     ``source`` is written on every stored row's insert record; ``manifest_path``
     adds the manifest file so the checker can open every content digest.
     ``extra_config`` is merged into ``GRPOConfig`` (the GPU reproducibility
-    runs use it for vLLM settings).
+    runs use it for vLLM settings); ``model_id`` overrides the tiny test
+    model (vLLM cannot serve it: its attention head size is 2).
+    ``torch_deterministic`` asks PyTorch for deterministic kernels
+    (``use_deterministic_algorithms`` with ``warn_only``, cuDNN
+    deterministic, no autotuning). ``CUBLAS_WORKSPACE_CONFIG`` must already
+    be set in the environment before CUDA initialises for that to be
+    complete; the GPU runner sets it on the image.
     """
     import torch
+
+    if torch_deterministic:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
     from datasets import load_dataset
     from transformers import TrainerCallback
     from trl import GRPOConfig
@@ -167,7 +180,7 @@ def run_grpo(
             return control
 
     trainer = ReservoirGRPOTrainer(
-        model=MODEL_ID,
+        model=model_id,
         reward_funcs=[even_length_reward],
         args=args,
         train_dataset=dataset,
@@ -186,7 +199,7 @@ def run_grpo(
     manifest_text = Path(manifest_path).read_text() if manifest_path is not None else None
     log = replay.buffer.attestation_log
     return {
-        "model": MODEL_ID,
+        "model": model_id,
         "dataset": f"{DATASET_ID}/{DATASET_CONFIG}",
         "config": {
             "max_steps": max_steps, "seed": seed, "per_device_train_batch_size": per_device_train_batch_size,
@@ -194,6 +207,7 @@ def run_grpo(
             "capacity": capacity, "half_life": half_life, "max_policy_age": max_policy_age,
             "buffer_seed": buffer_seed, "beta_is": replay.beta, "source": source,
             "device": "cpu" if use_cpu else str(trainer.model.device), "extra_config": extra_config or {},
+            "torch_deterministic": torch_deterministic,
             "bf16": args.bf16, "fp16": args.fp16, "gradient_checkpointing": args.gradient_checkpointing,
         },
         "versions": {"trl": trl.__version__, "transformers": transformers.__version__, "torch": torch.__version__},

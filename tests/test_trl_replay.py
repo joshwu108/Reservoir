@@ -66,9 +66,13 @@ class FakeTrainer(ReservoirReplayMixin, FakeBase):
         step: int = 0,
         loss_type: str = "grpo",
         num_processes: int = 1,
+        vllm_importance_sampling_correction: bool = False,
+        off_policy_mask_threshold=None,
     ) -> None:
         super().__init__(outputs)
         self.replay_buffer = replay
+        self.vllm_importance_sampling_correction = vllm_importance_sampling_correction
+        self.off_policy_mask_threshold = off_policy_mask_threshold
         self.num_generations = G
         self._tokenizer = SimpleNamespace(pad_token_id=PAD)
         self.state = SimpleNamespace(global_step=step)
@@ -219,6 +223,32 @@ def test_unsupported_output_keys_are_refused_by_name(key):
 
     with pytest.raises(NotImplementedError, match=key):
         trainer.generate(step=0)
+
+
+def test_vllm_sampling_logprobs_are_dropped_when_trl_would_not_use_them():
+    # TRL attaches them to every vLLM batch; with the importance correction
+    # and off-policy masking off, the loss never reads them.
+    r = replay()
+    out = mixed_batch()
+    out["sampling_per_token_logps"] = torch.full_like(out["completion_ids"], -0.3, dtype=torch.float32)
+    trainer = FakeTrainer(r, [out])
+    result = trainer.generate(step=1)
+    assert "sampling_per_token_logps" not in result
+    assert r.stats["dropped_sampling_logprobs"] == 1
+    assert r.stats["ingested_rows"] == 2
+
+
+@pytest.mark.parametrize("kwargs", [
+    dict(vllm_importance_sampling_correction=True),
+    dict(off_policy_mask_threshold=0.5),
+])
+def test_vllm_sampling_logprobs_are_refused_when_trl_would_use_them(kwargs):
+    r = replay()
+    out = mixed_batch()
+    out["sampling_per_token_logps"] = torch.zeros_like(out["completion_ids"], dtype=torch.float32)
+    with pytest.raises(NotImplementedError, match="sampling_per_token_logps"):
+        FakeTrainer(r, [out], **kwargs).generate(step=1)
+    assert r.stats["dropped_sampling_logprobs"] == 0
 
 
 def test_multi_process_is_refused():

@@ -108,6 +108,10 @@ they describe the generated batch rather than the batch trained on.
 The adapter is tested against TRL 1.13.0 only, text-only, single process.
 It does not handle tool masks, vLLM importance-sampling ratios, vision
 inputs or multi-process training, and refuses them rather than guessing.
+With vLLM generation it accepts a batch only when the importance-sampling
+correction and off-policy masking are off, in which case it drops vLLM's
+unused sampling logprobs from the batch; replayed rows carry no vLLM
+logprobs.
 Generation, reward computation and TRL's own row shuffling are outside the
 attestation log; the log covers what the buffer stored, drew and evicted.
 Behavior logprobs stored for replay are those of the training model at
