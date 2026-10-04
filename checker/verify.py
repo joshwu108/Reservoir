@@ -18,7 +18,12 @@ What it verifies:
    epoch), expired entries are evicted right after each advance_version,
    and every rebase is exact and lands on the canonical base epoch
    (see checker/decay_replay.py).
-9. Content commitments: insert records carry a well-formed content_digest
+9. When decay_config records the buffer's seed, buffer_id, alpha and beta:
+   every draw_int equals the keyed BLAKE2b draw for its position in the
+   run (checker/draw.py) and every IS weight equals the declared formula
+   evaluated on the replayed tree, so a draw moved within its leaf's range
+   or a reweighted sample is rejected too.
+10. Content commitments: insert records carry a well-formed content_digest
    (all of them or none) and an optional source; every sampled slot holds
    a committed example; with ``--manifest``, the manifest opens exactly the
    log's commitments (see checker/content.py).
@@ -54,6 +59,7 @@ from typing import Optional
 
 from checker.content import ContentState, load_manifest
 from checker.decay_replay import CheckerError, DecayState, has_decay_fields, parse_config
+from checker.draw import draw_uniform_below
 
 # Domain separator — must match attest.py exactly
 _PERSON = b"attest\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
@@ -277,6 +283,8 @@ def _verify_record(
         if decay is not None:
             decay.require_no_pending(idx, "sample")
         _verify_sample(record, idx, tree, priorities)
+        if decay is not None:
+            _verify_declared_draws(record, idx, tree, decay)
         content.on_sample(idx, record)
 
     elif op == "advance_version":
@@ -447,6 +455,58 @@ def _verify_sample(
             )
 
 
+def _verify_declared_draws(record: dict, idx: int, tree: _SumTree, decay: DecayState) -> None:
+    """With seed and beta in the config, recompute each draw and importance weight exactly.
+
+    The weight formula is the library's, evaluated in the same order:
+    ``w = (n * p / total) ** -beta`` normalised by the weight of the
+    smallest positive leaf, with ``n`` the live count, each power taken
+    in float64 once and the quotient exact. A verifier whose libm rounds
+    ``pow`` differently from the producer's would see a mismatch here;
+    docs/nonclaims.md §7 declares that boundary.
+    """
+    samples = record["samples"]
+    if not decay.cfg.get("has_draw_config"):
+        decay.draw_counter += len(samples)
+        return
+    root_total = int(record["root_total"])
+    n = len(decay.entries)
+    positive = [tree.get(pos) for pos in decay.entries if tree.get(pos) > 0]
+    min_leaf = min(positive) if positive else 0
+    beta = decay.cfg["beta"]
+    for k, s in enumerate(samples):
+        counter = decay.draw_counter + k
+        expected = draw_uniform_below(root_total, decay.cfg["seed"], decay.cfg["buffer_id"], counter)
+        if int(s["draw_int"]) != expected:
+            raise CheckerError(
+                f"Record {idx}, sample {k}: draw_int {s['draw_int']} is not the keyed draw for "
+                f"counter {counter} (expected {expected})"
+            )
+        if min_leaf > 0:
+            leaf = tree.get(s["leaf_index"])
+            w = _declared_weight(n, leaf, min_leaf, root_total, beta, idx, k)
+            declared = Fraction(int(s["is_weight_num"]), int(s["is_weight_den"]))
+            if declared != w:
+                raise CheckerError(
+                    f"Record {idx}, sample {k}: IS weight {declared} is not the declared formula's value {w}"
+                )
+    decay.draw_counter += len(samples)
+
+
+def _declared_weight(n: int, leaf: int, min_leaf: int, root_total: int, beta: float, idx: int, k: int) -> Fraction:
+    """The library's IS-weight formula; a config whose beta overflows or underflows it is a forgery."""
+    try:
+        w_i = (n * leaf / root_total) ** (-beta)
+        w_max = (n * min_leaf / root_total) ** (-beta)
+        if w_max == 0.0 or w_i != w_i or w_max != w_max or w_i in (float("inf"), float("-inf")):
+            raise ArithmeticError("weight not finite or normaliser zero")
+        return Fraction(w_i) / Fraction(w_max)
+    except (ArithmeticError, ValueError) as exc:
+        raise CheckerError(
+            f"Record {idx}, sample {k}: the declared beta makes the IS weight unrepresentable ({exc})"
+        ) from exc
+
+
 def verify_json_lines(
     data: str,
     capacity: Optional[int] = None,
@@ -507,7 +567,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 manifest_text = f.read()
         n_records = sum(1 for line in data.strip().split("\n") if line)
         result = verify_json_lines(data, args.capacity, args.allow_truncated, manifest_text)
-    except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, CheckerError) as exc:
+    except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, ArithmeticError,
+            RecursionError, CheckerError) as exc:
         # Everything a malformed file can raise is reported as a failure, never a traceback.
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1

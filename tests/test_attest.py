@@ -29,7 +29,7 @@ from checker.verify import CheckerError, verify_chain, verify_json_lines
 # ---------------------------------------------------------------------------
 
 class TestCheckerImportIsolation:
-    @pytest.mark.parametrize("filename", ["verify.py", "decay_replay.py", "content.py", "transcript.py", "diff.py"])
+    @pytest.mark.parametrize("filename", ["verify.py", "decay_replay.py", "content.py", "transcript.py", "diff.py", "draw.py"])
     def test_checker_does_not_import_src_reservoir(self, filename: str):
         """Nothing under checker/ may import from src/reservoir."""
         checker_path = Path(__file__).parent.parent / "checker" / filename

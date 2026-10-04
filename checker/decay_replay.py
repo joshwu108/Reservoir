@@ -69,6 +69,10 @@ _CONFIG_INT_FIELDS = (
     "half_life", "max_policy_age", "capacity", "priority_bits",
     "priority_frac_bits", "table_frac_bits", "rebase_slack",
 )
+# Optional, all present or all absent: lets the checker recompute every
+# draw (seed, buffer_id) and every importance weight (beta). alpha is the
+# score exponent, recorded so the sampling distribution is fully declared.
+_DRAW_FIELDS = ("seed", "buffer_id", "alpha", "beta")
 _DECAY_FIELDS = ("base_priority_int", "entry_version", "base_epoch")
 _EVICT_REASONS = ("stale", "capacity", "explicit")
 
@@ -199,6 +203,7 @@ def parse_config(record: dict, idx: int) -> dict:
     if not isinstance(reset, bool):
         raise CheckerError(f"Record {idx}: reset_age_on_update must be a bool, got {reset!r}")
     cfg["reset_age_on_update"] = reset
+    cfg.update(_parse_draw_fields(record, idx))
 
     h, age, slack = cfg["half_life"], cfg["max_policy_age"], cfg["rebase_slack"]
     cfg["max_shift"] = -(-age // h) + slack  # ceil(age / h) + slack
@@ -210,6 +215,41 @@ def parse_config(record: dict, idx: int) -> dict:
             f"Record {idx}: decay_config violates the 64-bit budget "
             f"(product {product_bits} bits, tree {tree_bits} bits)"
         )
+    return cfg
+
+
+def _hex_float_field(record: dict, name: str, idx: int) -> float:
+    """A finite float stored in its canonical ``float.hex()`` spelling."""
+    value = record.get(name)
+    if not isinstance(value, str):
+        raise CheckerError(f"Record {idx}: {name} must be a hexadecimal float string, got {value!r}")
+    try:
+        parsed = float.fromhex(value)
+    except (ValueError, OverflowError) as exc:
+        raise CheckerError(f"Record {idx}: {name} is not a hexadecimal float: {exc}") from exc
+    if parsed != parsed or parsed in (float("inf"), float("-inf")) or parsed.hex() != value:
+        raise CheckerError(f"Record {idx}: {name} must be the canonical float.hex() spelling of a finite value")
+    return parsed
+
+
+def _parse_draw_fields(record: dict, idx: int) -> dict:
+    """``seed``, ``buffer_id`` (decimal strings) and ``alpha``, ``beta`` (hex floats), or none."""
+    present = [name for name in _DRAW_FIELDS if name in record]
+    if not present:
+        return {"has_draw_config": False}
+    if len(present) != len(_DRAW_FIELDS):
+        raise CheckerError(f"Record {idx}: decay_config needs all of {_DRAW_FIELDS} or none, got {present}")
+    cfg = {
+        "has_draw_config": True,
+        "seed": _int_field(record, "seed", idx),
+        "buffer_id": _int_field(record, "buffer_id", idx),
+        "alpha": _hex_float_field(record, "alpha", idx),
+        "beta": _hex_float_field(record, "beta", idx),
+    }
+    if cfg["seed"] >= 1 << 64 or cfg["buffer_id"] >= 1 << 64:
+        raise CheckerError(f"Record {idx}: seed and buffer_id must fit in 64 bits")
+    if cfg["alpha"] <= 0 or cfg["beta"] < 0:
+        raise CheckerError(f"Record {idx}: alpha must be > 0 and beta >= 0")
     return cfg
 
 
@@ -257,6 +297,7 @@ class DecayState:
         self.free_at_run_start = 0
         self.evicts_in_run = 0
         self.inserts_after_run = 0
+        self.draw_counter = 0   # rollouts drawn so far; keys the next draw when seed is recorded
 
     # -- protocol guards ---------------------------------------------------
 

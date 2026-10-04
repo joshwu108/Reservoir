@@ -40,10 +40,11 @@ when, under what probability.
    previous record's digest.
 4. **Check.** `python -m checker.verify <log> [--manifest <manifest>]`
    rebuilds the tree from the mutation records, recomputes every decayed
-   leaf and every digest, confirms that each draw lands on the recorded
-   slot, that every sampled slot held a committed example, and, with the
-   manifest, that every line opens its digest. The checker shares no code
-   with the library.
+   leaf, every digest, every keyed draw (the log records the seed and
+   buffer id) and every importance weight (it records `beta`), confirms
+   that each draw lands on the recorded slot and that every sampled slot
+   held a committed example, and, with the manifest, that every line opens
+   its digest. The checker shares no code with the library.
 
 ## What is inside the log and what is not
 
@@ -90,7 +91,7 @@ python -m checker.diff a/attest.jsonl c/attest.jsonl
 | `config` | the `decay_config` records differ, or two sample records have identical draws and slots but different weights (a different `beta`) |
 | `data` | the first differing record is an insert or update, the runs perform different operations at that point (other than the cases below), or two sample records have different sizes: the stored examples, their scores or the group sizes differed upstream; every draw before it was identical |
 | `schedule` | the runs advanced through model versions on a different cadence |
-| `sampler` | two sample records of the same size on an identical prefix differ: the draws differed on identical state. The seed is not in the log, so this is what two runs with different buffer seeds look like; with the same seed it would be a Reservoir defect |
+| `sampler` | two sample records of the same size on an identical prefix differ: the draws differed on identical state. A 0.5.0 log records the seed and buffer id, so two seeds differ at record 0 as `config`; this class is reachable only for older logs or by a Reservoir defect |
 | `internal` | an evict or rebase differs on identical state, or a rebase appears where the other log has a different record; both are deterministic and this must never happen |
 | `truncated` | one log is a prefix of the other |
 
@@ -172,6 +173,11 @@ made for replay (`docs/nonclaims.md` §10, §13).
   digest or source is not detectable. The mutation campaign measures this:
   3 such forgeries survive the log-only check and all 3 are rejected with
   the manifest (`results/mutation_campaign_report.json`, `content_limit`).
+- A log written before version 0.5.0 does not record its seed, buffer id
+  and `beta`; for such a log a draw moved inside its leaf's range or a
+  reweighted sample passes the checker. The campaign measures this
+  (`draw_limit`): both forgeries survive without the configuration and both
+  are rejected with it.
 - The log is a consistency-verification tool, not a security boundary
   (`docs/nonclaims.md` §4).
 - Content digests are over token ids, so the same text under two

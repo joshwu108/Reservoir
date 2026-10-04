@@ -742,7 +742,23 @@ precedence in that order; two `sample` records of different sizes are
 `data`, and two with identical draws and slots but different weights are
 `config` (a different `beta`).
 
-### 10.7 Limit
+### 10.7 Declared draw configuration
+
+`decay_config` optionally records `seed`, `buffer_id` (decimal strings)
+and `alpha`, `beta` (`float.hex()` strings), all four or none. With them
+the checker re-derives every `draw_int` from the keyed BLAKE2b definition
+of §5 (`checker/draw.py`), keyed on the running count of rollouts drawn,
+and every importance weight from the §6 formula evaluated on the replayed
+tree. Without them a draw moved inside its leaf's range, or a reweighted
+sample, passes the range and reduced-form checks; the mutation campaign
+measures this (`draw_limit`). The weight recomputation evaluates `pow` in
+float64 exactly as the library does, so a verifier whose libm rounds `pow`
+differently from the producer's would report a mismatch; nonclaims §7
+declares that boundary. Two runs that differ only in their seed now differ
+at record 0 (`config`), so `checker.diff`'s `sampler` class is reachable
+only for logs without the configuration or by a defect.
+
+### 10.8 Limit
 
 The log commits; the manifest opens. A chain-consistent change to an
 insert's `content_digest` or `source` is invisible without the manifest.

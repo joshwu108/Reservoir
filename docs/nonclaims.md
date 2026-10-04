@@ -53,7 +53,10 @@ protocol, not as evidence of physical durability on those platforms.
 The IS weight computation uses the same float64-once boundary as α-exponentiation.
 The declared IS weights are exact Fraction normalizations of float64 evaluations
 of `(N·P(i))^(-β)`. The gap from the true real IS weights is bounded by 1 ULP
-of float64 `pow()`.
+of float64 `pow()`. When a log records `beta`, the checker recomputes the
+weights with its own float64 `pow()`; the two agree on one platform, and on
+a platform whose C library rounds `pow()` differently the checker reports a
+mismatch rather than accept it. The declared value is the producer's.
 
 ### 8. TLA+ Model Scope
 

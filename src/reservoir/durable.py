@@ -40,17 +40,23 @@ import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
-# Cut-point injection for crash testing
-_CUT_POINT: Optional[str] = os.environ.get("RESERVOIR_CUT_POINT")
-_CUT_BYTE_OFFSET: Optional[int] = (
-    int(os.environ.get("RESERVOIR_CUT_BYTE_OFFSET", "0"))
-    if os.environ.get("RESERVOIR_CUT_BYTE_OFFSET")
-    else None
-)
+# Cut-point injection for crash testing. The environment is read at every
+# check, not at import: a crash-test worker arms the cut after this module
+# has already been imported (multiprocessing re-imports the parent module in
+# the child before the worker function runs), so an import-time binding
+# would never fire. The cost is one dictionary lookup per cut point, on a
+# path dominated by fsync.
+def _cut_point() -> Optional[str]:
+    return os.environ.get("RESERVOIR_CUT_POINT")
+
+
+def _cut_byte_offset() -> Optional[int]:
+    value = os.environ.get("RESERVOIR_CUT_BYTE_OFFSET")
+    return int(value) if value else None
 
 
 def _should_cut(cut_name: str) -> bool:
-    return _CUT_POINT == cut_name
+    return _cut_point() == cut_name
 
 
 def _full_fsync(fd: int) -> None:
@@ -177,9 +183,9 @@ def _write_segment(directory: Path, index: int, data: dict) -> None:
     seg_path = _segment_path(directory, index)
     raw = json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
-    if _should_cut("mid_segment_write") and _CUT_BYTE_OFFSET is not None:
-        # Write only _CUT_BYTE_OFFSET bytes, then kill (simulates torn write)
-        truncated = raw[:_CUT_BYTE_OFFSET]
+    if _should_cut("mid_segment_write") and _cut_byte_offset() is not None:
+        # Write only the first cut-byte-offset bytes, then kill (simulates torn write)
+        truncated = raw[:_cut_byte_offset()]
         with open(seg_path, "wb") as f:
             f.write(truncated)
             f.flush()

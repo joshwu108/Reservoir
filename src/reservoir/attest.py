@@ -22,6 +22,8 @@ Schema (canonical JSON — sorted keys, no spaces):
     decay_config    — must be the first record; the parameters the checker
                       needs to recompute every leaf (half_life, max_policy_age,
                       capacity, bit widths, rebase_slack, reset_age_on_update)
+                      and, optionally, the draw configuration (seed, buffer_id,
+                      alpha, beta) that lets it recompute every draw and weight
     advance_version — old_version, new_version; expired entries must be
                       evicted (reason "stale") before any other record
     rebase          — old_base_epoch, new_base_epoch, root_total_before,
@@ -179,11 +181,19 @@ class AttestationLog:
         table_frac_bits: int,
         rebase_slack: int,
         reset_age_on_update: bool,
+        *,
+        seed: Optional[int] = None,
+        buffer_id: Optional[int] = None,
+        alpha: Optional[float] = None,
+        beta: Optional[float] = None,
     ) -> dict:
         """Append the decay configuration. Must be the very first record.
 
         The checker derives the decay table from ``half_life`` and
-        ``table_frac_bits`` itself; the table is never shipped.
+        ``table_frac_bits`` itself; the table is never shipped. With
+        ``seed``, ``buffer_id``, ``alpha`` and ``beta`` (all four or none)
+        the checker can also recompute every keyed draw and every
+        importance weight; the floats are written in ``float.hex()`` form.
         """
         if self._records:
             raise ValueError("decay_config must be the first record of the log")
@@ -203,6 +213,7 @@ class AttestationLog:
             "reset_age_on_update": reset_age_on_update,
             "prev_digest": self._head_digest,
         }
+        record.update(_draw_fields(seed, buffer_id, alpha, beta))
         return self._commit(record)
 
     def append_advance_version(self, old_version: int, new_version: int, op_counter: int) -> dict:
@@ -381,6 +392,32 @@ def _decay_fields(
             raise ValueError(f"reason must be one of {_EVICT_REASONS}, got {reason!r}")
         fields["reason"] = reason
     return fields
+
+
+def _draw_fields(
+    seed: Optional[int], buffer_id: Optional[int], alpha: Optional[float], beta: Optional[float]
+) -> dict:
+    """The optional draw configuration of a decay_config record: all four or none."""
+    given = {"seed": seed, "buffer_id": buffer_id, "alpha": alpha, "beta": beta}
+    present = [name for name, value in given.items() if value is not None]
+    if not present:
+        return {}
+    if len(present) != len(given):
+        raise ValueError(f"seed, buffer_id, alpha and beta must be given together, got {present}")
+    for name in ("seed", "buffer_id"):
+        value = _require_int(given[name], name, 0)
+        if value >= 1 << 64:
+            raise ValueError(f"{name} must fit in 64 bits, got {value}")
+    for name, minimum_exclusive in (("alpha", True), ("beta", False)):
+        value = given[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or value in (float("inf"), float("-inf")):
+            raise ValueError(f"{name} must be a finite real number, got {value!r}")
+        if (minimum_exclusive and value <= 0) or (not minimum_exclusive and value < 0):
+            raise ValueError(f"{name} must be {'> 0' if minimum_exclusive else '>= 0'}, got {value!r}")
+    return {
+        "seed": str(seed), "buffer_id": str(buffer_id),
+        "alpha": float(alpha).hex(), "beta": float(beta).hex(),  # type: ignore[arg-type]
+    }
 
 
 def _content_fields(op: str, content_digest: Optional[str], source: Optional[str]) -> dict:

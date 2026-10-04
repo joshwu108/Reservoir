@@ -25,14 +25,15 @@ class             meaning
                   runs moved through versions on a different cadence
 ``sampler``       both records are ``sample`` records of the same size
                   on an identical prefix, so the buffer state was
-                  identical and the keyed draws differed. The seed and
-                  buffer id are not part of the log, so this is what two
-                  runs with different seeds look like. With the same seed
-                  it would be a Reservoir defect. Two samples with the
-                  same draws and slots but different weights are
-                  ``config`` (a different ``beta``); two samples of
-                  different sizes are ``data`` (a different number of
-                  dead rows)
+                  identical and the keyed draws differed. A 0.5.0 log
+                  records seed, buffer id and beta in ``decay_config``,
+                  so two runs with different seeds differ at record 0
+                  (``config``) and this class is reachable only for logs
+                  without that configuration, or by a Reservoir defect.
+                  Two samples with the same draws and slots but different
+                  weights are ``config`` (a different ``beta``); two
+                  samples of different sizes are ``data`` (a different
+                  number of dead rows)
 ``internal``      an ``evict`` or ``rebase`` differs on identical state.
                   Which entries expire, which are the oldest, and when a
                   rebase is due are deterministic functions of the
@@ -70,8 +71,8 @@ _CLASS_DETAIL = {
     "data": "the stored examples, their scores or the group sizes differed upstream of the buffer "
             "(generation, rewards, dead groups); every draw before this point was identical",
     "schedule": "the runs advanced through model versions on a different cadence",
-    "sampler": "the keyed draws differed on identical buffer state: the runs used different seeds or "
-               "buffer ids (neither is part of the log), or this is a Reservoir defect",
+    "sampler": "the keyed draws differed on identical buffer state: for a log without a recorded seed, the "
+               "runs used different seeds or buffer ids; for a log that records them, this is a Reservoir defect",
     "internal": "an evict or rebase differs on identical state; both are deterministic functions of "
                 "the preceding records and this must never happen",
     "truncated": "one log is a prefix of the other",

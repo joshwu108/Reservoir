@@ -21,6 +21,10 @@ Categories (per spec):
      (campaigns/mutation_content.py). The report also states the one
      documented limit: a chain-consistent swap of an insert's content
      digest or source is invisible without the manifest.
+ 10. Draw and importance-weight forgeries (campaigns/mutation_draw.py):
+     a draw moved inside its leaf, a reweighted sample, a changed seed,
+     buffer id or beta, a deleted sample record. The report states which of
+     these a log without the recorded draw configuration cannot see.
 
 Run with: python -m campaigns.mutation
 Prints a report with exact counts.
@@ -453,6 +457,12 @@ def run_mutation_campaign() -> dict:
     from campaigns.mutation_content import run_content_categories
     run_content_categories(results)
 
+    # -----------------------------------------------------------------------
+    # Category 10: Draw and importance-weight forgeries (seeded decay_config)
+    # -----------------------------------------------------------------------
+    from campaigns.mutation_draw import run_draw_category
+    run_draw_category(results)
+
     return results
 
 
@@ -628,6 +638,12 @@ def main() -> None:
               f"forgeries are invisible without the manifest; {limit['detected_with_manifest']} of them "
               "are rejected with it.")
         print(f"  {limit['statement']}")
+    draw_limit = results.get("draw_limit")
+    if draw_limit:
+        print(f"Documented limit: {len(draw_limit['survive_without_draw_config'])} draw/weight forgeries survive a log "
+              f"without the recorded draw configuration; {len(draw_limit['rejected_with_draw_config'])} of "
+              f"{len(draw_limit['mutants'])} are rejected with it.")
+        print(f"  {draw_limit['statement']}")
 
     print()
     if results["survived"]:
@@ -653,6 +669,7 @@ def main() -> None:
             for n, t, r in results["details"]
         ],
         "content_limit": results.get("content_limit"),
+        "draw_limit": results.get("draw_limit"),
         "pass": len(results["survived"]) == 0 and results["total_mutants"] >= 60,
     }
     Path("results/mutation_campaign_report.json").write_text(

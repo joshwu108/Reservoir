@@ -74,12 +74,15 @@ except IndexError:
 
 hf_cache = modal.Volume.from_name("reservoir-hf-cache", create_if_missing=True)
 
-image = (
+# Build steps first, the local source mount last: Modal refuses a build step
+# after an add_local_* layer, so scripts that derive a variant (an extra env
+# var, say) start from ``base_image`` and add the mount themselves.
+base_image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(*_DEPS)
     .env({"HF_HOME": "/hf_cache"})
-    .add_local_dir(_repo_src, remote_path="/reservoir_src")
 )
+image = base_image.add_local_dir(_repo_src, remote_path="/reservoir_src")
 
 app = modal.App("reservoir-trl-replay-real")
 

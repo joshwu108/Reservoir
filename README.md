@@ -164,9 +164,8 @@ uv run python -m demo.reproducible_grpo        # output abridged
 
 When two logs differ, `python -m checker.diff a.jsonl c.jsonl` says at which
 record and why: `data` (the stored examples differed upstream; every draw
-before that point was identical), `schedule`, `config`, or `sampler`
-(different draws on identical state, which is what two buffer seeds look
-like). Logs and the report are committed under
+before that point was identical), `schedule`, or `config` (different buffer
+parameters, including the seed, which the log records). Logs and the report are committed under
 `benchmarks/modal/results/repro_cpu_12steps_seed42/` and
 `results/reproducible_grpo_report.json`. The write-up is
 [`docs/reproducible-training.md`](docs/reproducible-training.md).
@@ -280,7 +279,8 @@ rollout history survives a failed trial.
 ### Classic RL
 
 `FastPERBuffer` is a C-backed PER buffer for transition-based RL, with n-step
-and HER wrappers. Adapters are provided for Stable-Baselines3 and TorchRL.
+and HER wrappers. No Stable-Baselines3 or TorchRL adapter exists yet; the
+wrappers are tested but have no consumer in this repository.
 
 ```python
 from reservoir import FastPERBuffer
@@ -363,18 +363,21 @@ report.to_html("forgetting_report.html")
 
 | Claim | Evidence |
 |-------|----------|
-| Sampling is deterministic and reproducible under a keyed draw | Property tests against a brute-force reference |
-| The durable buffers are failure-atomic under SIGKILL | 140/140 crash tests across both buffers, zero torn states; the rollout cases crash mid-rebase |
-| The independent checker rejects forged logs | 130/130 mutants rejected: 38 age-decay protocol forgeries and 29 content-commitment forgeries, including 3 chain-consistent ones that the log-only check cannot see and the manifest check rejects |
+| Sampling is deterministic and reproducible under a keyed draw | Property tests against a brute-force reference; the log records seed, buffer id and `beta`, and the checker recomputes every draw and importance weight from them |
+| The durable buffers are failure-atomic under SIGKILL | 140/140 crash tests across both buffers: every child was killed at its armed cut point (the campaign fails a row otherwise), 100 recovered the pre-state and 40 the post-state, zero torn; the rollout cases crash mid-rebase |
+| The independent checker rejects forged logs | 151/151 mutants rejected: 38 age-decay protocol forgeries, 29 content-commitment forgeries (3 of them chain-consistent, invisible without the manifest) and 21 draw and weight forgeries (2 of them invisible to a log that does not record its seed and `beta`) |
 | Two runs with the same inputs give one transcript | CPU demo: runs a and b byte-identical (102 records), run c differs at record 1, classified `data` |
 | Attestation is cheap relative to generation | about 3× the no-attestation insert cost in memory, 6× with a manifest file; the checker verifies 10k records in 0.3 s |
 | The lifecycle protocol is safe within a finite scope | TLA+ model, 44,611 states |
 
 Reservoir reports negative results. A pre-registered search for
-decision-relevant divergence between float and exact sum-trees found none
-([`docs/preregistration.md`](docs/preregistration.md)); float PER is accurate
-enough in practice. Exactness is for reproducibility and verification, not
-for training quality.
+decision-relevant divergence between float and exact sum-trees
+([`docs/preregistration.md`](docs/preregistration.md)) has so far been run on
+1% of its grid (5,400 of 270,000 workload programs) and found none, with
+total-variation distances below 2^-40; the preregistered verdict needs the
+full grid, which has not been run, and the committed run before 2026-10-04
+deviated from the protocol ([`docs/preregistration-deviations.md`](docs/preregistration-deviations.md)).
+Exactness is for reproducibility and verification, not for training quality.
 
 What Reservoir does not claim is listed in
 [`docs/nonclaims.md`](docs/nonclaims.md).

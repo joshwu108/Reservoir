@@ -1,11 +1,13 @@
 """
 campaigns.crash — T3 kill-9 crash atomicity campaign.
 
-For each (operation type × cut point × seed), spawns a child subprocess,
-sends it SIGKILL at the cut, recovers the buffer, and byte-compares the
-recovered logical state against the oracle pre-state and post-state.
-
-Exactly one match required (never a torn hybrid).
+For each (operation type × cut point × seed), spawns a child subprocess
+that arms a cut point and runs one operation; the durability protocol
+SIGKILLs the process at that cut. The campaign then recovers the buffer
+and compares the recovered logical state against the oracle pre-state and
+post-state. Exactly one match is required (never a torn hybrid), and the
+cut must actually have fired: a child that exits normally proves nothing
+about crash atomicity and is recorded as a failure, not a pass.
 
 Operation types:
   - insert, update            (classic DurableBuffer)
@@ -31,7 +33,6 @@ import os
 import signal
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 # Set spawn start method explicitly (required by spec)
@@ -39,8 +40,8 @@ multiprocessing.set_start_method("spawn", force=True)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.reservoir.buffer import ExactPERBuffer, Transition
-from src.reservoir.durable import DurableBuffer
+from reservoir.buffer import ExactPERBuffer, Transition
+from reservoir.durable import DurableBuffer
 from reservoir.durable_rollout import DurableRolloutBuffer
 from reservoir.rollout import Rollout
 
@@ -58,8 +59,6 @@ def _worker_insert(directory: str, seed: int, cut_point: str, cut_byte: int) -> 
     for k, v in env_vars.items():
         os.environ[k] = v
 
-    # Re-import to pick up env vars
-    from src.reservoir.durable import DurableBuffer
     buf = DurableBuffer(directory, capacity=4, seed=seed)
     t = Transition(state=42, action=1, reward=3.14, next_state=43, done=False)
     try:
@@ -69,10 +68,10 @@ def _worker_insert(directory: str, seed: int, cut_point: str, cut_byte: int) -> 
     sys.exit(0)
 
 
-def _worker_update(directory: str, seed: int, cut_point: str, position: int) -> None:
+def _worker_update(directory: str, seed: int, cut_point: str, position: int, cut_byte: int) -> None:
     """Child process: update a priority, cut at cut_point."""
     os.environ["RESERVOIR_CUT_POINT"] = cut_point
-    from src.reservoir.durable import DurableBuffer
+    os.environ["RESERVOIR_CUT_BYTE_OFFSET"] = str(cut_byte)  # the mid-segment cut needs it
     buf = DurableBuffer(directory, capacity=4, seed=seed)
     try:
         buf.update_priority(position, td_error=9.9)
@@ -103,10 +102,6 @@ def _get_state_snapshot(directory: str, capacity: int, seed: int) -> dict:
         "priorities": priorities,
         "transitions": transitions,
     }
-
-
-def _states_match(s1: dict, s2: dict) -> bool:
-    return s1 == s2
 
 
 # ---------------------------------------------------------------------------
@@ -158,11 +153,8 @@ def run_crash_test(
 
     post_state = _get_state_snapshot(oracle_dir, capacity, seed)
 
-    # --- Spawn child, kill at cut point ---
+    # --- Spawn child; the protocol kills it at the armed cut point ---
     cut_byte = 8  # small byte offset for mid_segment_write
-    os.environ["RESERVOIR_CUT_POINT"] = cut_point
-    os.environ["RESERVOIR_CUT_BYTE_OFFSET"] = str(cut_byte)
-
     ctx = multiprocessing.get_context("spawn")
     if op_type == "insert":
         p = ctx.Process(
@@ -172,37 +164,46 @@ def run_crash_test(
     else:  # update
         p = ctx.Process(
             target=_worker_update,
-            args=(test_dir, seed, cut_point, 0),
+            args=(test_dir, seed, cut_point, 0, cut_byte),
         )
 
     p.start()
-    # Give child time to start, then SIGKILL
-    time.sleep(0.5)
-    if p.is_alive():
-        os.kill(p.pid, signal.SIGKILL)
-    p.join(timeout=5)
-
-    # Clear cut env
-    for k in ["RESERVOIR_CUT_POINT", "RESERVOIR_CUT_BYTE_OFFSET"]:
-        os.environ.pop(k, None)
+    cut_fired = _wait_for_cut(p)
 
     # --- Recover and compare ---
     recovered_state = _get_state_snapshot(test_dir, capacity, seed)
+    return _verdict(op_type, cut_point, seed, recovered_state, pre_state, post_state, cut_fired)
 
-    matches_pre = _states_match(recovered_state, pre_state)
-    matches_post = _states_match(recovered_state, post_state)
 
-    passed = matches_pre or matches_post  # Exactly one must match
+def _wait_for_cut(p, timeout: float = 120.0) -> bool:
+    """Wait for the child; True iff the durability protocol killed it with SIGKILL.
+
+    The child imports torch (seconds) before it reaches the operation, so the
+    wait is generous. A child still alive after the timeout is killed and
+    counted as "cut never fired".
+    """
+    p.join(timeout=timeout)
+    if p.is_alive():
+        os.kill(p.pid, signal.SIGKILL)
+        p.join(timeout=5)
+        return False
+    return p.exitcode == -signal.SIGKILL
+
+
+def _verdict(op_type, cut_point, seed, recovered, pre_state, post_state, cut_fired: bool) -> dict:
+    """Pass iff the cut fired and the recovered state is exactly the pre- or post-state."""
+    matches_pre = recovered == pre_state
+    matches_post = recovered == post_state
     torn = not matches_pre and not matches_post
-
     return {
         "op": op_type,
         "cut": cut_point,
         "seed": seed,
+        "cut_fired": cut_fired,
         "matches_pre": matches_pre,
         "matches_post": matches_post,
         "torn": torn,
-        "passed": passed,
+        "passed": cut_fired and (matches_pre or matches_post),
     }
 
 
@@ -270,20 +271,10 @@ def run_rollout_crash_test(op_type: str, cut_point: str, seed: int, base_tmpdir:
     ctx = multiprocessing.get_context("spawn")
     p = ctx.Process(target=_rollout_worker, args=(test_dir, seed, op_type, cut_point, 40))
     p.start()
-    p.join(timeout=60)
-    if p.is_alive():
-        os.kill(p.pid, signal.SIGKILL)
-        p.join(timeout=5)
+    cut_fired = _wait_for_cut(p)
 
     recovered = _rollout_snapshot(test_dir, seed)
-    matches_pre = recovered == pre_state
-    matches_post = recovered == post_state
-    return {
-        "op": op_type, "cut": cut_point, "seed": seed,
-        "matches_pre": matches_pre, "matches_post": matches_post,
-        "torn": not matches_pre and not matches_post,
-        "passed": matches_pre or matches_post,
-    }
+    return _verdict(op_type, cut_point, seed, recovered, pre_state, post_state, cut_fired)
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +305,7 @@ def run_campaign() -> dict:
     total = 0
     passed = 0
     torn = 0
+    fired = 0
 
     with tempfile.TemporaryDirectory(prefix="reservoir_crash_") as tmpdir:
         for op in OP_TYPES:
@@ -327,14 +319,19 @@ def run_campaign() -> dict:
                         passed += 1
                     if result["torn"]:
                         torn += 1
+                    if result["cut_fired"]:
+                        fired += 1
 
     return {
         "total": total,
         "passed": passed,
         "torn": torn,
+        "cut_fired": fired,
+        "cut_never_fired": total - fired,
         "failed": total - passed,
         "results": results,
-        "pass": torn == 0 and passed == total,
+        # Evidence only if every child was killed at its cut and none recovered torn.
+        "pass": torn == 0 and fired == total and passed == total,
     }
 
 
@@ -352,9 +349,16 @@ def main() -> None:
     campaign = run_campaign()
 
     print(f"Total: {campaign['total']}")
+    print(f"Cut fired (child SIGKILLed at its cut point): {campaign['cut_fired']}")
+    print(f"Cut never fired (child completed; proves nothing): {campaign['cut_never_fired']}")
     print(f"Passed: {campaign['passed']}")
     print(f"Torn (bugs!): {campaign['torn']}")
     print()
+    if campaign["cut_never_fired"]:
+        print("CUTS THAT NEVER FIRED:")
+        for r in campaign["results"]:
+            if not r["cut_fired"]:
+                print(f"  NOT FIRED: op={r['op']}, cut={r['cut']}, seed={r['seed']}")
 
     if campaign["torn"] > 0:
         print("TORN STATES DETECTED:")

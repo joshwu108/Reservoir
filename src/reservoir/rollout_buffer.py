@@ -71,7 +71,10 @@ Draws are keyed BLAKE2b hashes of ``(seed, buffer_id, draw_counter)``
 where ``draw_counter`` increases by one per sampled rollout for the
 lifetime of the buffer, so no two draws share a key regardless of batch
 size. Two buffers with the same seed and the same sequence of calls
-produce identical batches and identical logs.
+produce identical batches and identical logs. The seed, buffer id, alpha
+and beta are written into the log's ``decay_config`` record, so the
+independent checker recomputes every draw and every importance weight
+rather than only checking that each draw lands in the recorded leaf.
 """
 
 from __future__ import annotations
@@ -87,7 +90,7 @@ from reservoir.decayed_tree import AdvanceResult, DecayedPriorityTree
 from reservoir.draw import draw_uniform_below
 from reservoir.priorities import AdvantagePriority, PriorityStrategy, validated_score
 from reservoir.rollout import Rollout, RolloutGroup, default_is_success
-from reservoir.rollout_attest import AttestTarget, ManifestTarget, RolloutAttester
+from reservoir.rollout_attest import AttestTarget, DrawConfig, ManifestTarget, RolloutAttester
 from reservoir.rollout_snapshot import (
     _group_from_dict,
     _group_to_dict,
@@ -241,6 +244,7 @@ class RolloutBuffer:
         self._attester = RolloutAttester(
             attest, self._params, self.reset_age_on_update, overwrite=attest_overwrite,
             manifest=manifest,
+            draw=DrawConfig(seed=self.seed, buffer_id=self.buffer_id, alpha=self.alpha, beta=self.beta),
         )
 
     # -- read-only state ---------------------------------------------------

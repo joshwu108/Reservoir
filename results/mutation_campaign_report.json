@@ -1,7 +1,7 @@
 {
   "campaign": "T4_mutation",
-  "total_mutants": 130,
-  "rejected": 130,
+  "total_mutants": 151,
+  "rejected": 151,
   "survived": [],
   "categories": [
     {
@@ -53,6 +53,11 @@
       "name": "content_manifest",
       "total": 15,
       "rejected": 15
+    },
+    {
+      "name": "draw",
+      "total": 21,
+      "rejected": 21
     }
   ],
   "content_limit": {
@@ -64,6 +69,21 @@
       "insert_source_dropped_chain_consistent"
     ],
     "statement": "a chain-consistent change to an insert's content_digest or source is not detectable from the log alone; the log commits, the manifest opens"
+  },
+  "draw_limit": {
+    "mutants": [
+      "draw_moved_within_leaf",
+      "is_weight_replaced"
+    ],
+    "survive_without_draw_config": [
+      "draw_moved_within_leaf",
+      "is_weight_replaced"
+    ],
+    "rejected_with_draw_config": [
+      "draw_moved_within_leaf",
+      "is_weight_replaced"
+    ],
+    "statement": "a draw moved inside its leaf's range, or a reweighted sample, is invisible to a log that does not record seed, buffer_id and beta; a 0.5.0 log records them and both are rejected"
   },
   "pass": true
 }

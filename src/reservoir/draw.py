@@ -24,8 +24,9 @@ For N up to 2^256 this construction is correct; larger N is not supported.
 
 ## Key Derivation
 
-Key = BLAKE2b-256(b"res" || seed_bytes || sep || buffer_id_bytes || sep || counter_bytes)
-where sep = b"\\x00" and all integers are encoded as big-endian 8-byte values.
+Key = BLAKE2b-256(seed_bytes || sep || buffer_id_bytes || sep || counter_bytes)
+where sep = b"\\xff" and all integers are encoded as big-endian 8-byte values.
+``checker/draw.py`` reimplements this definition without importing it.
 
 The 'person' parameter of BLAKE2b is set to b'reservoir' (padded to 16 bytes)
 to domain-separate this usage from any other BLAKE2b usage.

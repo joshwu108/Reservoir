@@ -57,6 +57,15 @@ AttestTarget = Union[AttestationLog, str, Path, None]
 ManifestTarget = Union[ManifestWriter, str, Path, None]
 
 
+class DrawConfig(NamedTuple):
+    """What the checker needs to recompute every draw and importance weight."""
+
+    seed: int
+    buffer_id: int
+    alpha: float
+    beta: float
+
+
 class PreparedInsert(NamedTuple):
     """What ``record_insert`` needs for one rollout, computed before any mutation."""
 
@@ -95,6 +104,10 @@ class RolloutAttester:
         Also write the opening of every insert's content digest, to this
         file or into this in-memory writer. Requires ``target``;
         ``ValueError`` otherwise.
+    draw : DrawConfig, optional
+        The buffer's seed, buffer id, alpha and beta, written into
+        ``decay_config`` so the checker can recompute every draw and
+        importance weight. ``RolloutBuffer`` always passes it.
 
     If construction fails after a file was opened, the file is closed
     again before the error propagates.
@@ -107,6 +120,7 @@ class RolloutAttester:
         reset_age_on_update: bool,
         overwrite: bool = False,
         manifest: ManifestTarget = None,
+        draw: Optional[DrawConfig] = None,
     ) -> None:
         self._log: Optional[AttestationLog] = None
         self._file: Optional[IO[str]] = None
@@ -135,6 +149,7 @@ class RolloutAttester:
                 table_frac_bits=params.table_frac_bits,
                 rebase_slack=params.rebase_slack,
                 reset_age_on_update=reset_age_on_update,
+                **(draw._asdict() if draw is not None else {}),
             ))
         except BaseException:
             self.close()

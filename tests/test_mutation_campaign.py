@@ -41,6 +41,7 @@ class TestMutationCampaign:
             "decay",
             "content",
             "content_manifest",
+            "draw",
         }
         assert required.issubset(category_names), (
             f"Missing categories: {required - category_names}"
@@ -68,3 +69,16 @@ class TestContentCampaign:
         assert limit["undetectable_without_manifest"] not in (None, 0)
         # Those mutants are not counted as survivors: survival there is the documented limit.
         assert results["survived"] == []
+
+
+class TestDrawCampaign:
+    def test_draw_category_fully_rejected(self, results):
+        draw = next(d for d in results["details"] if d[0] == "draw")
+        assert draw[1] >= 15 and draw[1] == draw[2]
+
+    def test_draw_limit_is_measured(self, results):
+        limit = results["draw_limit"]
+        assert set(limit["rejected_with_draw_config"]) == set(limit["mutants"]) == {"draw_moved_within_leaf", "is_weight_replaced"}
+        # Without the configuration, the reweighted sample always survives; the moved
+        # draw survives unless it happened to cross a leaf boundary.
+        assert "is_weight_replaced" in limit["survive_without_draw_config"]

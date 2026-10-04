@@ -86,10 +86,30 @@ class TestClassification:
         result = diff_logs(a, b)
         assert result["class"] == "config" and result["first_difference"] == 0
 
-    def test_sampler_when_only_the_seed_differs(self) -> None:
-        # Same data, same schedule, different keyed draws: the logs share every
-        # record up to the first sample, which then differs.
+    def test_config_when_only_the_seed_differs(self) -> None:
+        # The seed is recorded in decay_config, so two seeds differ at record 0.
         a, b = run(seed=0), run(seed=1)
+        result = diff_logs(a, b)
+        assert result["class"] == "config" and result["first_difference"] == 0
+        assert result["differing_fields"] == ["seed"]
+
+    def test_sampler_when_seeds_differ_in_logs_without_a_recorded_seed(self) -> None:
+        # Strip the draw configuration from both: the logs then share every
+        # record up to the first sample, which differs.
+        from reservoir.attest import _digest_record
+
+        def strip(records):
+            out = [dict(r) for r in records]
+            for name in ("seed", "buffer_id", "alpha", "beta"):
+                out[0].pop(name, None)
+            prev = "genesis"
+            for rec in out:
+                rec["prev_digest"] = prev
+                rec["digest"] = _digest_record(rec)
+                prev = rec["digest"]
+            return out
+
+        a, b = strip(run(seed=0)), strip(run(seed=1))
         result = diff_logs(a, b)
         assert result["class"] == "sampler"
         assert a[result["first_difference"]]["op"] == "sample"
