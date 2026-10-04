@@ -1,0 +1,56 @@
+{
+  "benchmark": "attestation_overhead",
+  "reservoir_version": "0.5.0",
+  "python": "3.14.2",
+  "machine": "Darwin arm64",
+  "workload": {
+    "groups": 2000,
+    "group_size": 8,
+    "tokens_per_rollout": 256,
+    "samples": 200,
+    "batch_size": 64,
+    "capacity": 10000,
+    "version_advance_every_groups": 10,
+    "repeats": 3
+  },
+  "configs": {
+    "none": {
+      "config": "none",
+      "add_group_us_per_rollout": 31.611339160008356,
+      "sample_us_per_draw": 15.42075930046849,
+      "records": 0
+    },
+    "memory": {
+      "config": "memory",
+      "add_group_us_per_rollout": 102.47517276911822,
+      "sample_us_per_draw": 17.541018657993845,
+      "records": 27298
+    },
+    "file": {
+      "config": "file",
+      "add_group_us_per_rollout": 111.50036479921255,
+      "sample_us_per_draw": 18.725510799413314,
+      "records": 27298,
+      "log_bytes": 12704014,
+      "log_bytes_per_record": 465.3825921312917,
+      "log_bytes_per_rollout_inserted": 794.000875
+    },
+    "file+manifest": {
+      "config": "file+manifest",
+      "add_group_us_per_rollout": 186.57696774607757,
+      "sample_us_per_draw": 18.759251397568733,
+      "records": 27298,
+      "log_bytes": 12704014,
+      "log_bytes_per_record": 465.3825921312917,
+      "log_bytes_per_rollout_inserted": 794.000875,
+      "manifest_bytes": 26285370,
+      "manifest_bytes_per_rollout_inserted": 1642.835625
+    }
+  },
+  "checker": {
+    "records": 27298,
+    "verify_with_manifest_seconds_per_10k_records": 0.3094026881032452,
+    "transcript_seconds_per_10k_records": 0.009608823355858158
+  },
+  "note": "cost of attestation and verification only; no training-quality measurement"
+}

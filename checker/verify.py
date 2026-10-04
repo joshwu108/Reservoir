@@ -18,12 +18,19 @@ What it verifies:
    epoch), expired entries are evicted right after each advance_version,
    and every rebase is exact and lands on the canonical base epoch
    (see checker/decay_replay.py).
+9. Content commitments: insert records carry a well-formed content_digest
+   (all of them or none) and an optional source; every sampled slot holds
+   a committed example; with ``--manifest``, the manifest opens exactly the
+   log's commitments (see checker/content.py).
 
-Any inconsistency raises CheckerError.
+Any inconsistency raises CheckerError. ``verify_chain`` returns a
+``VerifiedLog`` whose ``content`` state (insert history, resolved samples)
+is what ``checker.transcript`` and ``checker.diff`` build on.
 
 Command line::
 
     python -m checker.verify run-01/attest.jsonl              # decayed log
+    python -m checker.verify run-01/attest.jsonl --manifest run-01/manifest.jsonl
     python -m checker.verify legacy.jsonl --capacity 1024     # log without decay_config
     python -m checker.verify crashed.jsonl --allow-truncated  # prefix cut mid-advance
 
@@ -40,10 +47,12 @@ import hashlib
 import json
 import math
 import sys
+from dataclasses import dataclass, field
 from fractions import Fraction
 from math import gcd
 from typing import Optional
 
+from checker.content import ContentState, load_manifest
 from checker.decay_replay import CheckerError, DecayState, has_decay_fields, parse_config
 
 # Domain separator — must match attest.py exactly
@@ -143,11 +152,21 @@ class _SumTree:
 # Verification entry point
 # ---------------------------------------------------------------------------
 
+@dataclass
+class VerifiedLog:
+    """What a successful ``verify_chain`` establishes, for tools that build on it."""
+
+    records: list[dict]
+    capacity: Optional[int]
+    content: ContentState = field(default_factory=ContentState)
+
+
 def verify_chain(
     records: list[dict],
     capacity: Optional[int] = None,
     allow_truncated: bool = False,
-) -> None:
+    manifest: Optional[list[dict]] = None,
+) -> VerifiedLog:
     """Verify the entire attestation chain from a list of records.
 
     Parameters
@@ -162,14 +181,21 @@ def verify_chain(
         Accept a log that ends with stale evictions or a rebase still
         pending, as a crashed writer can leave. Every record present is
         still fully checked.
+    manifest : list[dict], optional
+        Parsed manifest lines (``checker.content.load_manifest``). When
+        given, they must open exactly the log's content commitments.
 
     Raises
     ------
     CheckerError
-        If any check fails. The message describes what failed.
+        If any check fails, including a manifest that does not open the
+        log's commitments. The message describes what failed.
     """
+    content = ContentState()
     if not records:
-        return  # Empty chain is valid
+        if manifest is not None:
+            content.check_manifest(manifest)   # an empty manifest is the only one that opens nothing
+        return VerifiedLog([], capacity, content)
     for i, record in enumerate(records):
         if not isinstance(record, dict):
             raise CheckerError(f"Record {i}: not a JSON object")
@@ -189,12 +215,15 @@ def verify_chain(
     prev_digest = _GENESIS
     for record_idx, record in enumerate(records):
         prev_digest = _verify_link(record, record_idx, prev_digest)
-        _verify_record(record, record_idx, tree, priorities, decay)
+        _verify_record(record, record_idx, tree, priorities, decay, content)
 
     if decay is not None:
         decay.close_capacity_run(len(records))
         if not allow_truncated:
             decay.require_no_pending(len(records), "end of log")
+    if manifest is not None:
+        content.check_manifest(manifest)
+    return VerifiedLog(records, capacity, content)
 
 
 def _verify_link(record: dict, idx: int, prev_digest: str) -> str:
@@ -221,6 +250,7 @@ def _verify_record(
     tree: _SumTree,
     priorities: dict[int, int],
     decay: Optional[DecayState],
+    content: ContentState,
 ) -> None:
     """Semantic checks for one record (digest and chain linkage already passed)."""
     op = record.get("op")
@@ -241,11 +271,13 @@ def _verify_record(
             raise CheckerError(f"Record {idx}: {op} without decay fields in a decayed log")
         elif "reason" in record:
             raise CheckerError(f"Record {idx}: reason requires the decay fields")
+        content.on_mutation(record, idx)
 
     elif op == "sample":
         if decay is not None:
             decay.require_no_pending(idx, "sample")
         _verify_sample(record, idx, tree, priorities)
+        content.on_sample(idx, record)
 
     elif op == "advance_version":
         _require_decay(decay, idx, op)
@@ -416,8 +448,11 @@ def _verify_sample(
 
 
 def verify_json_lines(
-    data: str, capacity: Optional[int] = None, allow_truncated: bool = False
-) -> None:
+    data: str,
+    capacity: Optional[int] = None,
+    allow_truncated: bool = False,
+    manifest: Optional[str] = None,
+) -> VerifiedLog:
     """Verify an attestation chain from newline-separated JSON.
 
     Parameters
@@ -426,6 +461,8 @@ def verify_json_lines(
         Newline-separated JSON records (as produced by AttestationLog.to_json_lines).
     capacity, allow_truncated
         See ``verify_chain``.
+    manifest : str, optional
+        The manifest file's text (JSON lines).
 
     Raises
     ------
@@ -437,7 +474,8 @@ def verify_json_lines(
         if not line:
             continue
         records.append(json.loads(line))
-    verify_chain(records, capacity, allow_truncated)
+    lines = load_manifest(manifest) if manifest is not None else None
+    return verify_chain(records, capacity, allow_truncated, manifest=lines)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -455,17 +493,30 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--allow-truncated", action="store_true",
         help="accept a log cut off mid-advance (a crashed writer); records present are still checked",
     )
+    parser.add_argument(
+        "--manifest", default=None,
+        help="manifest JSON lines; must open exactly the log's content commitments",
+    )
     args = parser.parse_args(argv)
     try:
         with open(args.path, encoding="utf-8") as f:
             data = f.read()
+        manifest_text = None
+        if args.manifest is not None:
+            with open(args.manifest, encoding="utf-8") as f:
+                manifest_text = f.read()
         n_records = sum(1 for line in data.strip().split("\n") if line)
-        verify_json_lines(data, args.capacity, args.allow_truncated)
+        result = verify_json_lines(data, args.capacity, args.allow_truncated, manifest_text)
     except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, CheckerError) as exc:
         # Everything a malformed file can raise is reported as a failure, never a traceback.
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
-    print(f"OK: {n_records} records verified")
+    summary = f"OK: {n_records} records verified"
+    if result.content.has_content:
+        summary += f"; {len(result.content.history)} examples committed"
+    if args.manifest is not None:
+        summary += f"; manifest opens {result.content.manifest_matched} of them"
+    print(summary)
     return 0
 
 

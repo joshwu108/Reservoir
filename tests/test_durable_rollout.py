@@ -27,6 +27,7 @@ from reservoir.durable_rollout import DurableRolloutBuffer
 from reservoir.priorities import PassRateVariance
 from reservoir.rollout import Rollout
 from reservoir.rollout_buffer import RolloutBuffer
+from reservoir.rollout_manifest import ManifestWriter
 
 KW = dict(capacity=8, half_life=1, max_policy_age=2, seed=3)  # max_shift 2: rebases often
 
@@ -147,6 +148,112 @@ class TestSnapshot:
         with pytest.raises(ValueError, match="attestation"):
             RolloutBuffer(**KW).load_state_dict(a.state_dict())
 
+    def test_source_round_trips(self) -> None:
+        a = RolloutBuffer(**KW)
+        a.add_group("p", 0, rollouts([1.0, 0.0]), source="gsm8k")
+        a.add_group("q", 0, rollouts([1.0]))
+        state = a.state_dict()
+        assert [g.get("source") for g in state["groups"]] == ["gsm8k", None]
+        b = RolloutBuffer(**KW)
+        b.load_state_dict(state)
+        assert b.entry(0)[1].source == "gsm8k" and b.entry(2)[1].source is None
+        assert b.state_dict() == state
+
+    def test_snapshot_without_source_key_loads_as_none(self) -> None:
+        a = RolloutBuffer(**KW)
+        a.add_group("p", 0, rollouts([1.0]))
+        state = a.state_dict()
+        for g in state["groups"]:
+            g.pop("source", None)
+        b = RolloutBuffer(**KW)
+        b.load_state_dict(state)
+        assert b.entry(0)[1].source is None
+
+    def test_manifest_records_round_trip(self, tmp_path: Path) -> None:
+        a = RolloutBuffer(attest=tmp_path / "a.jsonl", manifest=tmp_path / "m.jsonl", **KW)
+        a.add_group("p", 0, rollouts([1.0, 0.0]), source="s")
+        state = a.state_dict()
+        a.close()
+        assert len(state["manifest"]) == 2
+        b = RolloutBuffer(attest=tmp_path / "b.jsonl", manifest=tmp_path / "n.jsonl", **KW)
+        b.load_state_dict(state)
+        b.close()
+        assert b.manifest_records == a.manifest_records
+        assert (tmp_path / "n.jsonl").read_text() == (tmp_path / "m.jsonl").read_text()
+
+    def test_manifest_disagreeing_with_log_rejected(self, tmp_path: Path) -> None:
+        a = RolloutBuffer(attest=tmp_path / "a.jsonl", manifest=tmp_path / "m.jsonl", **KW)
+        a.add_group("p", 0, rollouts([1.0]), source="a")
+        a.close()
+        for field, value in (("source", "b"), ("entry_version", 7), ("content_digest", "00" * 32)):
+            state = a.state_dict()
+            state["manifest"][0][field] = value
+            if field == "content_digest":
+                state["manifest"][0]["tokens"] = [1, 2]   # keep the line self-consistent? no: digest must recompute
+            b = RolloutBuffer(attest=AttestationLog(), manifest=ManifestWriter(), **KW)
+            with pytest.raises(ValueError, match="manifest"):
+                b.load_state_dict(state)
+
+    def test_legacy_snapshot_loads_into_manifest_buffer_with_empty_manifest(self) -> None:
+        a = RolloutBuffer(attest=AttestationLog(), **KW)
+        a.add_group("p", 0, rollouts([1.0]))
+        state = a.state_dict()
+        for r in state["attestation"]:
+            r.pop("content_digest", None)
+        from reservoir.attest import _digest_record
+        prev = "genesis"
+        for r in state["attestation"]:
+            r["prev_digest"] = prev
+            r["digest"] = _digest_record(r)
+            prev = r["digest"]
+        state.pop("manifest")
+        b = RolloutBuffer(attest=AttestationLog(), manifest=ManifestWriter(), **KW)
+        b.load_state_dict(state)
+        assert b.has_manifest and b.manifest_records == []
+
+    def test_empty_manifest_list_into_buffer_without_manifest_rejected(self) -> None:
+        a = RolloutBuffer(attest=AttestationLog(), manifest=ManifestWriter(), **KW)
+        state = a.state_dict()
+        assert state["manifest"] == []
+        with pytest.raises(ValueError, match="manifest"):
+            RolloutBuffer(attest=AttestationLog(), **KW).load_state_dict(state)
+
+    def test_manifest_write_failure_is_rolled_back_durably(self, tmp_path: Path, monkeypatch) -> None:
+        from reservoir import rollout_manifest
+        attest, manifest = tmp_path / "attest.jsonl", tmp_path / "manifest.jsonl"
+        buf = DurableRolloutBuffer(tmp_path / "buf", attest=attest, manifest=manifest, **KW)
+        buf.add_group("g0", 0, rollouts([1.0]), source="a")
+        before = (buf.state_dict(), attest.read_text(), manifest.read_text())
+        calls = {"n": 0}
+        original = rollout_manifest.ManifestWriter.write
+
+        def failing(self, record):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("disk full")
+            return original(self, record)
+
+        monkeypatch.setattr(rollout_manifest.ManifestWriter, "write", failing)
+        with pytest.raises(OSError):
+            buf.add_group("g1", 1, rollouts([1.0, 0.0, 0.5]), source="b")
+        monkeypatch.undo()
+        assert (buf.state_dict(), attest.read_text(), manifest.read_text()) == before
+        buf.close()
+        again = DurableRolloutBuffer(tmp_path / "buf", attest=attest, manifest=manifest, **KW)
+        assert again.state_dict() == before[0]
+        again.close()
+
+    def test_manifest_mismatch_rejected(self, tmp_path: Path) -> None:
+        a = RolloutBuffer(attest=tmp_path / "a.jsonl", manifest=tmp_path / "m.jsonl", **KW)
+        a.add_group("p", 0, rollouts([1.0]))
+        state = a.state_dict()
+        a.close()
+        with pytest.raises(ValueError, match="manifest"):
+            RolloutBuffer(attest=AttestationLog(), **KW).load_state_dict(state)
+        plain = RolloutBuffer(attest=AttestationLog(), **KW)
+        plain.add_group("p", 0, rollouts([1.0]))
+        assert plain.state_dict()["manifest"] is None
+
 
 # ---------------------------------------------------------------------------
 # Durable wrapper: reopen recovers everything
@@ -190,6 +297,40 @@ class TestReopen:
         assert again.attestation_log.to_json_lines() == expected
         assert attest.read_text().strip() == expected
         again.close()
+
+    def test_manifest_survives_reopen_and_is_rewritten_from_state(self, tmp_path: Path) -> None:
+        attest, manifest = tmp_path / "attest.jsonl", tmp_path / "manifest.jsonl"
+        buf = DurableRolloutBuffer(tmp_path / "buf", attest=attest, manifest=manifest, **KW)
+        buf.add_group("g0", 0, rollouts([1.0, 0.0]), source="a")
+        buf.add_group("g1", 1, rollouts([0.5]))
+        expected = manifest.read_text()
+        records = buf.manifest_records
+        buf.close()
+        manifest.write_text("garbage\n")
+        again = DurableRolloutBuffer(tmp_path / "buf", attest=attest, manifest=manifest, **KW)
+        assert again.manifest_records == records
+        assert manifest.read_text() == expected
+        assert [l for l in expected.splitlines()] and len(expected.splitlines()) == 3
+        again.close()
+
+    def test_manifest_setting_must_match_saved_state(self, tmp_path: Path) -> None:
+        attest, manifest = tmp_path / "attest.jsonl", tmp_path / "manifest.jsonl"
+        buf = DurableRolloutBuffer(tmp_path / "buf", attest=attest, manifest=manifest, **KW)
+        buf.add_group("g0", 0, rollouts([1.0]))
+        buf.close()
+        with pytest.raises(ValueError, match="manifest"):
+            DurableRolloutBuffer(tmp_path / "buf", attest=attest, **KW)
+        plain = DurableRolloutBuffer(tmp_path / "plain", attest=tmp_path / "p.jsonl", **KW)
+        plain.add_group("g0", 0, rollouts([1.0]))
+        plain.close()
+        with pytest.raises(ValueError, match="manifest"):
+            DurableRolloutBuffer(tmp_path / "plain", attest=tmp_path / "p.jsonl", manifest=tmp_path / "x.jsonl", **KW)
+
+    def test_manifest_without_attest_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="manifest"):
+            DurableRolloutBuffer(tmp_path / "buf", manifest=tmp_path / "m.jsonl", **KW)
+        with pytest.raises(TypeError, match="manifest"):
+            DurableRolloutBuffer(tmp_path / "buf2", attest=tmp_path / "a.jsonl", manifest=object(), **KW)
 
     def test_config_record_persisted_before_first_operation(self, tmp_path: Path) -> None:
         attest = tmp_path / "attest.jsonl"
@@ -326,24 +467,27 @@ SETUP = textwrap.dedent(
 # version 4, which expires both (ages 4 and 3 > 2) and forces a rebase
 # (epoch 4 > max_shift 2) before the inserts: evictions + rebase + writes
 # must land together or not at all.
+# ``sys.argv[3]`` is an optional manifest path: the same scripts drive the
+# plain crash tests and the ones that also keep a manifest.
+OPEN = 'buf = DurableRolloutBuffer(sys.argv[1], attest=sys.argv[2], manifest=(sys.argv[3] if len(sys.argv) > 3 else None), **KW)'
 PREPARE = SETUP + textwrap.dedent(
-    """
-    buf = DurableRolloutBuffer(sys.argv[1], attest=sys.argv[2], **KW)
-    buf.add_group("g0", 0, rollouts([1.0, 0.0, 0.5]))
+    f"""
+    {OPEN}
+    buf.add_group("g0", 0, rollouts([1.0, 0.0, 0.5]), source="a")
     buf.add_group("g1", 1, rollouts([0.0, 1.0]))
     buf.close()
     """
 )
 CRASHING_OP = SETUP + textwrap.dedent(
-    """
-    buf = DurableRolloutBuffer(sys.argv[1], attest=sys.argv[2], **KW)
-    buf.add_group("g4", 4, rollouts([1.0, 0.0]))
+    f"""
+    {OPEN}
+    buf.add_group("g4", 4, rollouts([1.0, 0.0]), source="b")
     buf.close()
     """
 )
 DUMP = SETUP + textwrap.dedent(
-    """
-    buf = DurableRolloutBuffer(sys.argv[1], attest=sys.argv[2], **KW)
+    f"""
+    {OPEN}
     assert buf.verify_trees()
     print(json.dumps(buf.state_dict(), sort_keys=True))
     buf.close()
@@ -351,39 +495,79 @@ DUMP = SETUP + textwrap.dedent(
 )
 
 
-def run_script(script: str, directory: Path, attest: Path, env_extra: dict | None = None) -> subprocess.CompletedProcess:
+def run_script(script: str, directory: Path, attest: Path, env_extra: dict | None = None,
+               manifest: Path | None = None) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items() if not k.startswith("RESERVOIR_CUT")}
     env.update(env_extra or {})
-    return subprocess.run(
-        [sys.executable, "-c", script, str(directory), str(attest)],
-        capture_output=True, text=True, env=env, cwd=Path(__file__).parent.parent,
-    )
+    args = [sys.executable, "-c", script, str(directory), str(attest)] + ([str(manifest)] if manifest else [])
+    return subprocess.run(args, capture_output=True, text=True, env=env, cwd=Path(__file__).parent.parent)
 
 
-def dump_state(directory: Path, attest: Path) -> dict:
-    result = run_script(DUMP, directory, attest)
+def dump_state(directory: Path, attest: Path, manifest: Path | None = None) -> dict:
+    result = run_script(DUMP, directory, attest, manifest=manifest)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
 
-@pytest.fixture(scope="module")
-def prepared(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, dict, dict]:
-    """Pre-state directory plus the pre and post oracles, built once per module.
+def _prepare(tmp_path_factory: pytest.TempPathFactory, with_manifest: bool) -> tuple[Path, dict, dict]:
+    """Pre-state directory plus the pre and post oracles.
 
     Each subprocess pays the library's import cost, so the pre-state is
     prepared once and copied for every cut point instead of rebuilt.
     """
-    root = tmp_path_factory.mktemp("crash")
+    root = tmp_path_factory.mktemp("crash_manifest" if with_manifest else "crash")
     buf_dir, attest = root / "pre", root / "pre.jsonl"
-    assert run_script(PREPARE, buf_dir, attest).returncode == 0
-    pre = dump_state(buf_dir, attest)
+    manifest = root / "pre.manifest.jsonl" if with_manifest else None
+    assert run_script(PREPARE, buf_dir, attest, manifest=manifest).returncode == 0
+    pre = dump_state(buf_dir, attest, manifest)
     oracle_dir, oracle_attest = root / "oracle", root / "oracle.jsonl"
+    oracle_manifest = root / "oracle.manifest.jsonl" if with_manifest else None
     shutil.copytree(buf_dir, oracle_dir)
     shutil.copy(attest, oracle_attest)
-    assert run_script(CRASHING_OP, oracle_dir, oracle_attest).returncode == 0
-    post = dump_state(oracle_dir, oracle_attest)
+    if with_manifest:
+        shutil.copy(manifest, oracle_manifest)
+    assert run_script(CRASHING_OP, oracle_dir, oracle_attest, manifest=oracle_manifest).returncode == 0
+    post = dump_state(oracle_dir, oracle_attest, oracle_manifest)
     assert pre != post
     return root, pre, post
+
+
+@pytest.fixture(scope="module")
+def prepared(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, dict, dict]:
+    return _prepare(tmp_path_factory, with_manifest=False)
+
+
+@pytest.fixture(scope="module")
+def prepared_manifest(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, dict, dict]:
+    return _prepare(tmp_path_factory, with_manifest=True)
+
+
+def _crash_and_recover(root: Path, pre: dict, post: dict, cut: str, with_manifest: bool) -> None:
+    buf_dir, attest = root / f"buf_{cut}", root / f"attest_{cut}.jsonl"
+    manifest = root / f"manifest_{cut}.jsonl" if with_manifest else None
+    shutil.copytree(root / "pre", buf_dir)
+    shutil.copy(root / "pre.jsonl", attest)
+    if with_manifest:
+        shutil.copy(root / "pre.manifest.jsonl", manifest)
+
+    crashed = run_script(
+        CRASHING_OP, buf_dir, attest,
+        {"RESERVOIR_CUT_POINT": cut, "RESERVOIR_CUT_BYTE_OFFSET": "40"}, manifest=manifest,
+    )
+    assert crashed.returncode != 0, f"child was not killed at cut {cut}"
+
+    recovered = dump_state(buf_dir, attest, manifest)
+    assert recovered in (pre, post), f"torn state after SIGKILL at {cut}"
+    # And the recovered log verifies independently either way.
+    verify_json_lines(attest.read_text())
+    if with_manifest:
+        # The rewritten manifest has exactly the recovered state's lines,
+        # one per insert record in the recovered log.
+        lines = [json.loads(l) for l in manifest.read_text().splitlines()]
+        assert lines == recovered["manifest"]
+        inserts = [r for r in map(json.loads, attest.read_text().splitlines()) if r["op"] == "insert"]
+        assert [(l["op_counter"], l["index"], l["content_digest"], l["source"]) for l in lines] == \
+            [(r["op_counter"], r["index"], r["content_digest"], r.get("source")) for r in inserts]
 
 
 @pytest.mark.parametrize("cut", CUT_POINTS)
@@ -391,17 +575,12 @@ def test_sigkill_during_rebasing_add_group_leaves_pre_or_post_state(
     prepared: tuple[Path, dict, dict], cut: str
 ) -> None:
     root, pre, post = prepared
-    buf_dir, attest = root / f"buf_{cut}", root / f"attest_{cut}.jsonl"
-    shutil.copytree(root / "pre", buf_dir)
-    shutil.copy(root / "pre.jsonl", attest)
+    _crash_and_recover(root, pre, post, cut, with_manifest=False)
 
-    crashed = run_script(
-        CRASHING_OP, buf_dir, attest,
-        {"RESERVOIR_CUT_POINT": cut, "RESERVOIR_CUT_BYTE_OFFSET": "40"},
-    )
-    assert crashed.returncode != 0, f"child was not killed at cut {cut}"
 
-    recovered = dump_state(buf_dir, attest)
-    assert recovered in (pre, post), f"torn state after SIGKILL at {cut}"
-    # And the recovered log verifies independently either way.
-    verify_json_lines(attest.read_text())
+@pytest.mark.parametrize("cut", CUT_POINTS)
+def test_sigkill_with_manifest_leaves_log_and_manifest_consistent(
+    prepared_manifest: tuple[Path, dict, dict], cut: str
+) -> None:
+    root, pre, post = prepared_manifest
+    _crash_and_recover(root, pre, post, cut, with_manifest=True)

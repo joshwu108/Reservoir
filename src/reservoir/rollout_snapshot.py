@@ -114,14 +114,21 @@ def _group_to_dict(group: RolloutGroup) -> dict:
             "tokens": list(r.tokens), "logprobs": list(r.logprobs),
             "reward": r.reward, "metadata": metadata,
         })
-    return {"prompt_id": group.prompt_id, "model_version": group.model_version, "rollouts": rollouts}
+    return {
+        "prompt_id": group.prompt_id, "model_version": group.model_version,
+        "source": group.source, "rollouts": rollouts,
+    }
 
 
 def _group_from_dict(data: dict) -> RolloutGroup:
-    """Rebuild a group; Rollout and RolloutGroup re-validate every field."""
+    """Rebuild a group; Rollout and RolloutGroup re-validate every field.
+
+    ``source`` is optional so snapshots written before it existed still load.
+    """
     return RolloutGroup(
         prompt_id=data["prompt_id"],
         model_version=int(data["model_version"]),
+        source=data.get("source"),
         rollouts=[
             Rollout(tokens=r["tokens"], logprobs=r["logprobs"], reward=r["reward"],
                     metadata=r.get("metadata") or None)

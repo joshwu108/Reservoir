@@ -37,17 +37,32 @@ Example::
 
 The replay buffer stores one sum-tree leaf per ``Rollout``; the
 ``RolloutGroup`` is shared metadata referenced by its rollouts.
+
+Content identity
+----------------
+``content_digest_of(prompt_id, tokens, reward)`` is the BLAKE2b-256 digest
+of the training example a rollout represents: the prompt it answers, the
+completion tokens and the reward it earned. Behavior logprobs and metadata
+are excluded because they describe the generating model and the caller,
+not the example. The buffer writes this digest on every ``insert`` record
+of its attestation log so that a verifier can later say *which examples*
+were sampled, how often and from which ``source``, not only which buffer
+slots. The checker recomputes the digest with the standard library from
+the same definition (docs/design.md §10); the two implementations share no
+code.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence, Set, Sized
 from dataclasses import dataclass, field
 from functools import cached_property
 from numbers import Integral, Real
 from types import MappingProxyType
-from typing import Any, Final
+from typing import Any, Final, Optional
 
 _EMPTY_METADATA: Mapping[str, Any] = MappingProxyType({})
 
@@ -62,6 +77,47 @@ _EMPTY_METADATA: Mapping[str, Any] = MappingProxyType({})
 # 2^1024. Typical rewards (0/1 correctness, small shaped scores) are far
 # below this bound, which exists only so the statistics cannot overflow.
 MAX_ABS_REWARD: Final[float] = float(1 << 500)
+
+# Longest ``RolloutGroup.source`` tag. Tags are short labels ("gsm8k",
+# "licensed/vendor-a"), not documents; the bound keeps attestation records
+# small and the manifest readable.
+MAX_SOURCE_LENGTH: Final[int] = 256
+
+# BLAKE2b personalisation for content digests. Distinct from the draw
+# (b"reservoir") and attestation (b"attest") domains so a digest from one
+# can never be mistaken for another.
+_CONTENT_PERSON: Final[bytes] = b"rollout-content\x00"  # 16 bytes
+
+
+def content_digest_of(prompt_id: str, tokens: Iterable[int], reward: float) -> str:
+    """BLAKE2b-256 hex digest identifying one training example.
+
+    The preimage is canonical JSON (sorted keys, no spaces, ``ensure_ascii``
+    so every non-ASCII character is a ``\\uXXXX`` escape, UTF-8) of
+    ``{"prompt_id": prompt_id, "reward": reward.hex(), "tokens": [...]}``.
+    ``float.hex()`` is used for the reward because it is exact and has the
+    same spelling in every Python, so an independent checker can rebuild
+    the bytes without floating-point formatting questions. It also means
+    ``-0.0`` and ``0.0`` have different digests.
+
+    Inputs are validated the way ``Rollout`` and ``RolloutGroup`` validate
+    them: a non-empty ``str`` prompt id, non-empty non-negative integer
+    tokens (numpy integers are normalised to ``int``; ``bool`` is rejected),
+    and a finite reward within ``MAX_ABS_REWARD``.
+    """
+    if not isinstance(prompt_id, str) or not prompt_id:
+        raise ValueError(f"prompt_id must be a non-empty str, got {prompt_id!r}")
+    canonical = json.dumps(
+        {
+            "prompt_id": prompt_id,
+            "reward": _validate_reward(reward).hex(),
+            "tokens": list(_validate_tokens(tokens)),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.blake2b(canonical, digest_size=32, person=_CONTENT_PERSON).hexdigest()
 
 
 def _is_real(value: object) -> bool:
@@ -167,6 +223,31 @@ def _validate_metadata(metadata: object) -> Mapping[str, Any]:
     return MappingProxyType(dict(metadata))
 
 
+def _validate_source(source: object) -> Optional[str]:
+    """Return the source tag unchanged, or raise ValueError.
+
+    A tag is a printable string of at most ``MAX_SOURCE_LENGTH``
+    characters with at least one non-whitespace character. Control
+    characters (newlines, tabs, NUL) and Unicode format or separator
+    characters (zero-width space, U+2028) are rejected because the tag is
+    written into JSON-lines files that are diffed and grepped by people.
+    """
+    if source is None:
+        return None
+    if not isinstance(source, str):
+        raise ValueError(f"source must be a str or None, got {type(source).__name__}")
+    if not source:
+        raise ValueError("source must be non-empty when given")
+    if len(source) > MAX_SOURCE_LENGTH:
+        raise ValueError(f"source must be at most {MAX_SOURCE_LENGTH} characters, got {len(source)}")
+    if not source.isprintable() or not source.strip():
+        raise ValueError(
+            f"source must be printable and not only whitespace (no control, format or "
+            f"separator characters), got {source!r}"
+        )
+    return source
+
+
 @dataclass(frozen=True)
 class Rollout:
     """One completion with its behavior logprobs and reward.
@@ -254,6 +335,13 @@ class RolloutGroup:
         Default: ``reward > 0``. Ignored by equality and hashing, so two
         groups with the same data compare equal whatever predicate they
         carry.
+    source : str, optional
+        Where the prompt came from (a dataset name, a licence bucket, a
+        vendor). Printable, at most ``MAX_SOURCE_LENGTH`` characters. The
+        buffer writes it on every insert record so the checker can report
+        per-source exposure and enforce quotas. Self-declared: the log
+        commits to what the caller said, not to where the data truly came
+        from.
 
     Statistics
     ----------
@@ -281,6 +369,7 @@ class RolloutGroup:
     is_success: Callable[[Rollout], bool] = field(
         default=default_is_success, compare=False, hash=False, repr=False
     )
+    source: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.prompt_id, str) or not self.prompt_id:
@@ -301,8 +390,10 @@ class RolloutGroup:
                 raise ValueError(f"rollouts[{i}] must be a Rollout, got {type(r).__name__}")
         if not callable(self.is_success):
             raise ValueError(f"is_success must be callable, got {self.is_success!r}")
+        source = _validate_source(self.source)
         # Frozen dataclass: see the note in Rollout.__post_init__.
         object.__setattr__(self, "rollouts", rollouts)
+        object.__setattr__(self, "source", source)
 
     def __len__(self) -> int:
         """Number of rollouts."""
@@ -317,6 +408,11 @@ class RolloutGroup:
     def rewards(self) -> tuple[float, ...]:
         """Rewards of the rollouts, in order."""
         return tuple(r.reward for r in self.rollouts)
+
+    @cached_property
+    def content_digests(self) -> tuple[str, ...]:
+        """``content_digest_of(prompt_id, tokens, reward)`` for each rollout, in order."""
+        return tuple(content_digest_of(self.prompt_id, r.tokens, r.reward) for r in self.rollouts)
 
     @cached_property
     def mean_reward(self) -> float:
@@ -351,7 +447,8 @@ class RolloutGroup:
         return self.n_success / self.size
 
     def __repr__(self) -> str:
+        source = f", source={self.source!r}" if self.source is not None else ""
         return (
             f"RolloutGroup(prompt_id={self.prompt_id!r}, "
-            f"model_version={self.model_version}, size={self.size})"
+            f"model_version={self.model_version}, size={self.size}{source})"
         )

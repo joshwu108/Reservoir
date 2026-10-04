@@ -11,13 +11,16 @@ correct and stay finite for every accepted input.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
 import math
 from types import MappingProxyType
 
+import numpy as np
 import pytest
 from hypothesis import given, strategies as st
 
-from reservoir.rollout import MAX_ABS_REWARD, Rollout, RolloutGroup
+from reservoir.rollout import MAX_ABS_REWARD, MAX_SOURCE_LENGTH, Rollout, RolloutGroup, content_digest_of
 
 
 def make_rollout(reward: float = 1.0, n: int = 3, **kw) -> Rollout:
@@ -307,3 +310,126 @@ class TestRolloutGroupStatistics:
         assert len(g.advantages) == len(rewards)
         scale = max(1.0, max(abs(r) for r in rewards))
         assert math.fsum(g.advantages) / scale == pytest.approx(0.0, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Content identity (attested on every insert record)
+# ---------------------------------------------------------------------------
+
+def _reference_digest(prompt_id: str, tokens, reward: float) -> str:
+    """The digest definition from docs/design.md §10, written out independently."""
+    canonical = json.dumps(
+        {"prompt_id": prompt_id, "reward": float(reward).hex(), "tokens": list(tokens)},
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.blake2b(canonical, digest_size=32, person=b"rollout-content\x00").hexdigest()
+
+
+class TestContentDigest:
+    def test_is_64_lowercase_hex(self) -> None:
+        d = content_digest_of("p", (1, 2), 1.0)
+        assert len(d) == 64
+        assert d == d.lower()
+        int(d, 16)
+
+    def test_matches_reference_definition(self) -> None:
+        assert content_digest_of("p", (1, 2, 3), 0.5) == _reference_digest("p", (1, 2, 3), 0.5)
+
+    @given(
+        prompt_id=st.text(min_size=1, max_size=20),
+        tokens=st.lists(st.integers(min_value=0, max_value=200_000), min_size=1, max_size=20),
+        reward=st.floats(allow_nan=False, allow_infinity=False, width=64, min_value=-1e6, max_value=1e6),
+    )
+    def test_matches_reference_on_arbitrary_inputs(self, prompt_id, tokens, reward) -> None:
+        assert content_digest_of(prompt_id, tokens, reward) == _reference_digest(prompt_id, tokens, reward)
+
+    def test_ignores_logprobs_and_metadata(self) -> None:
+        a = Rollout(tokens=[1, 2], logprobs=[-0.1, -0.2], reward=1.0, metadata={"row": 1})
+        b = Rollout(tokens=[1, 2], logprobs=[-0.9, -0.8], reward=1.0, metadata={"row": 2})
+        g = RolloutGroup(prompt_id="p", model_version=0, rollouts=[a, b])
+        assert g.content_digests[0] == g.content_digests[1]
+
+    def test_sensitive_to_tokens_reward_and_prompt(self) -> None:
+        base = content_digest_of("p", (1, 2), 1.0)
+        assert content_digest_of("p", (1, 3), 1.0) != base
+        assert content_digest_of("p", (1, 2), 1.0000001) != base
+        assert content_digest_of("q", (1, 2), 1.0) != base
+
+    def test_negative_zero_differs_from_zero(self) -> None:
+        # float.hex() distinguishes the two; documented in design.md §10.
+        assert content_digest_of("p", (1,), -0.0) != content_digest_of("p", (1,), 0.0)
+
+    # Known-answer vectors, computed once and pinned. They catch a change to
+    # the canonical form (key order, escaping, personalisation) that a test
+    # sharing code with the implementation would miss, and they are what
+    # the checker's independent implementation is tested against too.
+    GOLDEN = {
+        ("p", (1, 2, 3), 0.5): "2a837616faed26935aa920b0fd1357cdd528667c469e6682e554e3b85079578f",
+        ("\u00e9\U0001F600", (0,), -1.0): "724b08aaababdc38a1730a9e9167652c6c66ee419e90193be6e509b812ebd15c",
+    }
+
+    def test_known_answer_vectors(self) -> None:
+        for (prompt_id, tokens, reward), expected in self.GOLDEN.items():
+            assert content_digest_of(prompt_id, tokens, reward) == expected, (prompt_id, tokens, reward)
+
+    def test_non_ascii_prompt_is_escaped_not_raw(self) -> None:
+        # ensure_ascii=True is part of the definition: a checker that wrote
+        # raw UTF-8 would disagree on every non-ASCII prompt id.
+        raw = json.dumps({"prompt_id": "\u00e9", "reward": (1.0).hex(), "tokens": [1]},
+                         sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        raw_digest = hashlib.blake2b(raw, digest_size=32, person=b"rollout-content\x00").hexdigest()
+        assert content_digest_of("\u00e9", (1,), 1.0) != raw_digest
+
+    def test_numpy_and_int_inputs_normalise(self) -> None:
+        assert content_digest_of("p", np.array([1, 2], dtype=np.int64), 1) == content_digest_of("p", (1, 2), 1.0)
+
+    @pytest.mark.parametrize("args", [
+        ("", (1,), 1.0), (7, (1,), 1.0), ("p", (), 1.0), ("p", (True,), 1.0), ("p", (-1,), 1.0),
+        ("p", (1,), float("nan")), ("p", (1,), float("inf")), ("p", (1,), 10 ** 400),
+    ])
+    def test_malformed_inputs_rejected(self, args) -> None:
+        with pytest.raises(ValueError):
+            content_digest_of(*args)
+
+    def test_group_digests_align_with_rollouts(self) -> None:
+        g = RolloutGroup(
+            prompt_id="p", model_version=0,
+            rollouts=[make_rollout(reward=0.0, n=2), make_rollout(reward=1.0, n=3)],
+        )
+        assert len(g.content_digests) == 2
+        assert g.content_digests[1] == content_digest_of("p", (0, 1, 2), 1.0)
+
+
+class TestRolloutGroupSource:
+    def test_default_is_none(self) -> None:
+        g = RolloutGroup(prompt_id="p", model_version=0, rollouts=[make_rollout()])
+        assert g.source is None
+
+    def test_source_is_kept(self) -> None:
+        g = RolloutGroup(prompt_id="p", model_version=0, rollouts=[make_rollout()], source="gsm8k")
+        assert g.source == "gsm8k"
+
+    def test_source_participates_in_equality(self) -> None:
+        a = RolloutGroup(prompt_id="p", model_version=0, rollouts=[make_rollout()], source="a")
+        b = RolloutGroup(prompt_id="p", model_version=0, rollouts=[make_rollout()], source="b")
+        assert a != b
+
+    @pytest.mark.parametrize("bad", ["", "x" * 257, "a\nb", "a\tb", "a\x00b", "a\u2028b", "a\u200bb",
+                                     "   ", 7, b"bytes"])
+    def test_bad_source_rejected(self, bad: object) -> None:
+        with pytest.raises(ValueError, match="source"):
+            RolloutGroup(prompt_id="p", model_version=0, rollouts=[make_rollout()], source=bad)
+
+    def test_maximum_length_accepted(self) -> None:
+        g = RolloutGroup(prompt_id="p", model_version=0, rollouts=[make_rollout()], source="x" * MAX_SOURCE_LENGTH)
+        assert len(g.source) == MAX_SOURCE_LENGTH
+
+    def test_repr_shows_source_only_when_set(self) -> None:
+        without = RolloutGroup(prompt_id="p", model_version=0, rollouts=[make_rollout()])
+        with_source = RolloutGroup(prompt_id="p", model_version=0, rollouts=[make_rollout()], source="s")
+        assert "source" not in repr(without)
+        assert "source='s'" in repr(with_source)
+
+    def test_unicode_source_accepted(self) -> None:
+        g = RolloutGroup(prompt_id="p", model_version=0, rollouts=[make_rollout()], source="données/été")
+        assert g.source == "données/été"

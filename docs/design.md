@@ -631,3 +631,122 @@ the torch RNG, so the adapter does not perturb the rest of the run the way
   are replayed.
 - `mask_truncated_completions=True` zeroes a row's whole mask; such rows
   cannot form a `Rollout` and are skipped.
+
+## 10. Content Commitment, Transcript and Diff
+
+Version 0.5.0 binds every buffer slot to the training example it holds, so
+a verified log can answer *which examples* were sampled rather than only
+*which slots*.
+
+### 10.1 Content digest
+
+```
+preimage = canonical JSON of {"prompt_id": <str>, "reward": <reward.hex()>, "tokens": [<int>, ...]}
+           (sorted keys, separators (",", ":"), ensure_ascii=True, UTF-8)
+content_digest = BLAKE2b-256(preimage, person=b"rollout-content\x00").hex()
+```
+
+`float.hex()` makes the reward exact and gives one spelling per value in
+every Python, so `-0.0` and `0.0` have different digests. Behavior logprobs
+and metadata are excluded: they describe the generating model and the
+caller, not the example. The library computes the digest in
+`reservoir.rollout.content_digest_of`; the checker recomputes it in
+`checker/content.py` from this definition with the standard library, and
+the two are cross-checked by known-answer vectors (one with a non-ASCII
+prompt id) and a property test.
+
+### 10.2 Schema additions
+
+`insert` records gain two optional fields (absent, not null, when unused):
+
+| field | value | rule |
+|---|---|---|
+| `content_digest` | 64 lowercase hex characters | `insert` only; a log has it on every insert or on none |
+| `source` | printable string, 1–256 characters, not whitespace-only | requires `content_digest`; `RolloutGroup.source`, set by `add_group(..., source=)` |
+
+`update` and `evict` records are unchanged: they refer to a slot whose
+example the replay already knows. Records without the fields serialise
+byte-for-byte as before, so legacy logs verify unchanged.
+
+### 10.3 Manifest
+
+The manifest (`reservoir.rollout_manifest`) is a separate JSON-lines file,
+one line per insert, keyed by the same `(op_counter, index)`:
+
+```json
+{"op_counter": 12, "index": 50, "content_digest": "<hex>", "prompt_id": "a3f…",
+ "source": "gsm8k", "tokens": [1, 2, 3], "reward_hex": "0x1.0000000000000p+0", "entry_version": 7}
+```
+
+It is the opening of the digests, not a second chain: the log already
+commits to every line. `RolloutBuffer(manifest=path)` requires `attest`.
+The durable buffer keeps the manifest lines in its committed state and
+rewrites the file from that state on reopen, exactly as it does for the
+attestation file, and refuses to reopen a directory with a different
+manifest setting than it was saved with. `RolloutAttester.prepare_inserts`
+computes digests and manifest lines before the first tree write of
+`add_group`, so nothing on the insert path can fail after the buffer has
+started mutating; `restore` validates every manifest line (types, digest
+recomputation, canonical `reward_hex`) and cross-checks
+`(op_counter, index, content_digest, source, entry_version)` against the
+log before replacing anything.
+
+### 10.4 What the checker verifies
+
+`checker/content.py` adds to `verify_chain`:
+
+- field well-formedness and the all-or-none rule for `content_digest`;
+- slot tracking through inserts and evicts, so every draw resolves to the
+  example its slot held (a draw of a slot with no committed example is an
+  error);
+- with `--manifest`: every line's digest recomputes from its own prompt,
+  tokens and reward; the lines, in order, are exactly the log's
+  content-bearing inserts with the same digest, source and entry version;
+  a log with no inserts accepts only an empty manifest; a log whose inserts
+  carry no digests accepts none.
+
+`verify_chain` returns a `VerifiedLog` whose `content` state (insert
+history, resolved samples) is what the two tools below build on.
+
+### 10.5 Transcript
+
+`python -m checker.transcript` derives, from the log alone:
+
+- **exposure** per content digest: `times_sampled`, the exact sum of
+  importance weights, first and last `op_counter`, every copy with the
+  record that evicted it;
+- **mixture** per source: inserted examples, sampled rows, share of sampled
+  rows; and per *window*, the stretch of records between two
+  `advance_version` records (keyed by position, so a repeated version
+  cannot double-count);
+- **quota** verdicts (`--quota source=N`, exit 2 on violation) and **find**
+  (`--find <digest>`, every sample record and batch position).
+
+`--quota` and `--find` refuse a log without content digests; the report key
+`(none)` denotes untagged examples and a real source spelled that way is
+refused.
+
+### 10.6 Diff
+
+`python -m checker.diff` verifies two logs and classifies their first
+differing record: `identical`, `config` (`decay_config` differs), `data`
+(an insert or update differs, or the operation sequences diverge: the
+stored examples, scores or group sizes differed upstream), `schedule`
+(`advance_version`), `sampler` (two same-sized `sample` records on an
+identical prefix: different seeds or buffer ids, which are not in the log),
+`internal` (an evict or rebase differs on identical state, or a rebase
+appears where the other log has a different record; deterministic, must
+never happen), `truncated` (one is a prefix of the other). When the
+operations differ, `decay_config`, `advance_version` and `rebase` take
+precedence in that order; two `sample` records of different sizes are
+`data`, and two with identical draws and slots but different weights are
+`config` (a different `beta`).
+
+### 10.7 Limit
+
+The log commits; the manifest opens. A chain-consistent change to an
+insert's `content_digest` or `source` is invisible without the manifest.
+The mutation campaign measures this (`content_limit` in
+`results/mutation_campaign_report.json`): 3 such forgeries survive the
+log-only check and all 3 are rejected with the manifest. The campaign fails
+if that measurement ever changes.

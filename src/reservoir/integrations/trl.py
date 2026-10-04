@@ -93,8 +93,14 @@ more than one process raises too. ``ReservoirReplayCallback`` raises at
 the end of the first optimizer step if the hook never ran, so a TRL
 rename of the overridden method cannot silently disable replay.
 
-What is attested: which rollouts were stored, which were drawn and with
-what weight, and which were evicted. Generation, reward functions and
+What is attested: which rollouts were stored (each insert record carries
+the content digest of prompt, completion and advantage, and the
+``source`` tag given to ``ReservoirReplay``), which were drawn and with
+what weight, and which were evicted. With ``manifest=`` the opening of
+every digest is written next to the log, so ``python -m checker.verify
+<log> --manifest <manifest>`` can confirm the log commits to exactly the
+rows that were stored and ``python -m checker.transcript`` can report
+exposure per example and per source. Generation, reward functions and
 TRL's row shuffling are outside the log. No training-quality claim is
 made for replay; see ``docs/nonclaims.md``.
 
@@ -176,6 +182,14 @@ class ReservoirReplay:
         Default ``StoredAdvantagePriority()``.
     directory : path, optional
         Make the buffer crash-atomic on disk.
+    source : str, optional
+        Provenance tag written on every stored row's insert record
+        (``RolloutGroup.source``), for per-source exposure and quota
+        reporting. One tag per adapter: TRL hands the hook token ids, not
+        dataset rows, so a finer tag would have to come from the caller.
+    manifest : path, optional
+        Also write the opening of every stored row's content digest here.
+        Requires ``attest``.
 
     Attributes
     ----------
@@ -203,6 +217,8 @@ class ReservoirReplay:
         seed: int = 0,
         attest: AttestTarget = None,
         directory: Union[str, Path, None] = None,
+        source: Optional[str] = None,
+        manifest: Union[str, Path, None] = None,
         **rollout_buffer_kwargs: Any,
     ) -> None:
         kwargs = dict(
@@ -215,9 +231,12 @@ class ReservoirReplay:
             **rollout_buffer_kwargs,
         )
         if directory is None:
-            self.buffer: Union[RolloutBuffer, DurableRolloutBuffer] = RolloutBuffer(attest=attest, **kwargs)
+            self.buffer: Union[RolloutBuffer, DurableRolloutBuffer] = RolloutBuffer(
+                attest=attest, manifest=manifest, **kwargs
+            )
         else:
-            self.buffer = DurableRolloutBuffer(directory, attest=attest, **kwargs)
+            self.buffer = DurableRolloutBuffer(directory, attest=attest, manifest=manifest, **kwargs)
+        self.source = source
         self.beta = float(beta)
         self.stats: dict[str, int] = {name: 0 for name in STAT_NAMES}
         self.last_replay: Optional[RolloutBatch] = None
@@ -298,7 +317,7 @@ class ReservoirReplay:
             output, num_generations=trainer.num_generations, step=step, logprobs=logprobs
         )
         for group in conversion.groups:
-            self.buffer.add_group(group.prompt_id, step, group.rollouts)
+            self.buffer.add_group(group.prompt_id, step, group.rollouts, source=self.source)
         self.stats["ingested_rows"] += sum(len(group.rollouts) for group in conversion.groups)
         self.stats["ingested_groups"] += len(conversion.groups)
         self.stats["dead_groups"] += conversion.dead_groups
@@ -331,7 +350,8 @@ class ReservoirReplay:
         self.buffer.close()
 
     def __repr__(self) -> str:
-        return f"ReservoirReplay({self.buffer!r}, beta={self.beta})"
+        source = f", source={self.source!r}" if self.source is not None else ""
+        return f"ReservoirReplay({self.buffer!r}, beta={self.beta}{source})"
 
 
 class ReservoirReplayMixin:

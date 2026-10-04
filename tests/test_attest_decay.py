@@ -19,9 +19,14 @@ import json
 
 import pytest
 
+from reservoir import attest as attest_module
 from reservoir.attest import AttestationLog, _digest_record
-from reservoir.rollout import Rollout
+from reservoir.decay import DecayParams
+from reservoir.decayed_tree import DecayedPriorityTree
+from reservoir.rollout import MAX_SOURCE_LENGTH, Rollout, RolloutGroup, content_digest_of
+from reservoir.rollout_attest import RolloutAttester
 from reservoir.rollout_buffer import RolloutBuffer
+from reservoir.rollout_manifest import ManifestWriter
 
 # Digests of two records appended by the pre-extension code. If the
 # extension changed how a legacy record is serialised, these would move.
@@ -315,3 +320,215 @@ class TestBufferWiring:
             assert len(upd) == 1
             assert int(upd[0]["entry_version"]) == (5 if reset else 0)
             assert int(upd[0]["base_priority_int"]) == buf.base_priority(0)
+
+
+# ---------------------------------------------------------------------------
+# Content fields on insert records, and the manifest the attester mirrors
+# ---------------------------------------------------------------------------
+
+DIGEST = "ab" * 32
+
+
+class TestContentMutationFields:
+    def test_insert_with_content_fields(self) -> None:
+        log = AttestationLog()
+        rec = log.append_mutation("insert", 0, 0, 5, 0, base_priority_int=5, entry_version=0,
+                                  base_epoch=0, content_digest=DIGEST, source="gsm8k")
+        assert rec["content_digest"] == DIGEST
+        assert rec["source"] == "gsm8k"
+
+    def test_omitted_fields_are_absent_and_bytes_unchanged(self) -> None:
+        with_kwargs = AttestationLog().append_mutation(
+            "insert", 0, 0, 5, 0, base_priority_int=5, entry_version=0, base_epoch=0,
+            content_digest=None, source=None)
+        without = AttestationLog().append_mutation(
+            "insert", 0, 0, 5, 0, base_priority_int=5, entry_version=0, base_epoch=0)
+        assert "content_digest" not in with_kwargs and "source" not in with_kwargs
+        assert with_kwargs["digest"] == without["digest"]
+
+    def test_content_digest_without_source(self) -> None:
+        rec = AttestationLog().append_mutation("insert", 0, 0, 5, 0, content_digest=DIGEST)
+        assert rec["content_digest"] == DIGEST and "source" not in rec
+
+    @pytest.mark.parametrize("op", ["update", "evict"])
+    def test_content_fields_only_on_insert(self, op: str) -> None:
+        with pytest.raises(ValueError, match="insert"):
+            AttestationLog().append_mutation(op, 0, 5, 6, 0, content_digest=DIGEST)
+
+    def test_source_requires_digest(self) -> None:
+        with pytest.raises(ValueError, match="content_digest"):
+            AttestationLog().append_mutation("insert", 0, 0, 5, 0, source="s")
+
+    @pytest.mark.parametrize("bad", ["AB" * 32, "ab" * 31, "zz" * 32, 7, ""])
+    def test_malformed_digest_rejected(self, bad: object) -> None:
+        with pytest.raises(ValueError, match="content_digest"):
+            AttestationLog().append_mutation("insert", 0, 0, 5, 0, content_digest=bad)
+
+    @pytest.mark.parametrize("bad", ["", "a\nb", "x" * 257, "   ", "a\u200bb", 3])
+    def test_malformed_source_rejected(self, bad: object) -> None:
+        with pytest.raises(ValueError, match="source"):
+            AttestationLog().append_mutation("insert", 0, 0, 5, 0, content_digest=DIGEST, source=bad)
+
+    def test_source_boundary_accepted(self) -> None:
+        rec = AttestationLog().append_mutation("insert", 0, 0, 5, 0, content_digest=DIGEST, source="x" * 256)
+        assert len(rec["source"]) == 256
+
+    def test_source_bound_matches_rollout_module(self) -> None:
+        # attest.py imports nothing from the rest of the package, so the
+        # bound is duplicated; this pins the two copies together.
+        assert attest_module._MAX_SOURCE_LENGTH == MAX_SOURCE_LENGTH
+        for text in ("ok", "x" * MAX_SOURCE_LENGTH, "é"):
+            RolloutGroup(prompt_id="p", model_version=0, rollouts=rollouts([1.0]), source=text)
+            AttestationLog().append_mutation("insert", 0, 0, 5, 0, content_digest=DIGEST, source=text)
+        for text in ("", " ", "x" * (MAX_SOURCE_LENGTH + 1), "a\tb"):
+            with pytest.raises(ValueError):
+                RolloutGroup(prompt_id="p", model_version=0, rollouts=rollouts([1.0]), source=text)
+            with pytest.raises(ValueError):
+                AttestationLog().append_mutation("insert", 0, 0, 5, 0, content_digest=DIGEST, source=text)
+
+
+def _params() -> DecayParams:
+    return DecayParams(half_life=4, max_policy_age=16, capacity=8, priority_bits=32,
+                       priority_frac_bits=16, rebase_slack=0)
+
+
+def _group(source=None) -> RolloutGroup:
+    return RolloutGroup(prompt_id="p", model_version=0, rollouts=rollouts([1.0, 0.0]), source=source)
+
+
+def _insert(att: RolloutAttester, event, op_counter: int, group: RolloutGroup, member: int) -> None:
+    """What RolloutBuffer.add_group does per rollout: prepare up front, then record."""
+    prepared = att.prepare_inserts(group, op_counter)
+    if prepared:
+        att.record_insert(event, op_counter, prepared[member])
+
+
+class TestAttesterManifest:
+    def test_manifest_requires_attestation(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match="manifest"):
+            RolloutAttester(None, _params(), False, manifest=tmp_path / "m.jsonl")
+
+    def test_record_insert_writes_log_fields_and_manifest_line(self, tmp_path) -> None:
+        att = RolloutAttester(tmp_path / "a.jsonl", _params(), False, manifest=tmp_path / "m.jsonl")
+        group = _group(source="zen")
+        tree = DecayedPriorityTree(_params())
+        event = tree.write(3, 1234, 0)
+        _insert(att, event, 2, group, 1)
+        att.close()
+        rec = att.log.records[-1]
+        assert rec["op"] == "insert" and rec["index"] == 3
+        assert rec["content_digest"] == group.content_digests[1] == content_digest_of("p", group.rollouts[1].tokens, 0.0)
+        assert rec["source"] == "zen"
+        line = json.loads((tmp_path / "m.jsonl").read_text().splitlines()[0])
+        assert line["op_counter"] == 2 and line["index"] == 3
+        assert line["content_digest"] == rec["content_digest"]
+        assert line["prompt_id"] == "p" and line["source"] == "zen"
+        assert line["tokens"] == list(group.rollouts[1].tokens)
+        assert line["reward_hex"] == (0.0).hex()
+        assert line["entry_version"] == 0
+        assert att.manifest_records == [line]
+
+    def test_prepare_inserts_is_empty_when_disabled_and_carries_lines_otherwise(self, tmp_path) -> None:
+        assert RolloutAttester(None, _params(), False).prepare_inserts(_group("s"), 3) == ()
+        plain = RolloutAttester(AttestationLog(), _params(), False).prepare_inserts(_group("s"), 3)
+        assert [p.manifest_line for p in plain] == [None, None]
+        assert [p.source for p in plain] == ["s", "s"]
+        att = RolloutAttester(tmp_path / "a.jsonl", _params(), False, manifest=tmp_path / "m.jsonl")
+        with_lines = att.prepare_inserts(_group("s"), 3)
+        att.close()
+        assert [p.manifest_line["op_counter"] for p in with_lines] == [3, 3]
+        assert with_lines[1].manifest_line["reward_hex"] == (0.0).hex()
+        assert [p.content_digest for p in with_lines] == list(_group("s").content_digests)
+
+    def test_record_insert_without_manifest_still_writes_log_fields(self) -> None:
+        att = RolloutAttester(AttestationLog(), _params(), False)
+        event = DecayedPriorityTree(_params()).write(0, 10, 0)
+        _insert(att, event, 0, _group(), 0)
+        rec = att.log.records[-1]
+        assert "content_digest" in rec and "source" not in rec
+        assert att.manifest_records == []
+
+    def test_record_write_for_update_and_evict_adds_no_manifest_line(self, tmp_path) -> None:
+        att = RolloutAttester(tmp_path / "a.jsonl", _params(), False, manifest=tmp_path / "m.jsonl")
+        tree = DecayedPriorityTree(_params())
+        _insert(att, tree.write(0, 10, 0), 0, _group(), 0)
+        att.record_write(tree.write(0, 20, 0), 0)
+        att.record_write(tree.evict(0, "explicit"), 0)
+        att.close()
+        assert len((tmp_path / "m.jsonl").read_text().splitlines()) == 1
+        assert "content_digest" not in att.log.records[-1]
+
+    def test_disabled_attester_ignores_everything(self) -> None:
+        att = RolloutAttester(None, _params(), False)
+        _insert(att, DecayedPriorityTree(_params()).write(0, 10, 0), 0, _group(), 0)
+        assert att.log is None and att.manifest_records == []
+
+    def test_restore_rewrites_both_files(self, tmp_path) -> None:
+        att = RolloutAttester(tmp_path / "a.jsonl", _params(), False, manifest=tmp_path / "m.jsonl")
+        tree = DecayedPriorityTree(_params())
+        _insert(att, tree.write(0, 10, 0), 0, _group(), 0)
+        _insert(att, tree.write(1, 10, 0), 0, _group(), 1)
+        log_records, manifest_records = att.log.records[:2], att.manifest_records[:1]
+        att.restore(log_records, manifest_records)
+        att.close()
+        assert att.log.records == log_records
+        assert att.manifest_records == manifest_records
+        assert len((tmp_path / "a.jsonl").read_text().splitlines()) == 2
+        assert len((tmp_path / "m.jsonl").read_text().splitlines()) == 1
+
+    def test_restore_rejects_manifest_records_without_manifest(self, tmp_path) -> None:
+        att = RolloutAttester(tmp_path / "a.jsonl", _params(), False)
+        with pytest.raises(ValueError, match="manifest"):
+            att.restore(att.log.records, [{"op_counter": 0}])
+        att.close()
+
+    def test_restore_with_bad_manifest_leaves_everything_unchanged(self, tmp_path) -> None:
+        att = RolloutAttester(tmp_path / "a.jsonl", _params(), False, manifest=tmp_path / "m.jsonl")
+        tree = DecayedPriorityTree(_params())
+        _insert(att, tree.write(0, 10, 0), 0, _group(), 0)
+        log_before, manifest_before = att.log.records, att.manifest_records
+        files_before = ((tmp_path / "a.jsonl").read_text(), (tmp_path / "m.jsonl").read_text())
+        tampered = [dict(manifest_before[0], tokens=[9, 9])]
+        with pytest.raises(ValueError, match="content_digest"):
+            att.restore(log_before[:1], tampered)
+        with pytest.raises(ValueError, match="does not match"):
+            att.restore(log_before[:1], manifest_before)   # one line, zero content inserts
+        with pytest.raises(ValueError, match="does not match"):
+            att.restore(log_before, [])                    # one content insert, zero lines
+        att.close()
+        assert att.log.records == log_before and att.manifest_records == manifest_before
+        assert ((tmp_path / "a.jsonl").read_text(), (tmp_path / "m.jsonl").read_text()) == files_before
+
+    def test_restore_validates_before_touching_the_log(self, tmp_path) -> None:
+        att = RolloutAttester(tmp_path / "a.jsonl", _params(), False, manifest=tmp_path / "m.jsonl")
+        before = att.log.records
+        with pytest.raises(ValueError, match="manifest record 0"):
+            att.restore(before, [{"op_counter": 0}])
+        assert att.log.records == before
+        att.close()
+
+    def test_failed_construction_leaves_no_manifest_behind(self, tmp_path) -> None:
+        existing = tmp_path / "a.jsonl"
+        existing.write_text("")
+        with pytest.raises(FileExistsError):
+            RolloutAttester(existing, _params(), False, manifest=tmp_path / "m.jsonl")
+        assert not (tmp_path / "m.jsonl").exists()
+        with pytest.raises(TypeError, match="attest"):
+            RolloutAttester(object(), _params(), False, manifest=tmp_path / "m2.jsonl")  # type: ignore[arg-type]
+        assert not (tmp_path / "m2.jsonl").exists()
+        with pytest.raises(TypeError, match="manifest"):
+            RolloutAttester(tmp_path / "b.jsonl", _params(), False, manifest=object())  # type: ignore[arg-type]
+        assert not (tmp_path / "b.jsonl").exists()
+
+    def test_close_closes_both_files(self, tmp_path) -> None:
+        att = RolloutAttester(tmp_path / "a.jsonl", _params(), False, manifest=tmp_path / "m.jsonl")
+        att.close()
+        assert att._file is None and att._manifest._file is None
+        att.close()
+
+    def test_in_memory_manifest_writer(self) -> None:
+        writer = ManifestWriter()
+        att = RolloutAttester(AttestationLog(), _params(), False, manifest=writer)
+        _insert(att, DecayedPriorityTree(_params()).write(0, 10, 0), 0, _group("s"), 0)
+        assert att.has_manifest and writer.records == att.manifest_records
+        assert writer.records[0]["source"] == "s"

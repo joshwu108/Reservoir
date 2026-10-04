@@ -116,3 +116,51 @@ no-grad forward, which under dropout consumes RNG state, so a step without
 replay is not promised to be bit-identical to a plain `GRPOTrainer` step.
 Priorities are fixed at insertion; the adapter does not re-score replayed
 rows from their training loss.
+
+### 15. Relation to Verifiable Fine-Tuning
+
+Reservoir implements the data-commitment component (content digests,
+source tags, manifest, per-source exposure and quota counts) and the
+public-replayable half of the verifiable-sampler component of Verifiable
+Fine-Tuning (arXiv 2510.16830), and only a subset of those: there is no
+licence or preprocessing binding, and quota counts are computed by the
+checker after the fact rather than committed and enforced. It does not
+implement that protocol's zero-knowledge update circuits, recursive proof
+aggregation, provenance binding or index-hiding sampling, and it offers no
+proof that the parameter update used the sampled batch.
+
+### 16. EU AI Act Article 53(1)(d)
+
+A transcript is evidence a team can use to produce and defend per-source
+statements about what the replay buffer inserted and replayed. Fresh
+rollouts used directly in a step, prompt selection and data outside the
+buffer are not in the log. It is not the public summary
+of training content the Commission's template requires, and using
+Reservoir does not make a provider compliant with anything.
+
+### 17. Content Commitments Need the Manifest to Be Opened
+
+The log commits to each stored example through its content digest; a
+verifier without the manifest can confirm the commitments are consistent
+but not what they are commitments to. A chain-consistent change to an
+insert's digest or source is not detectable from the log alone; the
+mutation campaign measures and reports this. `source` is self-declared: the
+log records what the caller said, not where the data truly came from.
+Content digests are over token ids and so depend on the tokenizer.
+
+### 18. Reproducibility Depends on the Engine
+
+Two runs produce identical transcripts only when everything upstream of
+the buffer (generation, rewards, dead groups) is identical. The CPU demo
+shows this with HF ``generate`` under a fixed seed on a tiny model. On a
+GPU, and with any engine that is not batch-invariant, the generated data
+may differ between runs; ``checker.diff`` then locates the first insert
+where it did and shows that Reservoir's draws were identical before it,
+but Reservoir does not make the engine deterministic.
+
+### 19. Attestation Overhead
+
+The numbers in `results/attestation_overhead.json` measure the pure-Python
+buffer on one laptop and describe the relative cost of attestation and
+verification. They are not throughput claims (§1) and say nothing about
+training quality (§10, §13).

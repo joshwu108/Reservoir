@@ -26,11 +26,18 @@ Costs and limits
 - Each operation serialises the whole buffer (full-state snapshots, as in
   ``DurableBuffer``), so cost grows with buffer size. ``sample`` is an
   operation too: it advances the draw counter and may evict stale
-  entries. An incremental write-ahead log is future work.
-- The attestation log is part of the saved state. When ``attest`` is a
-  path, the file is rewritten from the recovered state on reopen, so the
-  file and the buffer can never disagree. ``attest`` must be a path or
-  None; an in-memory ``AttestationLog`` cannot be recovered into.
+  entries. The attestation records and, with ``manifest=``, the manifest
+  lines (which hold every inserted rollout's tokens, evicted or not) are
+  part of the snapshot, so its size also grows with the run's history.
+  An incremental write-ahead log is future work.
+- A directory saved without a manifest cannot adopt one later, and one
+  saved with a manifest must be reopened with it, the same rule as for
+  ``attest``.
+- The attestation log and the manifest are part of the saved state. When
+  ``attest`` (and ``manifest``) is a path, the file is rewritten from the
+  recovered state on reopen, so the files and the buffer can never
+  disagree. Both must be paths or None; in-memory targets cannot be
+  recovered into.
 - Construction parameters must match the saved state; a mismatch is a
   ``ValueError`` rather than a silent reinterpretation of the snapshot. A
   corrupt ``state.json`` is also an error, never a fresh start. Both are
@@ -55,6 +62,7 @@ from reservoir.decayed_tree import AdvanceResult
 from reservoir.durable import CorruptStateError, durably_apply, recover_state
 from reservoir.rollout import Rollout
 from reservoir.rollout_buffer import RolloutBatch, RolloutBuffer
+from reservoir.rollout_manifest import ManifestWriter
 from reservoir.rollout_snapshot import _require_json_round_trip
 
 _LOAD_ERRORS = (KeyError, TypeError, ValueError, IndexError)
@@ -69,9 +77,11 @@ class DurableRolloutBuffer:
         Where state, intent and segment files live. Created if missing.
     attest : str | Path | None
         Attestation file path, or None. See the module docstring.
+    manifest : str | Path | None
+        Manifest file path, or None. Requires ``attest``.
     **buffer_kwargs
-        Everything ``RolloutBuffer`` accepts except ``attest`` and
-        ``attest_overwrite``: ``capacity``, ``priority``, ``half_life``,
+        Everything ``RolloutBuffer`` accepts except ``attest``,
+        ``manifest`` and ``attest_overwrite``: ``capacity``, ``priority``, ``half_life``,
         ``max_policy_age``, ``alpha``, ``beta``, ``seed``, ``buffer_id``,
         ``reset_age_on_update``, ``priority_bits``, ``priority_frac_bits``,
         ``rebase_slack``.
@@ -88,6 +98,7 @@ class DurableRolloutBuffer:
         self,
         directory: Union[str, Path],
         attest: Union[str, Path, None] = None,
+        manifest: Union[str, Path, None] = None,
         **buffer_kwargs: Any,
     ) -> None:
         if attest is not None and not isinstance(attest, (str, Path)):
@@ -95,13 +106,21 @@ class DurableRolloutBuffer:
                 "DurableRolloutBuffer attest must be a file path or None; an in-memory "
                 "AttestationLog cannot be recovered after a crash"
             )
-        for forbidden in ("attest", "attest_overwrite"):
+        if manifest is not None and not isinstance(manifest, (str, Path)):
+            raise TypeError(
+                "DurableRolloutBuffer manifest must be a file path or None; an in-memory "
+                "ManifestWriter cannot be recovered after a crash"
+            )
+        if manifest is not None and attest is None:
+            raise ValueError("manifest requires attestation: pass attest=<path> as well")
+        for forbidden in ("attest", "manifest", "attest_overwrite"):
             if forbidden in buffer_kwargs:
                 raise TypeError(f"{forbidden} is managed by DurableRolloutBuffer")
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self._buffer_kwargs = dict(buffer_kwargs)
         self._attest = Path(attest) if attest is not None else None
+        self._manifest = Path(manifest) if manifest is not None else None
         self._buf = self._open()
 
     def _open(self) -> RolloutBuffer:
@@ -122,7 +141,9 @@ class DurableRolloutBuffer:
 
     def _new_buffer(self) -> RolloutBuffer:
         """An empty buffer with this wrapper's parameters, writing to the attestation file."""
-        return RolloutBuffer(attest=self._attest, attest_overwrite=True, **self._buffer_kwargs)
+        return RolloutBuffer(
+            attest=self._attest, manifest=self._manifest, attest_overwrite=True, **self._buffer_kwargs
+        )
 
     def _validate_state(self, state: dict) -> None:
         """Load ``state`` into a throwaway in-memory buffer so a bad snapshot or
@@ -134,7 +155,16 @@ class DurableRolloutBuffer:
                 + ("the state has a log, pass attest=<path>" if self._attest is None
                    else "the state has no log, pass attest=None")
             )
-        probe = RolloutBuffer(attest=AttestationLog(), **self._buffer_kwargs)
+        if (state.get("manifest") is None) != (self._manifest is None):
+            raise ValueError(
+                "manifest setting differs from the saved state: "
+                + ("the state has a manifest, pass manifest=<path>" if self._manifest is None
+                   else "the state has no manifest, pass manifest=None")
+            )
+        probe = RolloutBuffer(
+            attest=AttestationLog(), manifest=ManifestWriter() if self._manifest is not None else None,
+            **self._buffer_kwargs,
+        )
         try:
             probe.load_state_dict(state)
         except _LOAD_ERRORS as exc:
@@ -164,12 +194,15 @@ class DurableRolloutBuffer:
     # -- durable operations ------------------------------------------------
 
     def add_group(
-        self, prompt_id: str, model_version: int, rollouts: Sequence[Rollout]
+        self, prompt_id: str, model_version: int, rollouts: Sequence[Rollout],
+        source: Optional[str] = None,
     ) -> tuple[int, ...]:
         """Durably store a prompt group. No ``is_success``: predicates cannot be saved."""
         for k, r in enumerate(rollouts):
             _require_json_round_trip(dict(getattr(r, "metadata", {})), f"rollout {k} of prompt {prompt_id!r}")
-        return self._apply("add_group", lambda: self._buf.add_group(prompt_id, model_version, rollouts))
+        return self._apply(
+            "add_group", lambda: self._buf.add_group(prompt_id, model_version, rollouts, source=source)
+        )
 
     def sample(self, batch_size: int, current_version: Optional[int] = None) -> RolloutBatch:
         """Durably sample: the draw counter and any stale evictions are committed."""
@@ -234,6 +267,16 @@ class DurableRolloutBuffer:
     def attestation_log(self):
         """The in-memory attestation log, or None."""
         return self._buf.attestation_log
+
+    @property
+    def has_manifest(self) -> bool:
+        """True when a manifest file is kept next to the attestation log."""
+        return self._buf.has_manifest
+
+    @property
+    def manifest_records(self) -> list[dict]:
+        """Manifest lines of the committed state (a copy)."""
+        return self._buf.manifest_records
 
     def live_positions(self) -> tuple[int, ...]:
         """Slots holding a rollout, ascending."""

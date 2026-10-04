@@ -5,10 +5,11 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 
-> **Status:** the rollout buffer, priority strategies, age decay, attestation,
-> checker, durable buffer and the TRL integration below are implemented and
-> tested. The verl integration and the Stable-Baselines3 / TorchRL adapters
-> are not yet.
+> **Status:** the rollout buffer, priority strategies, age decay, attestation
+> with content commitments, the independent checker with its transcript and
+> diff tools, the durable buffer, the TRL integration and the reproducibility
+> demo below are implemented and tested. The verl integration and the
+> Stable-Baselines3 / TorchRL adapters are not yet.
 
 Generating rollouts is the most expensive part of GRPO-style training, and the
 standard recipe uses each rollout once and throws it away. Reservoir is a replay
@@ -20,8 +21,9 @@ It is built around three properties:
 1. **Exact** — priorities are integers and the sum-tree is integer arithmetic.
    Floats enter at one declared boundary.
 2. **Reproducible and verifiable** — draws are keyed BLAKE2b hashes, not RNG
-   calls. Every sampled batch is written to a hash-chained attestation log that
-   an independent checker can replay.
+   calls. Every stored example (by content digest and source) and every sampled
+   batch is written to a hash-chained attestation log that an independent
+   checker can replay, report on, and compare between runs.
 3. **Crash-atomic** — a write-ahead log with full fsync. A killed trial does not
    lose its rollout history.
 
@@ -124,31 +126,80 @@ prompts.update_group(i, model_version=step, rollouts=group_rollouts)
 ## Reproducible, verifiable runs
 
 Deterministic inference engines make the compute reproducible. Reservoir does
-the same for the data: which entry was sampled, when, and under what priority.
+the same for the data: which example was sampled, when, and under what
+probability.
 
 ```python
-buf = RolloutBuffer(capacity=50_000, seed=0, attest="run-01/attest.jsonl")
+buf = RolloutBuffer(capacity=50_000, seed=0,
+                    attest="run-01/attest.jsonl", manifest="run-01/manifest.jsonl")
+buf.add_group(prompt_id, model_version=step, rollouts=rollouts, source="gsm8k")
 ```
 
-Every insert, priority update, eviction and sampled batch is appended to the
-log. Anyone with the log can verify it, without your code or your model:
+Every insert (with the content digest of prompt, completion and reward, and
+the source tag), priority update, eviction and sampled batch is appended to
+the log; the manifest holds the opening of every digest. Anyone with the files
+can verify them, without your code or your model:
 
 ```bash
-python -m checker.verify run-01/attest.jsonl
+python -m checker.verify run-01/attest.jsonl --manifest run-01/manifest.jsonl
+# e.g. OK: 451 records verified; 296 examples committed; manifest opens 296 of them
 ```
 
-The checker shares no code with the library. It rebuilds the sum-tree from the
-mutation records and confirms that every sampled index follows from the
-recorded draw.
+The checker shares no code with the library. It rebuilds the sum-tree from
+the mutation records, recomputes every decayed leaf and every content digest,
+and confirms that every sampled index follows from the recorded draw and
+names a committed example.
 
-Two runs with the same seed and the same inputs produce identical sampling
-transcripts. Paired with a deterministic inference engine, that gives a
-bitwise-reproducible training run with a sampling record a third party can
-check.
+Two runs with the same seed and the same inputs produce byte-identical logs.
+The demo runs the TRL integration three times on CPU and compares:
 
-The same log supports data-mixture and quota reporting, and sampling records
-for unlearning audits. It is a consistency-verification tool, not a security
-boundary; see [`docs/nonclaims.md`](docs/nonclaims.md).
+```bash
+uv run python -m demo.reproducible_grpo        # output abridged
+# run a: seed=42 buffer_seed=0 records=102 replaced_rows=8 head=f81a9b4b6aeb1335…
+# run b: seed=42 buffer_seed=0 records=102 replaced_rows=8 head=f81a9b4b6aeb1335…
+# run c: seed=43 buffer_seed=0 records=102 replaced_rows=8 head=eb6853bf6f813344…
+# a vs b (same seeds): identical
+# a vs c (different data seed): first difference at record 1 (data) ... differing fields: content_digest
+```
+
+When two logs differ, `python -m checker.diff a.jsonl c.jsonl` says at which
+record and why: `data` (the stored examples differed upstream; every draw
+before that point was identical), `schedule`, `config`, or `sampler`
+(different draws on identical state, which is what two buffer seeds look
+like). Logs and the report are committed under
+`benchmarks/modal/results/repro_cpu_12steps_seed42/` and
+`results/reproducible_grpo_report.json`. The write-up is
+[`docs/reproducible-training.md`](docs/reproducible-training.md).
+
+---
+
+## Auditable training data
+
+The transcript tool turns a verified log into the answers an audit asks for:
+
+```bash
+python -m checker.transcript run-01/attest.jsonl --manifest run-01/manifest.jsonl --by source
+python -m checker.transcript run-01/attest.jsonl --quota scraped=0 --quota licensed=50000   # exit 2 if exceeded
+python -m checker.transcript run-01/attest.jsonl --find <content digest>                     # every time it was sampled
+```
+
+Exposure per example (times sampled, exact importance-weight sum), mixture
+per source overall and per model version, quota verdicts, and the sample
+records where a given example appears. Every number is derived from the log;
+the manifest only adds the readable example next to its digest.
+
+Reservoir implements a subset of the data-commitment and
+public-replayable-sampler components of Verifiable Fine-Tuning (arXiv
+2510.16830): content digests and self-declared source tags opened by a
+manifest, and keyed, publicly replayable draws under a hash chain. It makes
+no claim about the update step. A transcript is evidence a team can use to
+defend per-source statements about what the replay buffer inserted and
+replayed during post-training; fresh rollouts used directly in a step, and
+data outside the buffer, are not in the log, and the transcript is not an EU
+AI Act training-content summary. The log commits and the manifest opens: a
+chain-consistent change to a digest or source is invisible without the
+manifest, and the mutation campaign measures exactly that. See
+[`docs/nonclaims.md`](docs/nonclaims.md) §15–§19.
 
 ---
 
@@ -158,16 +209,17 @@ boundary; see [`docs/nonclaims.md`](docs/nonclaims.md).
 from reservoir import DurableRolloutBuffer
 
 buf = DurableRolloutBuffer("run-01/buffer", capacity=50_000, half_life=4,
-                           max_policy_age=16, seed=0, attest="run-01/attest.jsonl")
+                           max_policy_age=16, seed=0,
+                           attest="run-01/attest.jsonl", manifest="run-01/manifest.jsonl")
 ```
 
 Every operation is committed through a write-ahead log before it returns,
 including the stale evictions and rebase an operation may trigger. If the
 process is killed, reopening the same directory with the same parameters
 recovers the last committed state: the same live rollouts, the same next
-draw, and the same attestation chain, with no torn entries. Each operation
-writes a full snapshot, so cost grows with buffer size; an incremental log
-is future work.
+draw, and the same attestation chain and manifest, with no torn entries. Each
+operation writes a full snapshot, so cost grows with buffer size and run
+history; an incremental log is future work.
 
 ---
 
@@ -189,7 +241,8 @@ trainer = ReservoirGRPOTrainer(
     train_dataset=dataset,
     reward_funcs=[reward],
     replay_buffer=ReservoirReplay(capacity=50_000, half_life=4, max_policy_age=16,
-                                  seed=0, attest="run-01/attest.jsonl"),
+                                  seed=0, attest="run-01/attest.jsonl",
+                                  manifest="run-01/manifest.jsonl", source="gsm8k"),
 )
 trainer.train()
 ```
@@ -200,9 +253,10 @@ and fills the rows of prompts whose rewards were all equal (which contribute no
 gradient) with rollouts replayed from the buffer. Replayed rows carry their
 behavior logprobs, so the loss applies a real off-policy ratio, and their
 advantages are multiplied by the importance-sampling weight. Versions,
-half-life and `max_policy_age` are counted in optimizer steps. Every insertion,
-draw and eviction goes to the attestation log; `python -m checker.verify`
-checks it. A step with nothing to replay returns the batch TRL produced
+half-life and `max_policy_age` are counted in optimizer steps. Every insertion
+(with its content digest and the `source` tag), draw and eviction goes to the
+attestation log; `python -m checker.verify` checks it and
+`python -m checker.transcript` reports on it. A step with nothing to replay returns the batch TRL produced
 unchanged (see [`docs/nonclaims.md`](docs/nonclaims.md) §14 for the one
 RNG caveat).
 
@@ -311,7 +365,9 @@ report.to_html("forgetting_report.html")
 |-------|----------|
 | Sampling is deterministic and reproducible under a keyed draw | Property tests against a brute-force reference |
 | The durable buffers are failure-atomic under SIGKILL | 140/140 crash tests across both buffers, zero torn states; the rollout cases crash mid-rebase |
-| The independent checker rejects forged logs | 101/101 mutants rejected, 38 of them age-decay protocol forgeries |
+| The independent checker rejects forged logs | 130/130 mutants rejected: 38 age-decay protocol forgeries and 29 content-commitment forgeries, including 3 chain-consistent ones that the log-only check cannot see and the manifest check rejects |
+| Two runs with the same inputs give one transcript | CPU demo: runs a and b byte-identical (102 records), run c differs at record 1, classified `data` |
+| Attestation is cheap relative to generation | about 3× the no-attestation insert cost in memory, 6× with a manifest file; the checker verifies 10k records in 0.3 s |
 | The lifecycle protocol is safe within a finite scope | TLA+ model, 44,611 states |
 
 Reservoir reports negative results. A pre-registered search for
@@ -345,12 +401,14 @@ to the numpy implementation.
 ## Development
 
 ```bash
-uv run pytest tests/ -v               # tests
-uv run python -m campaigns.mutation   # forgery detection campaign
-uv run python -m campaigns.crash      # crash atomicity campaign
-uv run python -m campaigns.divergence # float divergence campaign
-bash spec/check.sh                    # TLA+ model check
-make check                            # tests + checker import isolation
+uv run pytest tests/ -v                       # tests
+uv run python -m campaigns.mutation           # forgery detection campaign
+uv run python -m campaigns.crash              # crash atomicity campaign
+uv run python -m campaigns.divergence         # float divergence campaign
+uv run python -m demo.reproducible_grpo       # two runs, one transcript (make demo-repro)
+uv run python -m benchmarks.attestation_overhead   # what attestation costs (make bench-attest)
+bash spec/check.sh                            # TLA+ model check
+make check                                    # tests + checker import isolation
 ```
 
 ---

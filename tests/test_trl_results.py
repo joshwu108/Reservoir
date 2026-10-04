@@ -40,3 +40,37 @@ def test_committed_trl_replay_log_verifies_and_shows_replay(log: Path):
 
 def test_at_least_one_log_is_committed():
     assert LOGS, "no trl_replay_*.attest.jsonl under benchmarks/modal/results"
+
+
+REPRO_DIRS = sorted(p for p in RESULTS.glob("repro_*") if p.is_dir())
+REPRO_REPORT = Path(__file__).parents[1] / "results" / "reproducible_grpo_report.json"
+
+
+@pytest.mark.parametrize("run_dir", REPRO_DIRS, ids=[p.name for p in REPRO_DIRS])
+def test_committed_reproducibility_runs_verify_and_agree_with_their_report(run_dir: Path):
+    """Each repro_* directory holds runs a, b, c with a log and a manifest each; a and b
+    must be byte-identical, c must differ, and every log must open its manifest."""
+    runs = {name: run_dir / name for name in ("a", "b", "c")}
+    for path in runs.values():
+        attest, manifest = path / "attest.jsonl", path / "manifest.jsonl"
+        assert attest.exists() and manifest.exists(), f"{path} is missing its log or manifest"
+        result = verify_json_lines(attest.read_text(), manifest=manifest.read_text())
+        assert result.content.manifest_matched > 0
+    assert (runs["a"] / "attest.jsonl").read_bytes() == (runs["b"] / "attest.jsonl").read_bytes()
+    assert (runs["a"] / "manifest.jsonl").read_bytes() == (runs["b"] / "manifest.jsonl").read_bytes()
+    assert (runs["a"] / "attest.jsonl").read_bytes() != (runs["c"] / "attest.jsonl").read_bytes()
+
+
+def test_reproducibility_report_matches_committed_logs():
+    if not REPRO_REPORT.exists():
+        pytest.skip("results/reproducible_grpo_report.json not present")
+    report = json.loads(REPRO_REPORT.read_text())
+    assert report["verdict"] == "PASS" and report["same_seed_identical"] is True
+    assert report["different_data_seed_class"] == "data"
+    repo = Path(__file__).parents[1]
+    for name, run in report["runs"].items():
+        attest = repo / run["attest"]
+        assert attest.exists(), f"run {name} log {run['attest']} is not committed"
+        records = [json.loads(l) for l in attest.read_text().splitlines() if l]
+        assert len(records) == run["records"]
+        assert records[-1]["digest"] == run["head_digest"]

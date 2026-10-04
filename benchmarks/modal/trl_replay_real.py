@@ -45,6 +45,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 import modal
 
@@ -104,10 +105,19 @@ def run_grpo(
     max_policy_age: int = 24,
     buffer_seed: int = 0,
     attest_path: str = "/tmp/reservoir_trl_attest.jsonl",
+    manifest_path: Optional[str] = None,
+    source: Optional[str] = DATASET_ID.rsplit("/", 1)[-1],
     output_dir: str = "/tmp/reservoir_trl_out",
     use_cpu: bool = False,
+    extra_config: Optional[dict] = None,
 ) -> dict:
-    """Train for ``max_steps`` with replay and return the run record (log included)."""
+    """Train for ``max_steps`` with replay and return the run record (log and manifest included).
+
+    ``source`` is written on every stored row's insert record; ``manifest_path``
+    adds the manifest file so the checker can open every content digest.
+    ``extra_config`` is merged into ``GRPOConfig`` (the GPU reproducibility
+    runs use it for vLLM settings).
+    """
     import torch
     from datasets import load_dataset
     from transformers import TrainerCallback
@@ -116,6 +126,8 @@ def run_grpo(
     from reservoir.integrations.trl import ReservoirGRPOTrainer, ReservoirReplay
 
     Path(attest_path).unlink(missing_ok=True)
+    if manifest_path is not None:
+        Path(manifest_path).unlink(missing_ok=True)
     dataset = load_dataset(DATASET_ID, DATASET_CONFIG, split="train")
     args = GRPOConfig(
         output_dir=output_dir,
@@ -133,10 +145,11 @@ def run_grpo(
         use_cpu=use_cpu,
         bf16=False,
         fp16=False,
+        **(extra_config or {}),
     )
     replay = ReservoirReplay(
         capacity=capacity, half_life=half_life, max_policy_age=max_policy_age,
-        seed=buffer_seed, attest=attest_path,
+        seed=buffer_seed, attest=attest_path, manifest=manifest_path, source=source,
     )
 
     steps: list[dict] = []
@@ -170,6 +183,7 @@ def run_grpo(
     import trl
 
     log_text = Path(attest_path).read_text()
+    manifest_text = Path(manifest_path).read_text() if manifest_path is not None else None
     log = replay.buffer.attestation_log
     return {
         "model": MODEL_ID,
@@ -178,7 +192,8 @@ def run_grpo(
             "max_steps": max_steps, "seed": seed, "per_device_train_batch_size": per_device_train_batch_size,
             "num_generations": num_generations, "max_completion_length": max_completion_length,
             "capacity": capacity, "half_life": half_life, "max_policy_age": max_policy_age,
-            "buffer_seed": buffer_seed, "beta_is": replay.beta, "device": "cpu" if use_cpu else str(trainer.model.device),
+            "buffer_seed": buffer_seed, "beta_is": replay.beta, "source": source,
+            "device": "cpu" if use_cpu else str(trainer.model.device), "extra_config": extra_config or {},
             "bf16": args.bf16, "fp16": args.fp16, "gradient_checkpointing": args.gradient_checkpointing,
         },
         "versions": {"trl": trl.__version__, "transformers": transformers.__version__, "torch": torch.__version__},
@@ -191,7 +206,8 @@ def run_grpo(
         # rows, so "reward", "reward_std" and "frac_reward_zero_std" describe
         # the generated batch; "loss" and "grad_norm" reflect the replayed one.
         "log_history": trainer.state.log_history,
-        "attestation": {"records": len(log.records), "head_digest": log.head_digest, "text": log_text},
+        "attestation": {"records": len(log.records), "head_digest": log.head_digest, "text": log_text,
+                        "manifest_text": manifest_text},
     }
 
 
@@ -206,16 +222,20 @@ def run_grpo_remote(**kwargs) -> dict:
 # ---------------------------------------------------------------------------
 
 def write_results(results: dict, label: str, out_dir: Path = RESULTS_DIR) -> Path:
-    """Write <label>.json and <label>.attest.jsonl; verify the log with the checker first."""
+    """Write <label>.json, <label>.attest.jsonl and, if present, <label>.manifest.jsonl;
+    verify the log (with the manifest) through the checker first."""
     out_dir.mkdir(parents=True, exist_ok=True)
     attest = out_dir / f"{label}.attest.jsonl"
     attest.write_text(results["attestation"].pop("text"))
-    verify = subprocess.run(
-        [sys.executable, "-m", "checker.verify", str(attest)],
-        capture_output=True, text=True, cwd=str(Path(__file__).parents[2]),
-    )
+    command = [sys.executable, "-m", "checker.verify", str(attest)]
+    manifest_text = results["attestation"].pop("manifest_text", None)
+    if manifest_text is not None:
+        manifest = out_dir / f"{label}.manifest.jsonl"
+        manifest.write_text(manifest_text)
+        command += ["--manifest", str(manifest)]
+    verify = subprocess.run(command, capture_output=True, text=True, cwd=str(Path(__file__).parents[2]))
     results["attestation"]["checker"] = {
-        "command": f"python -m checker.verify {attest}",
+        "command": "python -m " + " ".join(command[2:]),
         "returncode": verify.returncode,
         "output": (verify.stdout + verify.stderr).strip(),
     }
@@ -258,6 +278,8 @@ if __name__ == "__main__":
 
     out_dir = cli.out_dir or Path(tempfile.mkdtemp(prefix="reservoir_trl_replay_"))
     local = run_grpo(max_steps=cli.max_steps, seed=cli.seed, use_cpu=True,
-                     attest_path=str(out_dir / "attest.tmp.jsonl"))
+                     attest_path=str(out_dir / "attest.tmp.jsonl"),
+                     manifest_path=str(out_dir / "manifest.tmp.jsonl"))
     (out_dir / "attest.tmp.jsonl").unlink(missing_ok=True)
+    (out_dir / "manifest.tmp.jsonl").unlink(missing_ok=True)
     report(local, write_results(local, label_for(local) + "_cpu", out_dir))

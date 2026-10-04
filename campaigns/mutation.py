@@ -16,6 +16,11 @@ Categories (per spec):
   5. Deleted mutation records
   6. Reordered records
   7. Replayed stale suffixes
+  8. Age-decay protocol forgeries (checker/decay_replay.py)
+  9. Content-commitment forgeries, from the log alone and with the manifest
+     (campaigns/mutation_content.py). The report also states the one
+     documented limit: a chain-consistent swap of an insert's content
+     digest or source is invisible without the manifest.
 
 Run with: python -m campaigns.mutation
 Prints a report with exact counts.
@@ -442,6 +447,12 @@ def run_mutation_campaign() -> dict:
     # -----------------------------------------------------------------------
     run_category("decay", _decay_mutants())
 
+    # -----------------------------------------------------------------------
+    # Category 9: Content-commitment forgeries (log-only and with manifest)
+    # -----------------------------------------------------------------------
+    from campaigns.mutation_content import run_content_categories
+    run_content_categories(results)
+
     return results
 
 
@@ -610,6 +621,14 @@ def main() -> None:
         status = "PASS" if total == rejected else "FAIL"
         print(f"  [{status}] {name}: {rejected}/{total} rejected")
 
+    limit = results.get("content_limit")
+    if limit:
+        print()
+        print(f"Documented limit: {limit['undetectable_without_manifest']} chain-consistent content "
+              f"forgeries are invisible without the manifest; {limit['detected_with_manifest']} of them "
+              "are rejected with it.")
+        print(f"  {limit['statement']}")
+
     print()
     if results["survived"]:
         print("SURVIVING MUTANTS (checker bugs!):")
@@ -633,6 +652,7 @@ def main() -> None:
             {"name": n, "total": t, "rejected": r}
             for n, t, r in results["details"]
         ],
+        "content_limit": results.get("content_limit"),
         "pass": len(results["survived"]) == 0 and results["total_mutants"] >= 60,
     }
     Path("results/mutation_campaign_report.json").write_text(

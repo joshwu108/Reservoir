@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import json
 import subprocess
 import sys
 from fractions import Fraction
@@ -499,3 +500,47 @@ def test_attestation_log_from_a_scripted_run_passes_the_independent_checker(tmp_
         [sys.executable, "-m", "checker.verify", str(path)], capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr + result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Content commitment through the adapter: source tag and manifest
+# ---------------------------------------------------------------------------
+
+def test_source_and_manifest_pass_through_to_the_buffer(tmp_path):
+    attest, manifest = tmp_path / "attest.jsonl", tmp_path / "manifest.jsonl"
+    r = replay(attest=attest, manifest=manifest, source="zen")
+    trainer = FakeTrainer(r, [live_batch(), mixed_batch()])
+    trainer.generate(step=1)
+    trainer.generate(step=2)
+    r.close()
+
+    records = [json.loads(l) for l in attest.read_text().splitlines()]
+    inserts = [rec for rec in records if rec["op"] == "insert"]
+    assert len(inserts) == r.stats["ingested_rows"] == 6
+    assert all(rec["source"] == "zen" and len(rec["content_digest"]) == 64 for rec in inserts)
+    assert r.source == "zen" and r.buffer.has_manifest
+    result = verify_json_lines(attest.read_text(), manifest=manifest.read_text())
+    assert result.content.manifest_matched == 6
+    for pos in r.buffer.live_positions():
+        assert r.buffer.entry(pos)[1].source == "zen"
+
+
+def test_source_defaults_to_none_and_manifest_requires_attest(tmp_path):
+    r = replay(attest=AttestationLog())
+    FakeTrainer(r, [live_batch()]).generate(step=1)
+    assert r.source is None
+    assert all("source" not in rec for rec in r.buffer.attestation_log.records)
+    with pytest.raises(ValueError, match="manifest"):
+        replay(manifest=tmp_path / "m.jsonl")
+
+
+def test_durable_replay_keeps_the_manifest(tmp_path):
+    attest, manifest = tmp_path / "attest.jsonl", tmp_path / "manifest.jsonl"
+    r = replay(directory=tmp_path / "buf", attest=attest, manifest=manifest, source="s")
+    FakeTrainer(r, [live_batch()]).generate(step=1)
+    lines = r.buffer.manifest_records
+    r.close()
+    again = replay(directory=tmp_path / "buf", attest=attest, manifest=manifest, source="s")
+    assert isinstance(again.buffer, DurableRolloutBuffer)
+    assert again.buffer.manifest_records == lines and len(lines) == 4
+    again.close()

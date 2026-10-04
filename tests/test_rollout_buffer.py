@@ -481,3 +481,87 @@ class TestLifecycle:
         batch = buf.sample(batch_size=3, current_version=step)
         assert len(batch.rollouts) == len(batch.logprobs) == len(batch.model_versions) == 3
         buf.update_priorities(batch.indices, [0.5, 0.5, 0.5])
+
+
+# ---------------------------------------------------------------------------
+# Content commitment: digests and sources on insert records, the manifest
+# ---------------------------------------------------------------------------
+
+from reservoir.rollout import content_digest_of
+
+
+class TestContentCommitment:
+    def test_insert_records_carry_digest_and_source(self) -> None:
+        buf = make_buffer(attest=AttestationLog())
+        buf.add_group("p", 0, rollouts([1.0, 0.0]), source="gsm8k")
+        inserts = [r for r in buf.attestation_log.records if r["op"] == "insert"]
+        assert len(inserts) == 2
+        for k, rec in enumerate(inserts):
+            rollout, group = buf.entry(rec["index"])
+            assert rec["content_digest"] == content_digest_of("p", rollout.tokens, rollout.reward)
+            assert rec["content_digest"] == group.content_digests[k]
+            assert rec["source"] == "gsm8k"
+        assert buf.entry(inserts[0]["index"])[1].source == "gsm8k"
+
+    def test_group_without_source_has_no_source_key(self) -> None:
+        buf = make_buffer(attest=AttestationLog())
+        buf.add_group("p", 0, rollouts([1.0]))
+        rec = buf.attestation_log.records[-1]
+        assert "content_digest" in rec and "source" not in rec
+
+    def test_updates_and_evictions_carry_no_content_fields(self) -> None:
+        buf = make_buffer(attest=AttestationLog(), max_policy_age=1)
+        buf.add_group("p", 0, rollouts([1.0, 0.0]), source="a")
+        buf.update_priorities([0], [2.0])
+        buf.advance(5)                       # stale evictions
+        ops = [(r["op"], "content_digest" in r, "source" in r) for r in buf.attestation_log.records]
+        assert ("update", False, False) in ops
+        assert ("evict", False, False) in ops
+        assert all(not has for op, has, _ in ops if op != "insert")
+
+    def test_capacity_eviction_then_reuse_records_new_content(self) -> None:
+        buf = make_buffer(capacity=2, attest=AttestationLog())
+        buf.add_group("p", 0, rollouts([1.0, 0.0]), source="a")
+        buf.add_group("q", 1, rollouts([0.5]), source="b")
+        records = buf.attestation_log.records
+        evict = [r for r in records if r["op"] == "evict"]
+        assert len(evict) == 1 and evict[0]["reason"] == "capacity"
+        last = records[-1]
+        assert last["op"] == "insert" and last["source"] == "b"
+        assert last["content_digest"] == content_digest_of("q", (1, 2), 0.5)
+
+    def test_bad_source_rejected_before_any_mutation(self) -> None:
+        buf = make_buffer(attest=AttestationLog())
+        n = len(buf.attestation_log.records)
+        with pytest.raises(ValueError, match="source"):
+            buf.add_group("p", 0, rollouts([1.0]), source="a\nb")
+        assert buf.size == 0 and len(buf.attestation_log.records) == n
+
+    def test_manifest_requires_attest(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match="manifest"):
+            make_buffer(manifest=tmp_path / "m.jsonl")
+
+    def test_manifest_has_one_line_per_insert_matching_the_log(self, tmp_path) -> None:
+        attest, manifest = tmp_path / "a.jsonl", tmp_path / "m.jsonl"
+        buf = make_buffer(attest=attest, manifest=manifest, capacity=4)
+        buf.add_group("p", 0, rollouts([1.0, 0.0]), source="a")
+        buf.sample(2, current_version=1)
+        buf.add_group("q", 2, rollouts([0.5, 0.25, 0.125]))   # evicts one, inserts three
+        buf.close()
+        inserts = [json.loads(l) for l in attest.read_text().splitlines() if '"op":"insert"' in l]
+        lines = [json.loads(l) for l in manifest.read_text().splitlines()]
+        assert len(lines) == len(inserts) == 5
+        for rec, line in zip(inserts, lines):
+            assert (line["op_counter"], line["index"]) == (rec["op_counter"], rec["index"])
+            assert line["content_digest"] == rec["content_digest"]
+            assert line["source"] == rec.get("source")
+            assert line["entry_version"] == int(rec["entry_version"])
+            assert content_digest_of(line["prompt_id"], line["tokens"], float.fromhex(line["reward_hex"])) == line["content_digest"]
+        assert buf.has_manifest
+        assert buf.manifest_records == lines
+        verify_json_lines(attest.read_text())
+
+    def test_without_manifest_records_are_empty(self) -> None:
+        buf = make_buffer(attest=AttestationLog())
+        buf.add_group("p", 0, rollouts([1.0]))
+        assert not buf.has_manifest and buf.manifest_records == []

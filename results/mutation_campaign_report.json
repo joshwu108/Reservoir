@@ -1,7 +1,7 @@
 {
   "campaign": "T4_mutation",
-  "total_mutants": 101,
-  "rejected": 101,
+  "total_mutants": 130,
+  "rejected": 130,
   "survived": [],
   "categories": [
     {
@@ -43,7 +43,27 @@
       "name": "decay",
       "total": 38,
       "rejected": 38
+    },
+    {
+      "name": "content",
+      "total": 14,
+      "rejected": 14
+    },
+    {
+      "name": "content_manifest",
+      "total": 15,
+      "rejected": 15
     }
   ],
+  "content_limit": {
+    "undetectable_without_manifest": 3,
+    "detected_with_manifest": 3,
+    "mutants": [
+      "insert_digest_swapped_chain_consistent",
+      "insert_source_changed_chain_consistent",
+      "insert_source_dropped_chain_consistent"
+    ],
+    "statement": "a chain-consistent change to an insert's content_digest or source is not detectable from the log alone; the log commits, the manifest opens"
+  },
   "pass": true
 }

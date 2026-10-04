@@ -13,7 +13,10 @@ LLM-RL rollout replay (the newer surface; README quick start):
                         stale entries and rebases. The only mutable tree state.
     rollout_buffer.py   RolloutBuffer: add_group / sample / update_priorities on top
                         of the tree. Keyed draws, IS weights, slot allocation.
-    rollout_attest.py   Turns buffer events into attestation records.
+    rollout_attest.py   Turns buffer events into attestation records; every insert
+                        carries the example's content digest and source tag.
+    rollout_manifest.py The manifest: the opening of every content digest, one
+                        JSON line per insert, for the checker to recompute.
     rollout_snapshot.py state_dict / load_state_dict serialisation and validation.
     durable_rollout.py  Crash-atomic wrapper around RolloutBuffer.
     dataset_buffer.py   Which prompts to generate rollouts for next (float, numpy).
@@ -29,7 +32,9 @@ Classic transition replay (the original surface):
 Shared:
     draw.py             Keyed BLAKE2b uniform draws; no RNG anywhere else.
     attest.py           Hash-chained attestation log records.
-    checker/            Independent verifier. Imports nothing from this package.
+    checker/            Independent verifier (verify), audit report (transcript)
+                        and two-log comparison (diff). Imports nothing from this
+                        package.
 
 Fine-tuning tools (separate from replay): prefcheck.py, trajectory.py,
 report.py (preference-noise detection); anchor_set.py, forgetting_monitor.py,
@@ -40,7 +45,7 @@ See ``rollout_buffer.py`` ("Call structure"), ``decayed_tree.py`` and
 this layout, one file per module.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 # Exact buffer (pure Python, arbitrary-precision integer arithmetic)
 from reservoir.buffer import ExactPERBuffer

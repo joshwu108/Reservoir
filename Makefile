@@ -1,4 +1,4 @@
-.PHONY: check test lint coverage clean
+.PHONY: check test lint coverage clean demo-repro bench-attest campaigns
 
 check: test check-imports
 
@@ -15,6 +15,12 @@ campaign-divergence:
 
 demo:
 	uv run python -m demo.tiny_dqn
+
+demo-repro:
+	uv run python -m demo.reproducible_grpo
+
+bench-attest:
+	uv run python -m benchmarks.attestation_overhead
 
 tla:
 	bash spec/check.sh

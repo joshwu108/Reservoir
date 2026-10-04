@@ -1,0 +1,168 @@
+{
+  "demo": "reproducible_grpo",
+  "device": "cpu",
+  "max_steps": 12,
+  "versions": {
+    "trl": "1.13.0",
+    "transformers": "5.17.0",
+    "torch": "2.14.0"
+  },
+  "runs": {
+    "a": {
+      "attest": "benchmarks/modal/results/repro_cpu_12steps_seed42/a/attest.jsonl",
+      "manifest": "benchmarks/modal/results/repro_cpu_12steps_seed42/a/manifest.jsonl",
+      "seed": 42,
+      "buffer_seed": 0,
+      "head_digest": "f81a9b4b6aeb13351c12690ccd3843e0595771d1df609dfb0d6b63e23009dd66",
+      "records": 102,
+      "examples_committed": 88,
+      "totals": {
+        "hook_calls": 12,
+        "ingested_rows": 88,
+        "ingested_groups": 22,
+        "dead_groups": 2,
+        "skipped_rows": 0,
+        "clamped_logprobs": 0,
+        "replaced_rows": 8,
+        "logprob_forwards": 12
+      },
+      "versions": {
+        "trl": "1.13.0",
+        "transformers": "5.17.0",
+        "torch": "2.14.0"
+      },
+      "wall_clock_seconds": 7.07
+    },
+    "b": {
+      "attest": "benchmarks/modal/results/repro_cpu_12steps_seed42/b/attest.jsonl",
+      "manifest": "benchmarks/modal/results/repro_cpu_12steps_seed42/b/manifest.jsonl",
+      "seed": 42,
+      "buffer_seed": 0,
+      "head_digest": "f81a9b4b6aeb13351c12690ccd3843e0595771d1df609dfb0d6b63e23009dd66",
+      "records": 102,
+      "examples_committed": 88,
+      "totals": {
+        "hook_calls": 12,
+        "ingested_rows": 88,
+        "ingested_groups": 22,
+        "dead_groups": 2,
+        "skipped_rows": 0,
+        "clamped_logprobs": 0,
+        "replaced_rows": 8,
+        "logprob_forwards": 12
+      },
+      "versions": {
+        "trl": "1.13.0",
+        "transformers": "5.17.0",
+        "torch": "2.14.0"
+      },
+      "wall_clock_seconds": 4.43
+    },
+    "c": {
+      "attest": "benchmarks/modal/results/repro_cpu_12steps_seed42/c/attest.jsonl",
+      "manifest": "benchmarks/modal/results/repro_cpu_12steps_seed42/c/manifest.jsonl",
+      "seed": 43,
+      "buffer_seed": 0,
+      "head_digest": "eb6853bf6f813344b21456f01752be2bbb88aca4a81fefb1acb18ff08dc11f87",
+      "records": 102,
+      "examples_committed": 88,
+      "totals": {
+        "hook_calls": 12,
+        "ingested_rows": 88,
+        "ingested_groups": 22,
+        "dead_groups": 2,
+        "skipped_rows": 0,
+        "clamped_logprobs": 0,
+        "replaced_rows": 8,
+        "logprob_forwards": 12
+      },
+      "versions": {
+        "trl": "1.13.0",
+        "transformers": "5.17.0",
+        "torch": "2.14.0"
+      },
+      "wall_clock_seconds": 4.23
+    }
+  },
+  "same_seed_identical": true,
+  "different_data_seed_class": "data",
+  "diffs": {
+    "a_vs_b": {
+      "records_a": 102,
+      "records_b": 102,
+      "head_a": "f81a9b4b6aeb13351c12690ccd3843e0595771d1df609dfb0d6b63e23009dd66",
+      "head_b": "f81a9b4b6aeb13351c12690ccd3843e0595771d1df609dfb0d6b63e23009dd66",
+      "identical": true,
+      "first_difference": null,
+      "class": "identical",
+      "ops": null,
+      "differing_fields": [],
+      "record_a": null,
+      "record_b": null,
+      "detail": "the logs are identical"
+    },
+    "a_vs_c": {
+      "records_a": 102,
+      "records_b": 102,
+      "head_a": "f81a9b4b6aeb13351c12690ccd3843e0595771d1df609dfb0d6b63e23009dd66",
+      "head_b": "eb6853bf6f813344b21456f01752be2bbb88aca4a81fefb1acb18ff08dc11f87",
+      "identical": false,
+      "first_difference": 1,
+      "class": "data",
+      "ops": [
+        "insert",
+        "insert"
+      ],
+      "differing_fields": [
+        "content_digest"
+      ],
+      "record_a": {
+        "base_epoch": "0",
+        "base_priority_int": "32761",
+        "content_digest": "7da3748959e0ec68609cda7e28c9800f5d4a46334f95b8588161dca8dba6d083",
+        "digest": "65c73f8fcb06e886a6d169a72767ffd882f110006bc57e1a94f0e96c2c779e74",
+        "entry_version": "0",
+        "index": 0,
+        "new_priority_int": "32761",
+        "old_priority_int": "0",
+        "op": "insert",
+        "op_counter": 0,
+        "prev_digest": "308c6ce1cfb09c498e72a023f7e59ff2c626632419fdc986a16e068c4e24011d",
+        "source": "zen"
+      },
+      "record_b": {
+        "base_epoch": "0",
+        "base_priority_int": "32761",
+        "content_digest": "e101eb691645254d74844afb8920c852e5ed045e534bc47b449169fe4146aca3",
+        "digest": "8b29650e3e8ca4c591601c88a2d5cd62f1cc4cb6c3f09602e1b66dbea8ef3d52",
+        "entry_version": "0",
+        "index": 0,
+        "new_priority_int": "32761",
+        "old_priority_int": "0",
+        "op": "insert",
+        "op_counter": 0,
+        "prev_digest": "308c6ce1cfb09c498e72a023f7e59ff2c626632419fdc986a16e068c4e24011d",
+        "source": "zen"
+      },
+      "detail": "the stored examples, their scores or the group sizes differed upstream of the buffer (generation, rewards, dead groups); every draw before this point was identical"
+    }
+  },
+  "transcript_a": {
+    "sampled_rows": 8,
+    "sources": {
+      "zen": {
+        "inserted": 88,
+        "sampled": 8,
+        "share": 1.0
+      }
+    },
+    "examples_committed": 88
+  },
+  "verdict": "PASS",
+  "verdict_means": "a and b have byte-identical logs and manifests; a and c first differ on an insert record that checker.diff classifies as data",
+  "commands": {
+    "verify": "python -m checker.verify <run>/attest.jsonl --manifest <run>/manifest.jsonl",
+    "diff": "python -m checker.diff a/attest.jsonl b/attest.jsonl",
+    "transcript": "python -m checker.transcript a/attest.jsonl --manifest a/manifest.jsonl --by source"
+  }
+}

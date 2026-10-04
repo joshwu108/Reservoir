@@ -87,7 +87,7 @@ from reservoir.decayed_tree import AdvanceResult, DecayedPriorityTree
 from reservoir.draw import draw_uniform_below
 from reservoir.priorities import AdvantagePriority, PriorityStrategy, validated_score
 from reservoir.rollout import Rollout, RolloutGroup, default_is_success
-from reservoir.rollout_attest import AttestTarget, RolloutAttester
+from reservoir.rollout_attest import AttestTarget, ManifestTarget, RolloutAttester
 from reservoir.rollout_snapshot import (
     _group_from_dict,
     _group_to_dict,
@@ -169,6 +169,13 @@ class RolloutBuffer:
         Key material for the deterministic draw.
     attest : AttestationLog | path | None
         Where to record mutations and samples. See ``rollout_attest``.
+        Every insert record carries the ``content_digest`` of the stored
+        example (``rollout.content_digest_of``) and the group's ``source``.
+    manifest : ManifestWriter | path | None
+        Also write the opening of every insert's digest (prompt id,
+        tokens, reward, source), one JSON line per insert, so the checker
+        can confirm the log commits to exactly these examples. Requires
+        ``attest``. See ``rollout_manifest``.
     reset_age_on_update : bool
         If True, ``update_priorities`` re-stamps an entry at the current
         version; by default age is measured from collection.
@@ -204,6 +211,7 @@ class RolloutBuffer:
         priority_frac_bits: int = 16,
         rebase_slack: int = 0,
         attest_overwrite: bool = False,
+        manifest: ManifestTarget = None,
     ) -> None:
         self.priority = _validate_priority(priority)
         self.alpha = _validate_exponent(alpha, "alpha", minimum_exclusive=0.0)
@@ -231,7 +239,8 @@ class RolloutBuffer:
         self._draw_counter = 0                    # bumped once per sampled rollout; keys draws
         self._n_rebases = 0
         self._attester = RolloutAttester(
-            attest, self._params, self.reset_age_on_update, overwrite=attest_overwrite
+            attest, self._params, self.reset_age_on_update, overwrite=attest_overwrite,
+            manifest=manifest,
         )
 
     # -- read-only state ---------------------------------------------------
@@ -278,6 +287,16 @@ class RolloutBuffer:
     def attestation_log(self) -> Optional[AttestationLog]:
         """The in-memory ``AttestationLog`` being appended to, or None if attestation is off."""
         return self._attester.log
+
+    @property
+    def has_manifest(self) -> bool:
+        """True when a manifest records the opening of every insert's content digest."""
+        return self._attester.has_manifest
+
+    @property
+    def manifest_records(self) -> list[dict]:
+        """Manifest lines written so far (a copy); empty without a manifest."""
+        return self._attester.manifest_records
 
     def live_positions(self) -> tuple[int, ...]:
         """Slots currently holding a rollout, ascending."""
@@ -329,11 +348,14 @@ class RolloutBuffer:
         model_version: int,
         rollouts: Sequence[Rollout],
         is_success: Optional[Callable[[Rollout], bool]] = None,
+        source: Optional[str] = None,
     ) -> tuple[int, ...]:
         """Store every rollout of one prompt group; return their slots.
 
-        Validation and scoring happen before anything is mutated, so a bad
-        rollout or a misbehaving strategy leaves the buffer unchanged.
+        ``source`` tags where the prompt came from (``RolloutGroup.source``)
+        and is written on each insert record. Validation and scoring
+        happen before anything is mutated, so a bad rollout or a
+        misbehaving strategy leaves the buffer unchanged.
 
         Raises
         ------
@@ -348,19 +370,22 @@ class RolloutBuffer:
             model_version=model_version,
             rollouts=rollouts,
             is_success=is_success if is_success is not None else default_is_success,
+            source=source,
         )
         qs = self._check_and_score_group(group)
+        prepared = self._attester.prepare_inserts(group, self._op_counter)
 
         if model_version > self.current_version:
             self.advance(model_version)
         positions = self._allocate(group.size)
-        for position, rollout, q in zip(positions, group.rollouts, qs):
+        for member, (position, q) in enumerate(zip(positions, qs)):
             event = self._tree.write(position, q, model_version)
-            self._rollouts[position] = rollout
+            self._rollouts[position] = group.rollouts[member]
             self._groups[position] = group
             self._insert_seq += 1
             self._inserted[position] = self._insert_seq
-            self._attester.record_write(event, self._op_counter)
+            if prepared:
+                self._attester.record_insert(event, self._op_counter, prepared[member])
         return positions
 
     def _check_and_score_group(self, group: RolloutGroup) -> list[int]:
@@ -544,7 +569,9 @@ class RolloutBuffer:
 
         Groups are stored once each with all their rollouts (including any
         already evicted from the buffer, since group statistics depend on
-        them); live slots reference a group and a member index. Integers
+        them) and their ``source``; live slots reference a group and a
+        member index. The attestation records and manifest lines are part
+        of the state, so a restored buffer continues the same chain. Integers
         that may exceed 2^53 are stored as strings. Rollout metadata must
         be JSON-serialisable and groups must use the default success
         predicate, because a callable cannot be saved; both are checked
@@ -581,6 +608,7 @@ class RolloutBuffer:
             "groups": [_group_to_dict(g) for g in groups],
             "slots": slots,
             "attestation": log.records if log is not None else None,
+            "manifest": self._attester.manifest_records if self._attester.has_manifest else None,
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -627,7 +655,17 @@ class RolloutBuffer:
         records = state.get("attestation")
         if records is not None and not isinstance(records, list):
             raise ValueError("snapshot attestation must be a list of records or null")
-        self._attester.restore(records or [])
+        manifest = state.get("manifest")
+        if manifest is not None and not isinstance(manifest, list):
+            raise ValueError("snapshot manifest must be a list of records or null")
+        has_digests = any(
+            isinstance(r, dict) and r.get("op") == "insert" and "content_digest" in r for r in records or []
+        )
+        if manifest is None and self._attester.has_manifest and has_digests:
+            raise ValueError("saved state has no manifest but this buffer keeps one; reopen with manifest=None")
+        if manifest is not None and not self._attester.has_manifest:
+            raise ValueError("saved state carries a manifest; reopen with manifest=<path>")
+        self._attester.restore(records or [], manifest or [])
 
     def __enter__(self) -> "RolloutBuffer":
         return self

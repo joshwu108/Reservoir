@@ -11,6 +11,9 @@ Schema (canonical JSON — sorted keys, no spaces):
     Optional, present together when the buffer uses age decay:
       base_priority_int, entry_version, base_epoch
     Optional on "evict" only: reason ("stale" | "capacity" | "explicit")
+    Optional on "insert" only: content_digest (64 hex chars, BLAKE2b-256 of
+      the stored example, see rollout.py) and, only together with it,
+      source (the caller's tag for where the prompt came from)
 
   SampleAttestation:
     digest, op_counter, root_total, samples[...], prev_digest
@@ -48,6 +51,8 @@ _GENESIS = "genesis"
 _MUTATION_OPS = ("insert", "update", "evict")
 _EVICT_REASONS = ("stale", "capacity", "explicit")
 _DECAY_FIELDS = ("base_priority_int", "entry_version", "base_epoch")
+_CONTENT_DIGEST_LENGTH = 64   # hex characters of a BLAKE2b-256 digest
+_MAX_SOURCE_LENGTH = 256      # same bound as reservoir.rollout.MAX_SOURCE_LENGTH
 
 
 def _require_int(value: object, name: str, minimum: int = 0) -> int:
@@ -111,6 +116,8 @@ class AttestationLog:
         entry_version: Optional[int] = None,
         base_epoch: Optional[int] = None,
         reason: Optional[str] = None,
+        content_digest: Optional[str] = None,
+        source: Optional[str] = None,
     ) -> dict:
         """Append a MutationRecord and return it.
 
@@ -133,6 +140,12 @@ class AttestationLog:
         reason : str, keyword-only
             Why an entry was evicted; "evict" only, and only together with
             the decay fields.
+        content_digest : str, keyword-only
+            64 lowercase hex characters identifying the stored example;
+            "insert" only. Lets a verifier say which example a slot held.
+        source : str, keyword-only
+            The caller's provenance tag for the example; requires
+            ``content_digest``.
 
         Returns
         -------
@@ -153,6 +166,7 @@ class AttestationLog:
         record.update(
             _decay_fields(op, base_priority_int, entry_version, base_epoch, reason)
         )
+        record.update(_content_fields(op, content_digest, source))
         return self._commit(record)
 
     def append_decay_config(
@@ -366,6 +380,41 @@ def _decay_fields(
         if reason not in _EVICT_REASONS:
             raise ValueError(f"reason must be one of {_EVICT_REASONS}, got {reason!r}")
         fields["reason"] = reason
+    return fields
+
+
+def _content_fields(op: str, content_digest: Optional[str], source: Optional[str]) -> dict:
+    """Validate the optional content fields of a mutation and return those to add.
+
+    Empty for a record without them, so legacy serialisation is unchanged.
+    """
+    if content_digest is None:
+        if source is not None:
+            raise ValueError("source requires content_digest")
+        return {}
+    if op != "insert":
+        raise ValueError(f"content_digest is only valid on insert records, not {op!r}")
+    if (
+        not isinstance(content_digest, str)
+        or len(content_digest) != _CONTENT_DIGEST_LENGTH
+        or any(c not in "0123456789abcdef" for c in content_digest)
+    ):
+        raise ValueError(
+            f"content_digest must be {_CONTENT_DIGEST_LENGTH} lowercase hex characters, "
+            f"got {content_digest!r}"
+        )
+    fields = {"content_digest": content_digest}
+    if source is not None:
+        if (
+            not isinstance(source, str)
+            or not source.strip()
+            or len(source) > _MAX_SOURCE_LENGTH
+            or not source.isprintable()
+        ):
+            raise ValueError(
+                f"source must be a printable str of 1..{_MAX_SOURCE_LENGTH} characters, got {source!r}"
+            )
+        fields["source"] = source
     return fields
 
 
