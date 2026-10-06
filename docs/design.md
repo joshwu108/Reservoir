@@ -1058,3 +1058,133 @@ those values (§10.12), so a single manifest cannot be told from a
 tampered one, and the replay reports what it states. The campaign fails
 if a tampering lands on the other side of that line. The limits are in
 `docs/nonclaims.md` §23.
+
+## 12. verl Integration
+
+`reservoir.integrations.verl` (`ReservoirReplay`, `ReservoirRayPPOTrainer`)
+connects `RolloutBuffer` to verl's `DataProto`-based `RayPPOTrainer` under
+GRPO. Tested against verl 0.9.1; `_verl_compat.require_verl` refuses a verl
+whose `RayPPOTrainer`, `DataProto` or `core_algos` lacks a member the adapter
+relies on and warns on an untested version.
+
+### 12.1 Which trainer
+
+verl 0.9.1 ships two training loops. The default (`trainer.use_v1=true`) is
+`verl.trainer.ppo.v1.PPOTrainer`, which keeps trajectories in TransferQueue,
+a key-value store, and passes `KVBatchMeta` handles between stages; the
+older `RayPPOTrainer` (`trainer.use_v1=false`, `main_ppo_v0.py`) holds the
+whole training batch as a `DataProto` on the Ray driver and is marked
+deprecated. The adapter targets the `DataProto` trainer: its batch is a
+padded tensor dict the row writer of §9 maps onto directly, the same shape
+every verl release from 0.4 to 0.9 used, and the driver already owns the
+whole batch, so the rank-ownership machinery of §9.8 is unnecessary. A V1
+adapter would replace rows inside TransferQueue (clear the dead trajectory
+keys, put stored rows under new keys with verl's tags, return a new
+`KVBatchMeta`); verl's own DAPO dynamic sampling (`algorithm.filter_groups`)
+does the eviction half of that in `v1/replay_buffer.py` and regenerates
+from fresh prompts rather than from a store. That is the follow-up, not
+this adapter.
+
+### 12.2 Attachment point
+
+`RayPPOTrainer.fit` generates through the agent loop, computes
+`old_log_probs` with `_compute_old_log_prob(batch)`, computes advantages on
+the driver (`compute_advantage`, which for GRPO calls
+`core_algos.compute_grpo_outcome_advantage`) and then calls
+`self._update_actor(batch)`, which converts the `DataProto` to a no-padding
+TensorDict and ships it to the actor workers. `ReservoirReplayMixin`
+overrides `_update_actor`: it hands the batch to `ReservoirReplay.mix` and
+passes the result to the original. It also wraps `_compute_old_log_prob`
+(the hook-ran check runs there, once per step before the update),
+`_save_checkpoint` and `_load_checkpoint` (checkpoint binding) and `fit`
+(final hook-ran check). No verl method body is copied. The dead-group
+criterion is exact: `compute_grpo_outcome_advantage` computes
+`(score - mean) / (std + eps)` per uid and an all-equal group has a zero
+numerator, so every row of such a group is `0.0` in every response token.
+
+### 12.3 Field mapping
+
+| verl (row `r` of uid `u`) | Reservoir |
+|---|---|
+| `responses[r][:n]`, `n` = prefix length of `response_mask[r]` | `Rollout.tokens` |
+| `old_log_probs[r][:n]` (verl's, computed on the current policy before the update) | `Rollout.logprobs` |
+| `advantages[r][0]` (constant over the response tokens under GRPO) | `Rollout.reward` |
+| `prompts[r]` under the prompt columns of `attention_mask`, `r`, `global_steps`, `u`, `token_level_scores[r].sum()` | `metadata["prompt_ids"]`, `["row"]`, `["global_step"]`, `["uid"]`, `["score"]` |
+| `ref_log_prob[r][:n]` when present | `metadata["ref_logprobs"]` |
+| rows sharing `non_tensor_batch["uid"]` with a non-empty mask | one `RolloutGroup`; `prompt_id` = BLAKE2b of the prompt ids |
+| `trainer.global_steps` (1 during the first step) | `model_version` of `add_group`, `current_version` of `sample` |
+
+Rows of one uid need not be contiguous: `balance_batch` reorders the batch
+by length before the update, so groups are found by uid, not by position.
+
+A replayed row rewrites `prompts` (right-aligned), `responses`
+(left-aligned), `input_ids` and `attention_mask` (the concatenations),
+`response_mask`, `position_ids` (verl's rule: cumsum of the mask over the
+prompt, then last prompt position plus one, two, ... over the response),
+`old_log_probs`, `ref_log_prob` when present, `advantages` and `returns`
+(the weighted advantage broadcast over the response tokens; under GRPO
+`returns` is `advantages`), and `token_level_scores`, `token_level_rewards`
+and `rm_scores` (the stored score at the last response token). `dummy_tensor`,
+the dataset's `(B, 1)` placeholder, passes through. `rollout_log_probs`,
+which the rollout attaches by default (`calculate_log_probs: True`), is
+dropped from the mixed batch when `algorithm.rollout_correction` is off,
+the only case in which the actor does not read it; with any of
+`bypass_mode`, `rollout_is` or `rollout_rs` set the batch is refused. Any
+other per-row tensor (`values`, `rollout_is_weights`, `routed_experts`,
+`teacher_*`, `sum_pi_squared`) is refused by name. The mixed `DataProto`
+carries `uid` as its only non-tensor column (a replayed row takes the uid
+of the group it came from; the actor reads none of the others, and the
+generated prompt's `data_source`, `reward_model` and `extra_info` would be
+wrong for a replayed row) and the original `meta_info` with
+`global_token_num` recomputed from the final `attention_mask`.
+
+### 12.4 One training step
+
+1. Refuse what the adapter does not handle: no `uid`, an unsupported
+   per-row tensor or multimodal column, `algorithm.adv_estimator` other
+   than `grpo`, rollout correction, a covariance loss mode (`clip_cov`,
+   `kl_cov`) with `beta > 0`, `global_steps` below the buffer's version,
+   KL-in-reward (`token_level_rewards != token_level_scores`), 3-D position
+   ids, a response mask that is not a prefix mask (multi-turn tool output
+   masked in the middle), advantages that vary over a row's tokens.
+2. Store: `add_group(prompt_id, global_steps, rollouts)` for every live
+   uid. Dead groups and rows with an empty response are skipped and
+   counted.
+3. Advance the buffer to `global_steps`.
+4. Replay: with `d` dead rows and a non-empty buffer,
+   `sample(d, current_version=global_steps)`; the rows are rewritten as in
+   §12.3, the batch padded first if a replayed sequence is longer than the
+   current width, every replaced row re-read against its rollout, the
+   batch witness written with the tensor digest of §12.5, and telemetry
+   measured and recorded (§10.9), the log-ratios from one
+   `_compute_old_log_prob` call over the replayed rows. The telemetry goes
+   into the actor output's `meta_info["metrics"]` under `reservoir/*`,
+   which `fit` reduces and logs next to `actor/*`.
+5. A step with nothing to replay hands the original `_update_actor` the
+   `DataProto` `fit` built.
+
+Importance weights fold into the advantage as in §9.5: verl's `vanilla`,
+`gspo`, `gpg` and `geo_mean` policy losses are positively homogeneous in
+the advantage; `clip_cov` and `kl_cov` select tokens by covariance with the
+advantage and are refused unless `beta = 0`.
+
+### 12.5 Tensor digest
+
+BLAKE2b-256 (personalisation `verl-batch`) over `input_ids`,
+`attention_mask`, `position_ids`, `response_mask`, `advantages`,
+`old_log_probs` and `ref_log_prob` when present, as `name|shape|kind`
+followed by the values in fixed-width little-endian encoding (int64 or
+float64), with per-token tensors zeroed outside `response_mask` and
+`position_ids` zeroed outside `attention_mask`, so the digest depends on
+what the model and the loss consume and the padded shape only.
+
+### 12.6 Checkpoints
+
+verl saves `<default_local_dir>/global_step_<n>/` at `global_steps == n`
+and on resume sets `global_steps = n` from the directory name before the
+first new step (`n + 1`). `_save_checkpoint` snapshots a durable buffer as
+`step-<n>` and prunes buffer checkpoints to the `global_step_*` directories
+the trainer kept; `_load_checkpoint` at `n > 0` rewinds the buffer to
+`step-<n>` and refuses if that snapshot is missing. The hook-ran check
+counts steps trained by this process (`global_steps - n`), so a resumed run
+is not failed for the steps the checkpoint already contained.

@@ -8,8 +8,9 @@
 > **Status:** the rollout buffer, priority strategies, age decay, attestation
 > with content commitments, the independent checker with its transcript and
 > diff tools, the durable buffer, the TRL integration and the reproducibility
-> demo below are implemented and tested. The verl integration and the
-> Stable-Baselines3 / TorchRL adapters are not yet.
+> demo below are implemented and tested, as is the verl integration for
+> verl's `DataProto` trainer. The Stable-Baselines3 / TorchRL adapters are
+> not yet.
 
 Generating rollouts is the most expensive part of GRPO-style training, and the
 standard recipe uses each rollout once and throws it away. Reservoir is a replay
@@ -317,8 +318,47 @@ only the first group of each batch. See [`docs/design.md`](docs/design.md)
 
 ### verl
 
-Not yet available. verl's disaggregated generation and update suit a
-rank-0 buffer; the adapter is planned after the multi-process TRL adapter.
+```bash
+pip install "reservoir-replay[verl]" "verl[vllm]==0.9.1"   # verl 0.9.1; a rollout engine from verl's own extras
+```
+
+```python
+from reservoir.integrations.verl import ReservoirRayPPOTrainer, ReservoirReplay
+
+trainer = ReservoirRayPPOTrainer(
+    config=config, tokenizer=tokenizer, role_worker_mapping=..., resource_pool_manager=...,
+    train_dataset=..., val_dataset=..., collate_fn=..., train_sampler=...,
+    replay_buffer=ReservoirReplay(capacity=50_000, half_life=4, max_policy_age=16, seed=0,
+                                  attest="run-01/attest.jsonl", manifest="run-01/manifest.jsonl",
+                                  directory="run-01/buffer", source="gsm8k"),
+)
+trainer.init_workers()
+trainer.fit()
+```
+
+`ReservoirRayPPOTrainer` is verl's `RayPPOTrainer` plus one override: the
+batch `fit` hands to `_update_actor` goes through the same steps as the TRL
+adapter (store the responses of prompts whose rewards varied, fill the rows
+of prompts whose rewards were all equal with replayed rollouts, check the
+written rows, write the batch witness and the telemetry, apply the optional
+drift gate), with the replay health logged under `reservoir/*` next to
+verl's `actor/*` metrics. Groups are found by verl's `uid`, so
+`balance_batch` reordering is fine. The buffer is bound to verl's
+`global_step_N` checkpoints: a save snapshots it, a resume rewinds it.
+`benchmarks/modal/verl_replay_real.py` runs it on one T4 with verl 0.9.1,
+vLLM 0.24.0 and a 135M model; the committed record
+(`benchmarks/modal/results/verl_replay_smollm2-135m-instruct_12steps_seed42.*`)
+shows 14 dead groups replaced with 56 rows over 12 steps, buffer snapshots at
+every trainer checkpoint, and a log the checker accepts with its manifest.
+
+Scope: verl 0.9.1's `DataProto` trainer (`trainer.use_v1=false`), which verl
+marks deprecated in favour of its TransferQueue-based V1 loop; `algorithm.adv_estimator=grpo`;
+text models; single-turn responses; one GPU verified. The adapter refuses by
+name a critic, rollout correction, KL-in-reward, multimodal inputs and any
+per-row tensor it does not know how to replace, and fails with a clear
+message if the installed verl lacks the members it relies on. See
+[`docs/design.md`](docs/design.md) §12 and
+[`docs/nonclaims.md`](docs/nonclaims.md) §24.
 
 ### Classic RL
 

@@ -28,7 +28,11 @@ replay buffer. The keys it reads and rewrites:
 - ``token_level_scores``, ``token_level_rewards`` ``(B, Lr)`` float: the
   reward at the last response token, zero elsewhere, identical unless
   ``algorithm.use_kl_in_reward`` is on (refused: replayed rows have no
-  per-token KL rewards to carry).
+  per-token KL rewards to carry). ``rm_scores``, the agent loop's copy of
+  the same tensor, is rewritten alike when present.
+- ``dummy_tensor`` ``(B, 1)``, the dataset's placeholder, is carried
+  unchanged; ``rollout_log_probs`` is the adapter's business (see
+  ``verl.py``); any other per-row tensor is refused by name.
 
 Rows of one prompt share a ``uid`` (``non_tensor_batch["uid"]``); they
 need not be contiguous, since ``balance_batch`` reorders rows by length.
@@ -83,12 +87,19 @@ REQUIRED_KEYS: Final[tuple[str, ...]] = (
 REF_KEY: Final[str] = "ref_log_prob"
 """Present iff ``actor.use_kl_loss``; rewritten when present, and every replayed row must carry one."""
 
-PER_TOKEN_KEYS: Final[tuple[str, ...]] = (
-    "old_log_probs", "advantages", "returns", "token_level_scores", "token_level_rewards", REF_KEY,
-)
+RM_SCORES_KEY: Final[str] = "rm_scores"
+"""The agent loop's reward tensor, which ``fit`` copies into ``token_level_scores``; rewritten alike when present."""
+
+SCORE_KEYS: Final[tuple[str, ...]] = ("token_level_scores", "token_level_rewards", RM_SCORES_KEY)
+"""Per-token reward tensors: the stored score goes at the last response token of each."""
+
+PER_TOKEN_KEYS: Final[tuple[str, ...]] = ("old_log_probs", "advantages", "returns", REF_KEY) + SCORE_KEYS
 """``(B, Lr)`` float tensors aligned with ``responses``."""
 
-HANDLED_KEYS: Final[frozenset[str]] = frozenset(REQUIRED_KEYS) | {REF_KEY}
+PASSTHROUGH_KEYS: Final[frozenset[str]] = frozenset({"dummy_tensor"})
+"""Per-row tensors carried unchanged: ``dummy_tensor`` is the dataset's ``(B, 1)`` placeholder, identical in every row."""
+
+HANDLED_KEYS: Final[frozenset[str]] = frozenset(REQUIRED_KEYS) | {REF_KEY, RM_SCORES_KEY}
 
 TENSOR_DIGEST_KEYS: Final[tuple[str, ...]] = (
     "input_ids", "attention_mask", "position_ids", "response_mask", "advantages", "old_log_probs", REF_KEY,
@@ -146,6 +157,15 @@ def check_layout(t: Tensors) -> Layout:
             "token_level_rewards differs from token_level_scores (algorithm.use_kl_in_reward is on); "
             "replayed rows carry no per-token KL rewards, so this setting is not supported"
         )
+    if RM_SCORES_KEY in t and not torch.equal(t[RM_SCORES_KEY], t["token_level_scores"]):
+        raise ValueError(f"{RM_SCORES_KEY} differs from token_level_scores; is this the batch fit built?")
+    for key, value in t.items():
+        if key in HANDLED_KEYS or key in PASSTHROUGH_KEYS:
+            continue
+        if isinstance(value, torch.Tensor) and value.dim() >= 1 and value.size(0) == rows:
+            raise ValueError(
+                f"batch entry {key!r} has one row per sample and the adapter does not know how to replace its rows"
+            )
     return Layout(rows, lp, lr)
 
 
@@ -175,6 +195,25 @@ def _group_rows(uids: Sequence[object]) -> dict[str, list[int]]:
     for r, uid in enumerate(uids):
         groups.setdefault(str(uid), []).append(r)
     return groups
+
+
+def _is_near_dead(rows: list[int], advantages: list[float], scores: list[float]) -> bool:
+    """A live group that verl would have made dead with exact arithmetic.
+
+    ``compute_grpo_outcome_advantage`` computes ``(score - mean) / (std + 1e-6)``
+    in float32. For a group whose scores are all equal but not exactly
+    representable (``0.3`` with ``n = 6``, say) the mean can differ from the
+    score by a rounding residue, the standard deviation is then of the order
+    of that residue, and the quotient can reach a few hundredths: verl trains
+    on those rows, so the adapter stores them and leaves them alone (the
+    dead-group criterion is "zero gradient", not "equal scores"), but counts
+    the group so the condition is visible. Equal scores are compared exactly;
+    the magnitude test of ``NEAR_DEAD_ADVANTAGE`` is kept for parity with the
+    TRL adapter.
+    """
+    if all(abs(advantages[r]) < NEAR_DEAD_ADVANTAGE for r in rows):
+        return True
+    return len({scores[r] for r in rows}) == 1
 
 
 def rows_to_groups(t: Tensors, uids: Sequence[object], *, step: int) -> RowConversion:
@@ -214,7 +253,7 @@ def rows_to_groups(t: Tensors, uids: Sequence[object], *, step: int) -> RowConve
             dead_rows.extend(rows)
             dead += 1
             continue
-        if all(abs(advantages[r]) < NEAR_DEAD_ADVANTAGE for r in rows):
+        if _is_near_dead(rows, advantages, scores):
             near_dead += 1
         prompt = unpadded[rows[0]]
         rollouts: list[Rollout] = []
@@ -296,11 +335,6 @@ def _check_write_args(t: Tensors, rows: tuple[int, ...], rollouts: tuple[Rollout
             raise ValueError(f"row {r} is outside the batch of {batch} rows")
     if len(set(rows)) != len(rows):
         raise ValueError(f"rows contains duplicates: {rows}")
-    for key, value in t.items():
-        if key not in HANDLED_KEYS and isinstance(value, torch.Tensor) and value.dim() >= 1 and value.size(0) == batch:
-            raise ValueError(
-                f"batch entry {key!r} has one row per sample and write_rows does not know how to replace its rows"
-            )
     has_ref = REF_KEY in t
     for r, rollout in zip(rows, rollouts):
         ref = rollout.metadata.get("ref_logprobs")
@@ -367,13 +401,15 @@ def _write_row(new: dict[str, torch.Tensor], r: int, rollout: Rollout, adv: floa
     prompt_pos = torch.clip(torch.cumsum(prompt_mask, dim=0) - 1, min=0).to(new["position_ids"].dtype)
     new["position_ids"][r, :lp] = prompt_pos
     new["position_ids"][r, lp:] = _response_positions(prompt_pos[-1], lr)
-    for key in ("old_log_probs", "advantages", "returns", "token_level_scores", "token_level_rewards"):
-        new[key][r] = 0.0
+    for key in PER_TOKEN_KEYS:
+        if key in new:
+            new[key][r] = 0.0
     new["old_log_probs"][r, :n] = as_row(rollout.logprobs, new["old_log_probs"])
     new["advantages"][r, :n] = adv
     new["returns"][r, :n] = adv
-    new["token_level_scores"][r, n - 1] = float(rollout.metadata["score"])
-    new["token_level_rewards"][r, n - 1] = float(rollout.metadata["score"])
+    for key in SCORE_KEYS:
+        if key in new:
+            new[key][r, n - 1] = float(rollout.metadata["score"])
     if has_ref:
         new[REF_KEY][r] = 0.0
         new[REF_KEY][r, :n] = as_row(rollout.metadata["ref_logprobs"], new[REF_KEY])
@@ -384,8 +420,12 @@ def verify_written_rows(t: Tensors, rows: Sequence[int], rollouts: Sequence[Roll
 
     Prompt ids under the prompt columns of ``attention_mask``, response
     ids and behavior logprobs under ``response_mask``, the advantage at
-    every response token, ``input_ids`` as the concatenation, and the
-    response columns of ``attention_mask`` as ``response_mask``.
+    every response token, ``input_ids`` as the concatenation, the response
+    columns of ``attention_mask`` as ``response_mask``, ``returns`` equal
+    to ``advantages``, ``position_ids`` following verl's rule for the
+    written masks, the stored score at the last response token of every
+    score tensor and zero elsewhere, and the reference logprobs when the
+    batch has them.
     """
     lp = t["prompts"].size(1)
     for r, rollout, adv in zip(rows, rollouts, advantages):
@@ -406,6 +446,24 @@ def verify_written_rows(t: Tensors, rows: Sequence[int], rollouts: Sequence[Roll
             raise ValueError(f"row {r}: input_ids is not prompts followed by responses")
         if not torch.equal(t["attention_mask"][r, lp:].bool(), cmask):
             raise ValueError(f"row {r}: the response columns of attention_mask differ from response_mask")
+        if not torch.equal(t["returns"][r], t["advantages"][r]):
+            raise ValueError(f"row {r}: returns differ from advantages")
+        prompt_pos = torch.clip(torch.cumsum(t["attention_mask"][r, :lp], dim=0) - 1, min=0).to(t["position_ids"].dtype)
+        expected_pos = torch.cat([prompt_pos, _response_positions(prompt_pos[-1], t["responses"].size(1))])
+        if not torch.equal(t["position_ids"][r], expected_pos):
+            raise ValueError(f"row {r}: position_ids do not follow verl's rule for the written masks")
+        n = len(rollout)
+        score = float(torch.tensor(float(rollout.metadata["score"]), dtype=t["token_level_scores"].dtype))
+        for key in SCORE_KEYS:
+            if key not in t:
+                continue
+            values = t[key][r].tolist()
+            if values[n - 1] != score or any(v != 0.0 for i, v in enumerate(values) if i != n - 1):
+                raise ValueError(f"row {r}: {key} does not hold the stored score at the last response token only")
+        if REF_KEY in t:
+            ref = torch.tensor(list(rollout.metadata["ref_logprobs"]), dtype=t[REF_KEY].dtype).tolist()
+            if t[REF_KEY][r][cmask].tolist() != ref:
+                raise ValueError(f"row {r}: written reference logprobs differ from the replayed rollout's")
 
 
 # ---------------------------------------------------------------------------
@@ -450,9 +508,12 @@ def global_token_num(attention_mask: torch.Tensor) -> list[int]:
 __all__ = [
     "HANDLED_KEYS",
     "Layout",
+    "PASSTHROUGH_KEYS",
     "PER_TOKEN_KEYS",
     "REF_KEY",
     "REQUIRED_KEYS",
+    "RM_SCORES_KEY",
+    "SCORE_KEYS",
     "TENSOR_DIGEST_KEYS",
     "check_layout",
     "global_token_num",

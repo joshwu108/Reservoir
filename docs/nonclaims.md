@@ -302,3 +302,42 @@ to, and otherwise reports what the manifest states (the per-reward-function
 values, see §22), which the mutation campaign measures beside the
 `replay_manifest` category: those tamperings run and move only the
 `rewards` fields of the output.
+
+### 24. verl Integration Scope
+
+The verl adapter targets the `DataProto`-based `RayPPOTrainer`
+(`trainer.use_v1=false`), which verl 0.9.1 ships but marks deprecated in
+favour of the TransferQueue-based V1 trainer that is its default. No
+adapter exists for the V1 trainer; `docs/design.md` §12.1 says what one
+would have to do. The adapter is tested with a fake trainer that mirrors
+the five methods it overrides and one real run of verl 0.9.1 on one T4
+(`benchmarks/modal/verl_replay_real.py`, record
+`benchmarks/modal/results/verl_replay_smollm2-135m-instruct_12steps_seed42.*`,
+re-verified by `tests/test_verl_results.py`). What that run established:
+the override ran on every one of 12 steps, 14 dead groups were replaced
+with 56 replayed rows, the mixed batch was accepted by the FSDP actor with
+`rollout_log_probs` dropped, the telemetry forward ran through verl's
+worker group (padded to its micro-batch size, which an earlier attempt
+got wrong), the buffer was snapshotted at each of the three trainer
+checkpoints, and the log verifies with its manifest. It also established
+what the fake could not: verl attaches `multi_modal_inputs` to every row
+of a text batch (as empty entries), and its micro-batching asserts
+divisibility of the row count. Not verified: more than one GPU or node
+(the driver owns the whole batch, so rank ownership does not arise, and
+the telemetry subset is padded to the world size, but no multi-worker
+dispatch has been run); the Megatron actor; SGLang rollout;
+multi-turn or tool-using agent loops (their response masks are not prefix
+masks and are refused); any verl version other than 0.9.1 (the guard warns
+rather than refuses when the members it needs are present); resumption of
+a real run from a verl checkpoint (the fake-trainer test covers the
+binding and the rewind). The scope guards (GRPO only, no critic, no
+rollout correction, no KL-in-reward, no multimodal inputs) are refusals,
+not claims that those settings could not be supported. verl's data metrics
+(`critic/score/*`, `response_length/*`) describe the generated batch, since
+`fit` keeps its own reference to it; the actor metrics and the
+`reservoir/*` telemetry describe the replayed batch. The dropout caveat of
+§14 does not apply: verl computes `old_log_probs` for every batch and the
+adapter runs no extra forward on the fresh rows; the telemetry forward over
+the replayed rows is a worker-group call that does not touch the trainer's
+RNG. No claim is made about throughput or about training quality (§10,
+§13).

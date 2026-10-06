@@ -233,6 +233,39 @@ def test_near_dead_groups_are_counted_but_stored():
     assert conv.near_dead_groups == 1 and len(conv.groups) == 1 and conv.dead_rows == ()
 
 
+def grpo_advantages(scores: list[float]) -> list[float]:
+    """verl's compute_grpo_outcome_advantage for one group, in float32 as verl runs it."""
+    t = torch.tensor(scores, dtype=torch.float32)
+    return ((t - t.mean()) / (t.std() + 1e-6)).tolist()
+
+
+def test_equal_non_dyadic_scores_leave_a_residue_that_is_counted_as_near_dead():
+    # 0.3 six times: verl's float32 mean carries a rounding residue, the std is of that order and
+    # the quotient is a few hundredths. verl trains on those rows, so the adapter stores the group
+    # (the criterion is zero gradient, not equal scores) and counts it.
+    advs = grpo_advantages([0.3] * 6)
+    assert any(a != 0.0 for a in advs) and max(abs(a) for a in advs) > 1e-3
+    batch, uids = make_batch(
+        prompts=[[1]] * 6, responses=[[2], [3], [4], [5], [6], [7]], advantages=advs, scores=[0.3] * 6, uids=["g"] * 6,
+    )
+    conv = rows_to_groups(batch, uids, step=0)
+    assert conv.dead_groups == 0 and conv.near_dead_groups == 1 and len(conv.groups[0].rollouts) == 6
+    # Exactly representable equal scores are exactly dead.
+    advs = grpo_advantages([1.0] * 6)
+    assert advs == [0.0] * 6
+    batch, uids = make_batch(prompts=[[1]] * 6, responses=[[2]] * 6, advantages=advs, scores=[1.0] * 6, uids=["g"] * 6)
+    assert rows_to_groups(batch, uids, step=0).dead_groups == 1
+
+
+def test_an_unknown_per_row_tensor_is_refused_by_the_layout_check():
+    batch, uids = two_groups()
+    batch["values"] = torch.zeros(4, 2)
+    with pytest.raises(ValueError, match="values"):
+        check_layout(batch)
+    with pytest.raises(ValueError, match="values"):
+        rows_to_groups(batch, uids, step=0)
+
+
 def test_ref_logprobs_are_stored_when_present():
     batch, uids = two_groups(ref_logps=[[-1.0], [-2.0, -2.1], [-3.0, -3.1], [-4.0]])
     conv = rows_to_groups(batch, uids, step=0)
@@ -334,13 +367,43 @@ def test_write_rows_validates_rows_and_lengths():
         write_rows(batch, [2, 2], [r, r], [0.5, 0.5], PAD)
 
 
-def test_verify_written_rows_catches_a_corrupted_row():
-    batch, _ = two_groups()
-    rollouts = [stored([7, 8], [-0.7, -0.8], [30, 31])]
+@pytest.mark.parametrize("corrupt, message", [
+    (lambda t: t["responses"].__setitem__((2, 1), 99), "response ids"),
+    (lambda t: t["prompts"].__setitem__((2, 0), 99), "prompt ids"),
+    (lambda t: t["old_log_probs"].__setitem__((2, 0), -0.1), "behavior logprobs"),
+    (lambda t: t["advantages"].__setitem__((2, 1), 0.0), "advantages"),
+    (lambda t: t["returns"].__setitem__((2, 0), 0.0), "returns"),
+    (lambda t: t["position_ids"].__setitem__((2, 3), 7), "position_ids"),
+    (lambda t: t["token_level_scores"].__setitem__((2, 0), 1.0), "token_level_scores"),
+    (lambda t: t["rm_scores"].__setitem__((2, 1), 0.5), "rm_scores"),
+    (lambda t: t["ref_log_prob"].__setitem__((2, 0), -1.0), "reference logprobs"),
+])
+def test_verify_written_rows_catches_a_corruption_in_every_rewritten_tensor(corrupt, message):
+    batch, _ = two_groups(ref_logps=[[-1.0], [-2.0, -2.1], [-3.0, -3.1], [-4.0]])
+    batch["rm_scores"] = batch["token_level_scores"].clone()
+    rollouts = [stored([7, 8], [-0.7, -0.8], [30, 31], score=0.0, ref=[-9.0, -9.5])]
     new = write_rows(batch, [2], rollouts, [0.5], PAD)
-    new["responses"][2, 1] = 99
-    with pytest.raises(ValueError, match="response ids"):
+    verify_written_rows(new, [2], rollouts, [0.5])
+    corrupt(new)
+    with pytest.raises(ValueError, match=message):
         verify_written_rows(new, [2], rollouts, [0.5])
+
+
+def test_rm_scores_are_rewritten_with_the_other_score_tensors_and_must_match():
+    batch, _ = two_groups()
+    batch["rm_scores"] = batch["token_level_scores"].clone()
+    new = write_rows(batch, [2], [stored([7, 8], [-0.7, -0.8], [30, 31], score=0.25)], [0.5], PAD)
+    assert new["rm_scores"][2].tolist() == [0.0, 0.25] and torch.equal(new["rm_scores"], new["token_level_scores"])
+    batch["rm_scores"][0, 0] = 9.0
+    with pytest.raises(ValueError, match="rm_scores"):
+        check_layout(batch)
+
+
+def test_dummy_tensor_passes_through_unchanged():
+    batch, _ = two_groups()
+    batch["dummy_tensor"] = torch.zeros(4, 1, dtype=torch.uint8)
+    new = write_rows(batch, [2], [stored([7], [-0.7], [30])], [0.5], PAD)
+    assert new["dummy_tensor"] is batch["dummy_tensor"]
 
 
 # ---------------------------------------------------------------------------

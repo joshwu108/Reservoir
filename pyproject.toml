@@ -40,6 +40,15 @@ trl = [
     "trl==1.13.0",
     "transformers>=4.56.2",
 ]
+verl = [
+    # verl 0.9.1 needs Python < 3.13 (this extra cannot be installed on 3.13+)
+    # and brings Ray. A rollout engine is not included: install verl's own
+    # extra next to it (verl[vllm]==0.9.1 is what the Modal run uses), which
+    # pins torch and transformers.
+    "numpy>=2.0.0",
+    "torch>=2.0.0",
+    "verl==0.9.1",
+]
 prefcheck = [
     "numpy>=2.2.6",
     "torch>=2.0.0",

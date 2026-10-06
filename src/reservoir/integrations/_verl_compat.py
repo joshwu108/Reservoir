@@ -1,8 +1,9 @@
 """Import guard for the verl integration.
 
 verl's trainer internals change often. The adapter in
-``reservoir.integrations.verl`` wraps ``RayPPOTrainer``'s worker group and
-two of its private checkpoint methods, builds ``DataProto`` objects, and
+``reservoir.integrations.verl`` overrides four private methods of the
+``DataProto``-based ``RayPPOTrainer`` (the actor update, the old-logprob
+forward and the two checkpoint methods), builds ``DataProto`` objects, and
 relies on the GRPO advantage path writing exact zeros for a zero-variance
 group. It is tested against one pinned release, so this module is the
 single place that checks the installed verl before anything else runs:
@@ -27,15 +28,16 @@ from __future__ import annotations
 import warnings
 from typing import Final, NamedTuple
 
-PINNED_VERL_VERSION: Final[str] = "0.7.0"
+PINNED_VERL_VERSION: Final[str] = "0.9.1"
 """The version ``pip install "reservoir-replay[verl]"`` installs."""
 
-TESTED_VERL_VERSIONS: Final[tuple[str, ...]] = ("0.7.0",)
+TESTED_VERL_VERSIONS: Final[tuple[str, ...]] = ("0.9.1",)
 """Versions the test suite and the Modal run have been run against."""
 
 REQUIRED_TRAINER_ATTRIBUTES: Final[tuple[str, ...]] = (
     "fit",
-    "init_workers",
+    "_update_actor",
+    "_compute_old_log_prob",
     "_save_checkpoint",
     "_load_checkpoint",
 )
@@ -64,7 +66,8 @@ class VerlSupport(NamedTuple):
 def _install_hint() -> str:
     return (
         f'install the supported version with: pip install "reservoir-replay[verl]" '
-        f"(pins verl=={PINNED_VERL_VERSION})"
+        f'(pins verl=={PINNED_VERL_VERSION}; a rollout engine comes from verl\'s own extras, '
+        f'e.g. "verl[vllm]=={PINNED_VERL_VERSION}")'
     )
 
 
