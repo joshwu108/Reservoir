@@ -268,7 +268,10 @@ in `docs/reproducible-training.md`); resumption of a distributed run
 from a checkpoint; that each rank trained on exactly the rows the
 broadcast handed it (the log commits to the global batch rank 0
 assembled, not to what each rank's loss consumed; the `batch` witness
-is rank 0's). The log records the global batch in rank order; it does
+is rank 0's). The test that the owner's hook runs on its own device and
+every rank's slice returns on its device runs under CUDA only: the
+fake ranks are threads of one process, which MPS does not support, so
+on a Mac that check is skipped. The log records the global batch in rank order; it does
 not record which rank generated or trained which row. The rank-0
 ownership rule relies on the launcher setting `RANK` (or a non-zero
 `LOCAL_RANK`), or on the trainer attaching the accelerator before the

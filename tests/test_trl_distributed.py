@@ -573,6 +573,11 @@ class DeviceTrainer(FakeTrainer):
 
 
 @pytest.mark.skipif(_second_device() is None, reason="needs a CUDA or MPS device besides the CPU")
+@pytest.mark.skipif(
+    _second_device() is not None and _second_device().type == "mps",
+    reason="the fake ranks are threads of one process; MPS does not support concurrent use from threads "
+           "and aborts the interpreter on the macOS CI runner (exit 134, no traceback). CUDA covers this test.",
+)
 def test_the_owner_runs_the_hook_on_its_own_device_not_on_the_gathered_cpu_shards():
     """A real two-GPU run failed here (2026-10-06): the gathered shards are CPU tensors, and rank 0's
     telemetry forward fed them to a CUDA model. Every rank's slice must also come back on its device."""
