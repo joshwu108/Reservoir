@@ -1,8 +1,8 @@
 {
-  "total": 140,
-  "passed": 140,
+  "total": 220,
+  "passed": 220,
   "torn": 0,
-  "cut_fired": 140,
+  "cut_fired": 220,
   "cut_never_fired": 0,
   "failed": 0,
   "results": [
@@ -708,6 +708,156 @@
     },
     {
       "op": "rollout_add_group",
+      "cut": "mid_wal_write",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "mid_wal_write",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "mid_wal_write",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "mid_wal_write",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "mid_wal_write",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_wal_write",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_wal_write",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_wal_write",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_wal_write",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_wal_write",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_wal_fsync",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_wal_fsync",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_wal_fsync",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_wal_fsync",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_wal_fsync",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
       "cut": "after_intent_write",
       "seed": 0,
       "cut_fired": true,
@@ -961,8 +1111,8 @@
       "cut": "after_rename_before_dir_fsync",
       "seed": 0,
       "cut_fired": true,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -971,8 +1121,8 @@
       "cut": "after_rename_before_dir_fsync",
       "seed": 1,
       "cut_fired": true,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -981,8 +1131,8 @@
       "cut": "after_rename_before_dir_fsync",
       "seed": 2,
       "cut_fired": true,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -991,8 +1141,8 @@
       "cut": "after_rename_before_dir_fsync",
       "seed": 3,
       "cut_fired": true,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -1001,8 +1151,58 @@
       "cut": "after_rename_before_dir_fsync",
       "seed": 4,
       "cut_fired": true,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_snapshot_before_wal_reset",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_snapshot_before_wal_reset",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_snapshot_before_wal_reset",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_snapshot_before_wal_reset",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_add_group",
+      "cut": "after_snapshot_before_wal_reset",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -1011,8 +1211,8 @@
       "cut": "after_dir_fsync",
       "seed": 0,
       "cut_fired": true,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -1021,8 +1221,8 @@
       "cut": "after_dir_fsync",
       "seed": 1,
       "cut_fired": true,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -1031,8 +1231,8 @@
       "cut": "after_dir_fsync",
       "seed": 2,
       "cut_fired": true,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
@@ -1041,14 +1241,164 @@
       "cut": "after_dir_fsync",
       "seed": 3,
       "cut_fired": true,
-      "matches_pre": false,
-      "matches_post": true,
+      "matches_pre": true,
+      "matches_post": false,
       "torn": false,
       "passed": true
     },
     {
       "op": "rollout_add_group",
       "cut": "after_dir_fsync",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "mid_wal_write",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "mid_wal_write",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "mid_wal_write",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "mid_wal_write",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "mid_wal_write",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_wal_write",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_wal_write",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_wal_write",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_wal_write",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_wal_write",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_wal_fsync",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_wal_fsync",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_wal_fsync",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_wal_fsync",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_wal_fsync",
       "seed": 4,
       "cut_fired": true,
       "matches_pre": false,
@@ -1311,13 +1661,413 @@
       "cut": "after_rename_before_dir_fsync",
       "seed": 0,
       "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_snapshot_before_wal_reset",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_snapshot_before_wal_reset",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_snapshot_before_wal_reset",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_snapshot_before_wal_reset",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_snapshot_before_wal_reset",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_dir_fsync",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_dir_fsync",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_dir_fsync",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_dir_fsync",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_update",
+      "cut": "after_dir_fsync",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_intent_write",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_intent_write",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_intent_write",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_intent_write",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_intent_write",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_intent_fsync",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_intent_fsync",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_intent_fsync",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_intent_fsync",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_intent_fsync",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "mid_segment_write",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "mid_segment_write",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "mid_segment_write",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "mid_segment_write",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "mid_segment_write",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_segment_fsync",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_segment_fsync",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_segment_fsync",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_segment_fsync",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_segment_fsync",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "before_rename",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "before_rename",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "before_rename",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "before_rename",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "before_rename",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 0,
+      "cut_fired": true,
       "matches_pre": false,
       "matches_post": true,
       "torn": false,
       "passed": true
     },
     {
-      "op": "rollout_update",
+      "op": "rollout_restore",
       "cut": "after_rename_before_dir_fsync",
       "seed": 1,
       "cut_fired": true,
@@ -1327,7 +2077,7 @@
       "passed": true
     },
     {
-      "op": "rollout_update",
+      "op": "rollout_restore",
       "cut": "after_rename_before_dir_fsync",
       "seed": 2,
       "cut_fired": true,
@@ -1337,7 +2087,7 @@
       "passed": true
     },
     {
-      "op": "rollout_update",
+      "op": "rollout_restore",
       "cut": "after_rename_before_dir_fsync",
       "seed": 3,
       "cut_fired": true,
@@ -1347,7 +2097,7 @@
       "passed": true
     },
     {
-      "op": "rollout_update",
+      "op": "rollout_restore",
       "cut": "after_rename_before_dir_fsync",
       "seed": 4,
       "cut_fired": true,
@@ -1357,7 +2107,7 @@
       "passed": true
     },
     {
-      "op": "rollout_update",
+      "op": "rollout_restore",
       "cut": "after_dir_fsync",
       "seed": 0,
       "cut_fired": true,
@@ -1367,7 +2117,7 @@
       "passed": true
     },
     {
-      "op": "rollout_update",
+      "op": "rollout_restore",
       "cut": "after_dir_fsync",
       "seed": 1,
       "cut_fired": true,
@@ -1377,7 +2127,7 @@
       "passed": true
     },
     {
-      "op": "rollout_update",
+      "op": "rollout_restore",
       "cut": "after_dir_fsync",
       "seed": 2,
       "cut_fired": true,
@@ -1387,7 +2137,7 @@
       "passed": true
     },
     {
-      "op": "rollout_update",
+      "op": "rollout_restore",
       "cut": "after_dir_fsync",
       "seed": 3,
       "cut_fired": true,
@@ -1397,8 +2147,58 @@
       "passed": true
     },
     {
-      "op": "rollout_update",
+      "op": "rollout_restore",
       "cut": "after_dir_fsync",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_restore_before_wal_reset",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_restore_before_wal_reset",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_restore_before_wal_reset",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_restore_before_wal_reset",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_restore",
+      "cut": "after_restore_before_wal_reset",
       "seed": 4,
       "cut_fired": true,
       "matches_pre": false,

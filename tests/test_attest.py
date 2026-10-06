@@ -1,8 +1,8 @@
 """
-Tests for reservoir.attest and checker.verify — attestation and independent verification.
+Tests for reservoir.attest and reservoir_checker.verify — attestation and independent verification.
 
 TDD: tests define the required behavior of both modules.
-The checker tests confirm that checker/verify.py imports nothing from src/reservoir.
+The checker tests confirm that reservoir_checker imports nothing from reservoir.
 """
 
 import ast
@@ -28,29 +28,31 @@ from checker.verify import CheckerError, verify_chain, verify_json_lines
 # CI-enforceable import check for checker/verify.py
 # ---------------------------------------------------------------------------
 
+CHECKER_DIR = Path(__file__).parent.parent / "src" / "reservoir_checker"
+
+
+def checker_imports(filename: str) -> list[str]:
+    """Every module a checker file imports, as written."""
+    tree = ast.parse((CHECKER_DIR / filename).read_text())
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names += [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names.append(node.module or "")
+    return names
+
+
 class TestCheckerImportIsolation:
-    @pytest.mark.parametrize("filename", ["verify.py", "decay_replay.py", "content.py", "transcript.py", "diff.py", "draw.py"])
-    def test_checker_does_not_import_src_reservoir(self, filename: str):
-        """Nothing under checker/ may import from src/reservoir."""
-        checker_path = Path(__file__).parent.parent / "checker" / filename
-        source = checker_path.read_text()
-        tree = ast.parse(source)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    assert "reservoir" not in alias.name, (
-                        f"checker/{filename} imports reservoir: {alias.name}"
-                    )
-            elif isinstance(node, ast.ImportFrom):
-                module = node.module or ""
-                assert "reservoir" not in module, (
-                    f"checker/{filename} imports from reservoir: {module}"
-                )
+    @pytest.mark.parametrize("filename", sorted(p.name for p in CHECKER_DIR.glob("*.py")))
+    def test_checker_imports_nothing_from_reservoir(self, filename: str):
+        """Checker modules import only the stdlib and each other, never the package they verify."""
+        for name in checker_imports(filename):
+            assert not (name == "reservoir" or name.startswith("reservoir.")), f"{filename} imports {name}"
+            if name.startswith("reservoir_checker"):
+                continue
+            assert "reservoir" not in name, f"{filename} imports {name}"
 
-
-# ---------------------------------------------------------------------------
-# AttestationLog tests
-# ---------------------------------------------------------------------------
 
 class TestAttestationLog:
     def test_empty_log(self):

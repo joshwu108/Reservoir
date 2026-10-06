@@ -80,14 +80,13 @@ class TestAuditedPERBufferBasics:
 
 
 class TestAuditReport:
-    def test_passed_when_no_divergences(self):
+    def test_passed_when_difference_is_small(self):
         report = AuditReport(
             step=100,
             fast_total=1000.0,
             exact_total=500,
             n_samples_compared=20,
             max_tv_distance=1e-10,
-            divergences=0,
             passed=True,
         )
         assert report.passed is True
@@ -99,7 +98,6 @@ class TestAuditReport:
             exact_total=500,
             n_samples_compared=20,
             max_tv_distance=0.5,
-            divergences=3,
             passed=False,
         )
         assert report.passed is False
@@ -118,10 +116,8 @@ class TestAuditWarning:
             exact_total=1,
             n_samples_compared=5,
             max_tv_distance=0.5,  # > TV_THRESHOLD
-            divergences=1,
             passed=False,
         )
         a._reports.append(bad_report)
         summary = a.audit_report()
         assert not summary["all_passed"]
-        assert summary["total_divergences"] == 1

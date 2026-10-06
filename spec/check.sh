@@ -8,7 +8,7 @@
 #   This script uses the TLA+ Tools jar from the official GitHub release.
 #   Pin: we check the actual jar hash after download.
 #
-# Usage: bash spec/check.sh
+# Usage: bash spec/check.sh [--with-counterexample]
 
 set -euo pipefail
 
@@ -48,7 +48,27 @@ java -jar "$JAR_PATH" \
 
 echo ""
 echo "TLC check complete."
-echo ""
-echo "NOTE: The NoParentFsync counterexample is documented in ReplayLifecycle.tla"
-echo "but requires a separate config (NoParentFsync.cfg) and FilesystemRevertNoParentFsync"
-echo "action to reproduce the violating trace. See the TLA+ spec for details."
+
+# The counterexample: without a parent-directory fsync, recovery that trusts
+# the rename produces a torn state. TLC must find the violation; a clean run
+# here would mean the model no longer demonstrates why the dir fsync exists.
+if [ "${1:-}" = "--with-counterexample" ]; then
+    echo ""
+    echo "=== Checking NoParentFsync.tla (incorrect protocol, must VIOLATE I1) ==="
+    set +e
+    java -jar "$JAR_PATH" \
+        -config "${SPEC_DIR}/NoParentFsync.cfg" \
+        "${SPEC_DIR}/NoParentFsync.tla" \
+        -workers auto \
+        -deadlock > "${SPEC_DIR}/noparentfsync.out" 2>&1
+    STATUS=$?
+    set -e
+    if grep -q "Invariant I1_AtomicRecovery is violated" "${SPEC_DIR}/noparentfsync.out"; then
+        echo "Counterexample found, as expected (TLC exit ${STATUS}). Trace:"
+        sed -n '/Error: Invariant/,$p' "${SPEC_DIR}/noparentfsync.out" | head -60
+    else
+        echo "ERROR: NoParentFsync did not violate I1_AtomicRecovery; the counterexample is gone."
+        cat "${SPEC_DIR}/noparentfsync.out"
+        exit 1
+    fi
+fi

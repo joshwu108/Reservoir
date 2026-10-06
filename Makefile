@@ -35,12 +35,12 @@ lint:
 	uv run python -m py_compile src/reservoir/*.py checker/*.py
 
 check-imports:
-	uv run python -c "import ast, sys; \
-	import os; \
-	[sys.exit('checker imports src/reservoir!') for f in os.listdir('checker') if f.endswith('.py') \
-	for node in ast.walk(ast.parse(open('checker/'+f).read())) \
-	if isinstance(node, (ast.Import, ast.ImportFrom)) \
-	and getattr(node, 'module', '') and 'reservoir' in getattr(node, 'module', '')]"
+	uv run --no-sync python -c "import ast, os, sys; \
+	d = 'src/reservoir_checker'; \
+	names = [(f, (getattr(n, 'module', None) or n.names[0].name)) for f in os.listdir(d) if f.endswith('.py') \
+	for n in ast.walk(ast.parse(open(os.path.join(d, f)).read())) if isinstance(n, (ast.Import, ast.ImportFrom))]; \
+	bad = [(f, m) for f, m in names if m == 'reservoir' or m.startswith('reservoir.')]; \
+	sys.exit('checker imports reservoir: %s' % bad) if bad else print('checker import isolation ok')"
 
 clean:
 	rm -rf .pytest_cache __pycache__ .coverage htmlcov

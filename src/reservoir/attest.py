@@ -10,7 +10,7 @@ Schema (canonical JSON — sorted keys, no spaces):
     digest, op, index, old_priority_int, new_priority_int, op_counter, prev_digest
     Optional, present together when the buffer uses age decay:
       base_priority_int, entry_version, base_epoch
-    Optional on "evict" only: reason ("stale" | "capacity" | "explicit")
+    Optional on "evict" only: reason ("stale" | "capacity" | "explicit" | "drift")
     Optional on "insert" only: content_digest (64 hex chars, BLAKE2b-256 of
       the stored example, see rollout.py) and, only together with it,
       source (the caller's tag for where the prompt came from)
@@ -51,9 +51,17 @@ _PERSON = b"attest\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"  # 16 bytes
 _GENESIS = "genesis"
 
 _MUTATION_OPS = ("insert", "update", "evict")
-_EVICT_REASONS = ("stale", "capacity", "explicit")
+_EVICT_REASONS = ("stale", "capacity", "explicit", "drift")
 _DECAY_FIELDS = ("base_priority_int", "entry_version", "base_epoch")
 _CONTENT_DIGEST_LENGTH = 64   # hex characters of a BLAKE2b-256 digest
+LOG_FORMAT = "2"              # schema version written into decay_config; "2" adds batch witnesses and telemetry
+TELEMETRY_COUNTERS = ("batch_rows", "replaced_rows", "declined_rows", "dead_groups", "near_dead_groups")
+# Field names a telemetry record owns; a reported measurement may not reuse one. The checker
+# (reservoir_checker.telemetry) keeps the same list; the two must not drift apart.
+TELEMETRY_RESERVED = frozenset(TELEMETRY_COUNTERS) | {
+    "op", "step", "prev_digest", "digest", "sample_op_counter", "ess_num", "ess_den",
+    "staleness_max", "staleness_sum", "reported",
+}
 _MAX_SOURCE_LENGTH = 256      # same bound as reservoir.rollout.MAX_SOURCE_LENGTH
 
 
@@ -203,6 +211,7 @@ class AttestationLog:
             )
         record = {
             "op": "decay_config",
+            "format": LOG_FORMAT,
             "half_life": str(_require_int(half_life, "half_life", 1)),
             "max_policy_age": str(_require_int(max_policy_age, "max_policy_age", 0)),
             "capacity": str(_require_int(capacity, "capacity", 1)),
@@ -318,6 +327,113 @@ class AttestationLog:
         self._head_digest = digest
         return record
 
+    def append_batch(
+        self,
+        step: int,
+        sample_op_counter: int,
+        batch_rows: int,
+        replaced: list[tuple[int, int, str]],
+        tensor_digest: str,
+        declined: Optional[list[int]] = None,
+    ) -> dict:
+        """Append a BatchWitness: which training-batch rows hold which draws.
+
+        Parameters
+        ----------
+        step : int
+            The trainer's step (model version) the batch was built at.
+        sample_op_counter : int
+            ``op_counter`` of the sample record whose draws filled the rows.
+        batch_rows : int
+            Number of rows in the training batch.
+        replaced : list of (row, draw, content_digest)
+            Row ``row`` now holds draw ``draw`` (position in the sample
+            record) whose example has ``content_digest``. Rows and draws
+            must be distinct.
+        tensor_digest : str
+            64 hex characters committing to the final tensors.
+        declined : list of int, optional
+            Draw positions the adapter refused to place (see evict reason
+            ``"drift"``); together with the placed draws they must cover
+            the sample record exactly. Absent when empty.
+        """
+        _require_int(step, "step", 0)
+        _require_int(sample_op_counter, "sample_op_counter", 0)
+        _require_int(batch_rows, "batch_rows", 1)
+        if not _is_hex_digest(tensor_digest):
+            raise ValueError(f"tensor_digest must be {_CONTENT_DIGEST_LENGTH} lowercase hex characters")
+        rows = [r for r, _, _ in replaced]
+        draws = [d for _, d, _ in replaced]
+        declined = list(declined or [])
+        if len(set(rows)) != len(rows) or len(set(draws + declined)) != len(draws) + len(declined):
+            raise ValueError("replaced rows, placed draws and declined draws must be distinct")
+        for d in declined:
+            _require_int(d, "declined draw", 0)
+        entries = []
+        for row, draw, digest in replaced:
+            _require_int(row, "row", 0)
+            _require_int(draw, "draw", 0)
+            if row >= batch_rows:
+                raise ValueError(f"row {row} is outside a batch of {batch_rows} rows")
+            if not _is_hex_digest(digest):
+                raise ValueError(f"content_digest of row {row} must be {_CONTENT_DIGEST_LENGTH} lowercase hex characters")
+            entries.append({"row": row, "draw": draw, "content_digest": digest})
+        record = {
+            "op": "batch",
+            "step": str(step),
+            "sample_op_counter": sample_op_counter,
+            "batch_rows": batch_rows,
+            "replaced": entries,
+            "tensor_digest": tensor_digest,
+            "prev_digest": self._head_digest,
+        }
+        if declined:
+            record["declined"] = declined
+        return self._commit(record)
+
+    def append_telemetry(
+        self,
+        step: int,
+        counts: dict,
+        sample_op_counter: Optional[int],
+        ess: Optional[Fraction],
+        staleness_max: Optional[int],
+        staleness_sum: Optional[int],
+        reported: dict,
+    ) -> dict:
+        """Append a telemetry record: integer counters, exact ESS and staleness, carried floats.
+
+        ``counts`` must hold non-negative ints for ``batch_rows``,
+        ``replaced_rows``, ``declined_rows``, ``dead_groups`` and
+        ``near_dead_groups``. With ``sample_op_counter`` the exact values
+        are required and the checker recomputes them; ``reported`` maps
+        names to finite floats, written in ``float.hex()`` form and listed
+        under ``"reported"`` so a reader can tell carried from verified.
+        """
+        _require_int(step, "step", 0)
+        names = TELEMETRY_COUNTERS
+        if set(counts) != set(names):
+            raise ValueError(f"telemetry counts must be exactly {names}, got {sorted(counts)}")
+        record: dict = {"op": "telemetry", "step": str(step), "prev_digest": self._head_digest}
+        record.update({name: _require_int(counts[name], name, 0) for name in names})
+        if sample_op_counter is not None:
+            if ess is None or staleness_max is None or staleness_sum is None:
+                raise ValueError("telemetry for a replayed step needs ess, staleness_max and staleness_sum")
+            if not isinstance(ess, Fraction) or ess <= 0:
+                raise ValueError(f"ess must be a positive Fraction, got {ess!r}")
+            record["sample_op_counter"] = _require_int(sample_op_counter, "sample_op_counter", 0)
+            record["ess_num"], record["ess_den"] = str(ess.numerator), str(ess.denominator)
+            record["staleness_max"] = str(_require_int(staleness_max, "staleness_max", 0))
+            record["staleness_sum"] = str(_require_int(staleness_sum, "staleness_sum", 0))
+        for name, value in reported.items():
+            if not isinstance(name, str) or not name or name in TELEMETRY_RESERVED:
+                raise ValueError(f"reported name {name!r} is empty or a reserved telemetry field")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or value in (float("inf"), float("-inf")):
+                raise ValueError(f"reported {name} must be a finite float, got {value!r}")
+            record[name] = float(value).hex()
+        record["reported"] = sorted(reported)
+        return self._commit(record)
+
     def restore(self, records: list[dict]) -> None:
         """Replace the log's contents with ``records``, re-verifying every link.
 
@@ -420,6 +536,14 @@ def _draw_fields(
     }
 
 
+def _is_hex_digest(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == _CONTENT_DIGEST_LENGTH
+        and all(c in "0123456789abcdef" for c in value)
+    )
+
+
 def _content_fields(op: str, content_digest: Optional[str], source: Optional[str]) -> dict:
     """Validate the optional content fields of a mutation and return those to add.
 
@@ -431,11 +555,7 @@ def _content_fields(op: str, content_digest: Optional[str], source: Optional[str
         return {}
     if op != "insert":
         raise ValueError(f"content_digest is only valid on insert records, not {op!r}")
-    if (
-        not isinstance(content_digest, str)
-        or len(content_digest) != _CONTENT_DIGEST_LENGTH
-        or any(c not in "0123456789abcdef" for c in content_digest)
-    ):
+    if not _is_hex_digest(content_digest):
         raise ValueError(
             f"content_digest must be {_CONTENT_DIGEST_LENGTH} lowercase hex characters, "
             f"got {content_digest!r}"

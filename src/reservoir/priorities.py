@@ -83,7 +83,7 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, NamedTuple, Optional
 
 # Shared with rollout.py so both modules map the same invalid inputs (NaN,
 # inf, bool, integers too large for a float) to the same ValueError.
@@ -136,8 +136,32 @@ def _check_score(score: object, strategy: object) -> float:
 # Base classes
 # ---------------------------------------------------------------------------
 
+class ReplaySignal(NamedTuple):
+    """What an adapter knows about a rollout at the moment it is replayed.
+
+    ``advantage`` is the value written into the training batch (the stored
+    advantage times the importance weight), ``is_weight`` that weight,
+    ``log_ratio`` the per-sequence sum of ``current - behavior`` logprobs
+    when the adapter measured it and it was finite (``None`` when telemetry
+    and the drift gate are both off, or when the measurement was not
+    finite), ``age`` the model versions since the rollout was collected,
+    ``step`` the trainer step.
+    """
+
+    advantage: float
+    is_weight: float
+    log_ratio: Optional[float]
+    age: int
+    step: int
+
+
 class PriorityStrategy(ABC):
-    """Scores one rollout within its group. Subclass and implement ``score``."""
+    """Scores one rollout within its group. Subclass and implement ``score``.
+
+    Optionally override ``rescore`` to change a rollout's priority when it
+    is replayed, from what is known at that moment (``ReplaySignal``);
+    the default keeps the priority fixed at insertion.
+    """
 
     @abstractmethod
     def score(self, rollout: Rollout, group: RolloutGroup) -> float:
@@ -146,6 +170,21 @@ class PriorityStrategy(ABC):
         ``group`` is the group the rollout was generated in; use it for
         group-relative quantities such as ``group.mean_reward``.
         """
+
+    def rescore(self, rollout: Rollout, group: RolloutGroup, signal: ReplaySignal) -> Optional[float]:
+        """Return a new raw priority for a replayed ``rollout``, or ``None`` to keep it.
+
+        Called by an adapter after the rollout has been placed in a
+        training batch, once per distinct buffer slot (a slot drawn twice
+        in one batch is rescored from its first placement). The value goes
+        through the same float-once boundary as ``score`` (``** alpha``,
+        then quantisation) and becomes an ``update`` record; a value that
+        is not a finite non-negative number raises, after the step's
+        witness and telemetry have already been written. Which signal makes
+        a good priority is an open research question; the library ships no
+        rescoring strategy of its own.
+        """
+        return None
 
 
 class PromptPriority(ABC):
@@ -175,6 +214,20 @@ def validated_score(strategy: PriorityStrategy, rollout: Rollout, group: Rollout
         raise TypeError(f"rollout must be a Rollout, got {type(rollout).__name__}")
     _require_group(group)
     return _check_score(strategy.score(rollout, group), strategy)
+
+
+def validated_rescore(
+    strategy: PriorityStrategy, rollout: Rollout, group: RolloutGroup, signal: ReplaySignal
+) -> Optional[float]:
+    """Call ``strategy.rescore`` and validate a non-None result like a score."""
+    if not isinstance(strategy, PriorityStrategy):
+        raise TypeError(f"strategy must be a PriorityStrategy, got {type(strategy).__name__}")
+    if not isinstance(signal, ReplaySignal):
+        raise TypeError(f"signal must be a ReplaySignal, got {type(signal).__name__}")
+    value = strategy.rescore(rollout, group, signal)
+    if value is None:
+        return None
+    return _check_score(value, strategy)
 
 
 def validated_prompt_score(strategy: PromptPriority, group: RolloutGroup) -> float:

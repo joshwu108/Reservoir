@@ -3,24 +3,28 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "reservoir"
+name = "reservoir-replay"
 version = "0.5.0"
 description = "Certified Exact Prioritized Experience Replay with Crash Atomicity and Sampling Attestation"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
-dependencies = [
+# The rollout buffer, attestation log and checker are pure Python with no
+# required dependencies (tests/test_import_light.py enforces it). numpy and
+# torch come with the extras that use them: the classic transition buffers
+# and their wrappers, the TRL adapter, the fine-tuning tools.
+dependencies = []
+
+[project.scripts]
+reservoir-verify = "reservoir_checker.verify:main"
+reservoir-transcript = "reservoir_checker.transcript:main"
+reservoir-diff = "reservoir_checker.diff:main"
+
+[project.optional-dependencies]
+classic = [
     "numpy>=2.2.6",
     "torch>=2.0.0",
     "gymnasium>=1.3.0",
-    "matplotlib>=3.10.9",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.0",
-    "hypothesis>=6.0",
-    "pytest-cov>=4.0",
 ]
 atari = [
     "stable-baselines3>=2.9.0",
@@ -30,19 +34,27 @@ atari = [
     "matplotlib>=3.7",
 ]
 trl = [
+    "numpy>=2.2.6",
+    "torch>=2.0.0",
     "trl==1.13.0",
     "transformers>=4.56.2",
 ]
 prefcheck = [
+    "numpy>=2.2.6",
+    "torch>=2.0.0",
     "trl>=0.11",
     "transformers>=4.40",
     "datasets>=2.18",
     "accelerate>=0.27",
+    "matplotlib>=3.7",
 ]
 anchor = [
+    "numpy>=2.2.6",
+    "torch>=2.0.0",
     "transformers>=4.40",
     "datasets>=2.18",
     "accelerate>=0.27",
+    "matplotlib>=3.7",
 ]
 
 [tool.setuptools.packages.find]
@@ -52,10 +64,14 @@ where = ["src"]
 testpaths = ["tests"]
 addopts = "--tb=short -v"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=7.0",
     "hypothesis>=6.0",
     "pytest-cov>=4.0",
     "modal>=1.5.5",
+    "numpy>=2.2.6",
+    "torch>=2.0.0",
+    "gymnasium>=1.3.0",
+    "matplotlib>=3.10.9",
 ]

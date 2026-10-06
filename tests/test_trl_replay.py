@@ -189,7 +189,10 @@ def test_hook_stores_every_live_row_at_the_global_step():
     assert r.stats["hook_calls"] == 1
     assert r.stats["ingested_rows"] == 2 and r.stats["ingested_groups"] == 1
     assert r.stats["dead_groups"] == 1
-    assert trainer.logps_calls == []  # TRL supplied old_per_token_logps
+    # TRL supplied old_per_token_logps, so no behavior-logprob forward ran; the one
+    # forward the fake saw measures the replayed rows' drift for telemetry.
+    assert r.stats["logprob_forwards"] == 0 and r.stats["telemetry_forwards"] == 1
+    assert len(trainer.logps_calls) == 1
 
 
 def test_hook_computes_behavior_logprobs_once_when_trl_omits_them():
@@ -574,3 +577,55 @@ def test_durable_replay_keeps_the_manifest(tmp_path):
     assert isinstance(again.buffer, DurableRolloutBuffer)
     assert again.buffer.manifest_records == lines and len(lines) == 4
     again.close()
+
+
+
+# ---------------------------------------------------------------------------
+# Batch witness: the log names which rows hold which draws
+# ---------------------------------------------------------------------------
+
+def test_replay_writes_a_batch_witness_that_matches_the_rows(tmp_path):
+    from reservoir.integrations.trl import tensor_digest
+
+    first, second = live_batch(), mixed_batch()
+    r = replay(seed=7, attest=tmp_path / "attest.jsonl", manifest=tmp_path / "manifest.jsonl")
+    trainer = FakeTrainer(r, [copy.deepcopy(first), copy.deepcopy(second)])
+    trainer.generate(step=0)
+    out = trainer.generate(step=1)
+    r.close()
+
+    records = [json.loads(l) for l in (tmp_path / "attest.jsonl").read_text().splitlines()]
+    witnesses = [rec for rec in records if rec["op"] == "batch"]
+    assert len(witnesses) == 1
+    w = witnesses[0]
+    assert records.index(w) > max(i for i, rec in enumerate(records) if rec["op"] == "sample")
+    assert w["step"] == "1" and w["batch_rows"] == out["advantages"].size(0)
+    assert [e["row"] for e in w["replaced"]] == [2, 3]
+    assert [e["draw"] for e in w["replaced"]] == [0, 1]
+    assert [e["content_digest"] for e in w["replaced"]] == list(r.last_replay.content_digests)
+    assert w["tensor_digest"] == tensor_digest(out)
+    result = verify_json_lines((tmp_path / "attest.jsonl").read_text(), manifest=(tmp_path / "manifest.jsonl").read_text())
+    assert len(result.content.witnesses) == 1
+    # The witness proves the rows hold the sampled examples: check against the batch itself.
+    for e, rollout in zip(w["replaced"], r.last_replay.rollouts):
+        n = len(rollout)
+        assert out["completion_ids"][e["row"], :n].tolist() == list(rollout.tokens)
+
+
+def test_no_witness_when_nothing_was_replayed():
+    r = replay(attest=AttestationLog())
+    FakeTrainer(r, [live_batch()]).generate(step=0)
+    assert all(rec["op"] != "batch" for rec in r.buffer.attestation_log.records)
+
+
+def test_tensor_digest_is_a_function_of_the_tensors_only():
+    from reservoir.integrations.trl import tensor_digest
+
+    a = live_batch()
+    b = copy.deepcopy(a)
+    assert tensor_digest(a) == tensor_digest(b)
+    b["completion_ids"][0, 0] += 1
+    assert tensor_digest(a) != tensor_digest(b)
+    c = copy.deepcopy(a)
+    c["advantages"] = c["advantages"].to(torch.float64)
+    assert tensor_digest(a) == tensor_digest(c)

@@ -1,0 +1,38 @@
+{
+  "benchmark": "durable_overhead",
+  "reservoir_version": "0.5.0",
+  "python": "3.14.2",
+  "machine": "Darwin arm64",
+  "workload": {
+    "groups": 3000,
+    "group_size": 8,
+    "tokens_per_rollout": 128,
+    "batch_size": 16,
+    "capacity": 4096,
+    "compact_every": 256,
+    "version_advance_every_groups": 10
+  },
+  "in_memory_attested": {
+    "add_group_ms_first_tenth": 0.3965625073760748,
+    "add_group_ms_last_tenth": 0.950020519667305,
+    "sample_ms_first_tenth": 0.3231455048080534,
+    "sample_ms_last_tenth": 0.7067709957482293,
+    "wal_bytes_per_add_group": 0,
+    "compactions": 0,
+    "compaction_ms_median": null,
+    "compaction_ms_last": null
+  },
+  "durable": {
+    "add_group_ms_first_tenth": 4.4630834890995175,
+    "add_group_ms_last_tenth": 5.710395489586517,
+    "sample_ms_first_tenth": 3.9756870100973174,
+    "sample_ms_last_tenth": 4.0502915071556345,
+    "wal_bytes_per_add_group": 12897.0,
+    "compactions": 23,
+    "compaction_ms_median": 587.4509580025915,
+    "compaction_ms_last": 871.164417010732,
+    "snapshot_bytes": 54753803
+  },
+  "reopen_seconds": 5.329068207996897,
+  "note": "cost of durability only; durability itself is evidenced by the crash campaign, not here"
+}

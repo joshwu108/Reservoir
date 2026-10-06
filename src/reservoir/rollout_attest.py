@@ -21,6 +21,10 @@ Record order the checker relies on
    ``content_digest`` of the stored example and its ``source`` tag when
    the group has one (``record_insert``).
 4. One ``sample`` record per batch, unchanged from the classic buffer.
+5. Optionally one ``batch`` record per sample, written by an adapter
+   through ``record_batch`` once it has placed the sampled rollouts into
+   a training batch (the batch witness; see ``attest.append_batch``), and
+   one ``telemetry`` record per adapter step (``record_telemetry``).
 
 The buffer never emits a record out of this order; the tree's
 ``AdvanceResult`` already lists evictions before the rebase.
@@ -302,6 +306,26 @@ class RolloutAttester:
             op_counter=op_counter, root_total=root_total, samples=entries
         )
         self._emit(record)
+
+    def record_batch(
+        self, step: int, sample_op_counter: int, batch_rows: int,
+        replaced: list[tuple[int, int, str]], tensor_digest: str, declined: Optional[list[int]] = None,
+    ) -> None:
+        """One batch witness; see ``AttestationLog.append_batch``."""
+        if self._log is None:
+            return
+        self._emit(self._log.append_batch(step, sample_op_counter, batch_rows, replaced, tensor_digest, declined))
+
+    def record_telemetry(self, step: int, counts: dict, sample_op_counter: Optional[int],
+                         exact, reported: dict) -> None:
+        """One telemetry record; ``exact`` is an ``ExactTelemetry`` or None (no replay this step)."""
+        if self._log is None:
+            return
+        self._emit(self._log.append_telemetry(
+            step, counts, sample_op_counter,
+            exact.ess if exact else None, exact.staleness_max if exact else None,
+            exact.staleness_sum if exact else None, reported,
+        ))
 
     def restore(self, records: list[dict], manifest_records: Optional[list[dict]] = None) -> None:
         """Replace the log (and manifest) with recovered records and rewrite the files.

@@ -1,11 +1,13 @@
 """
 reservoir.audit — Exact buffer audit layer for FastPERBuffer.
 
-Runs a small ExactPERBuffer as a shadow alongside FastPERBuffer.
-Periodically compares sampling distributions and flags divergences.
-
-This is the research angle: no other PER library offers this.
-Use in production to catch float-tree bugs; disable for max speed.
+Runs a small ExactPERBuffer as a shadow alongside FastPERBuffer and
+periodically compares the two trees' implied sampling probabilities,
+position by position, reporting the largest absolute difference. It does
+not sample both buffers with the same draw, so it does not count
+decision-relevant divergences; ``campaigns/divergence.py`` does that under
+the preregistered protocol. Use it to catch a float-tree bug in a running
+job; disable for maximum speed.
 
 Usage
 -----
@@ -40,9 +42,8 @@ class AuditReport:
     fast_total: float         # Float tree root sum
     exact_total: int          # Exact integer tree root sum
     n_samples_compared: int
-    max_tv_distance: float    # Max TV distance between distributions
-    divergences: int          # Decision-relevant divergences (different index)
-    passed: bool              # True if no divergences and TV below threshold
+    max_tv_distance: float    # largest |p_exact - p_fast| over the compared positions
+    passed: bool              # True if that difference stays below TV_THRESHOLD
 
     TV_THRESHOLD: float = 0.05  # Warn if TV exceeds this (different-cap trees may diverge)
 
@@ -128,7 +129,6 @@ class AuditedPERBuffer:
         if exact_total == 0 or fast_total <= 0:
             return None
 
-        divergences = 0
         max_tv = 0.0
 
         # Compare: for each position in the exact buffer, compute
@@ -153,22 +153,21 @@ class AuditedPERBuffer:
                     tv = abs(float(p_exact) - p_fast)
                     max_tv = max(max_tv, tv)
 
-        passed = divergences == 0 and max_tv < AuditReport.TV_THRESHOLD
+        passed = max_tv < AuditReport.TV_THRESHOLD
         report = AuditReport(
             step=self._step,
             fast_total=fast_total,
             exact_total=exact_total,
             n_samples_compared=n_compare,
             max_tv_distance=max_tv,
-            divergences=divergences,
             passed=passed,
         )
         self._reports.append(report)
 
         if not passed:
             warnings.warn(
-                f"AuditedPERBuffer: audit at step {self._step} found issues. "
-                f"divergences={divergences}, max_tv={max_tv:.2e}",
+                f"AuditedPERBuffer: audit at step {self._step} found a probability "
+                f"difference of {max_tv:.2e}, above {AuditReport.TV_THRESHOLD}",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -196,12 +195,10 @@ class AuditedPERBuffer:
             "audits": len(self._reports),
             "all_passed": all(r.passed for r in self._reports),
             "max_tv_ever": max(r.max_tv_distance for r in self._reports),
-            "total_divergences": sum(r.divergences for r in self._reports),
             "reports": [
                 {
                     "step": r.step,
                     "max_tv": r.max_tv_distance,
-                    "divergences": r.divergences,
                     "passed": r.passed,
                 }
                 for r in self._reports

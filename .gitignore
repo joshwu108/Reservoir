@@ -34,3 +34,6 @@ DECISIONS_B.md
 
 # Private planning docs
 planning/
+
+# TLC output of the counterexample run
+spec/noparentfsync.out

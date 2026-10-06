@@ -442,22 +442,30 @@ class TestReopen:
 # Crash tests: SIGKILL at each cut point during an operation with a rebase
 # ---------------------------------------------------------------------------
 
+# With compact_every=1 every operation appends to the command log and then
+# writes a snapshot, so one crashing operation exercises both the log cuts
+# and the snapshot protocol's cuts.
 CUT_POINTS = [
+    "mid_wal_write",
+    "after_wal_write",
+    "after_wal_fsync",
     "after_intent_write",
     "after_intent_fsync",
     "mid_segment_write",
     "after_segment_fsync",
     "before_rename",
     "after_rename_before_dir_fsync",
+    "after_snapshot_before_wal_reset",
     "after_dir_fsync",
 ]
+RESTORE_CUT_POINTS = ["after_restore_before_wal_reset"]
 
 SETUP = textwrap.dedent(
     """
     import json, sys
     from reservoir.durable_rollout import DurableRolloutBuffer
     from reservoir.rollout import Rollout
-    KW = dict(capacity=8, half_life=1, max_policy_age=2, seed=3)
+    KW = dict(capacity=8, half_life=1, max_policy_age=2, seed=3, compact_every=1)
     def rollouts(rs):
         return [Rollout(tokens=[1, 2], logprobs=[-0.1, -0.2], reward=r) for r in rs]
     """
@@ -495,6 +503,30 @@ DUMP = SETUP + textwrap.dedent(
 )
 
 
+# Restore: the pre-state holds checkpoint "a" (one group) and a later group; the
+# crashing op rewinds to "a". Only the snapshot protocol and the restore cut are
+# on that path (no command is appended), so the WAL cuts are not armed for it.
+PREPARE_RESTORE = SETUP + textwrap.dedent(
+    f"""
+    {OPEN}
+    buf.add_group("g0", 0, rollouts([1.0, 0.0, 0.5]), source="a")
+    buf.checkpoint("a")
+    buf.add_group("g1", 1, rollouts([0.0, 1.0]))
+    buf.sample(2, current_version=1)
+    buf.close()
+    """
+)
+RESTORE_OP = SETUP + textwrap.dedent(
+    f"""
+    {OPEN}
+    buf.restore_checkpoint("a")
+    buf.close()
+    """
+)
+RESTORE_PATH_CUTS = [c for c in CUT_POINTS if not c.endswith("wal_write") and c != "after_wal_fsync"
+                     and c != "after_snapshot_before_wal_reset"] + RESTORE_CUT_POINTS
+
+
 def run_script(script: str, directory: Path, attest: Path, env_extra: dict | None = None,
                manifest: Path | None = None) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items() if not k.startswith("RESERVOIR_CUT")}
@@ -509,7 +541,8 @@ def dump_state(directory: Path, attest: Path, manifest: Path | None = None) -> d
     return json.loads(result.stdout)
 
 
-def _prepare(tmp_path_factory: pytest.TempPathFactory, with_manifest: bool) -> tuple[Path, dict, dict]:
+def _prepare(tmp_path_factory: pytest.TempPathFactory, with_manifest: bool,
+             prepare: str = PREPARE, crashing_op: str = CRASHING_OP) -> tuple[Path, dict, dict]:
     """Pre-state directory plus the pre and post oracles.
 
     Each subprocess pays the library's import cost, so the pre-state is
@@ -518,7 +551,7 @@ def _prepare(tmp_path_factory: pytest.TempPathFactory, with_manifest: bool) -> t
     root = tmp_path_factory.mktemp("crash_manifest" if with_manifest else "crash")
     buf_dir, attest = root / "pre", root / "pre.jsonl"
     manifest = root / "pre.manifest.jsonl" if with_manifest else None
-    assert run_script(PREPARE, buf_dir, attest, manifest=manifest).returncode == 0
+    assert run_script(prepare, buf_dir, attest, manifest=manifest).returncode == 0
     pre = dump_state(buf_dir, attest, manifest)
     oracle_dir, oracle_attest = root / "oracle", root / "oracle.jsonl"
     oracle_manifest = root / "oracle.manifest.jsonl" if with_manifest else None
@@ -526,7 +559,7 @@ def _prepare(tmp_path_factory: pytest.TempPathFactory, with_manifest: bool) -> t
     shutil.copy(attest, oracle_attest)
     if with_manifest:
         shutil.copy(manifest, oracle_manifest)
-    assert run_script(CRASHING_OP, oracle_dir, oracle_attest, manifest=oracle_manifest).returncode == 0
+    assert run_script(crashing_op, oracle_dir, oracle_attest, manifest=oracle_manifest).returncode == 0
     post = dump_state(oracle_dir, oracle_attest, oracle_manifest)
     assert pre != post
     return root, pre, post
@@ -542,7 +575,8 @@ def prepared_manifest(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, d
     return _prepare(tmp_path_factory, with_manifest=True)
 
 
-def _crash_and_recover(root: Path, pre: dict, post: dict, cut: str, with_manifest: bool) -> None:
+def _crash_and_recover(root: Path, pre: dict, post: dict, cut: str, with_manifest: bool,
+                       crashing_op: str = CRASHING_OP) -> None:
     buf_dir, attest = root / f"buf_{cut}", root / f"attest_{cut}.jsonl"
     manifest = root / f"manifest_{cut}.jsonl" if with_manifest else None
     shutil.copytree(root / "pre", buf_dir)
@@ -551,7 +585,7 @@ def _crash_and_recover(root: Path, pre: dict, post: dict, cut: str, with_manifes
         shutil.copy(root / "pre.manifest.jsonl", manifest)
 
     crashed = run_script(
-        CRASHING_OP, buf_dir, attest,
+        crashing_op, buf_dir, attest,
         {"RESERVOIR_CUT_POINT": cut, "RESERVOIR_CUT_BYTE_OFFSET": "40"}, manifest=manifest,
     )
     assert crashed.returncode != 0, f"child was not killed at cut {cut}"
@@ -584,3 +618,16 @@ def test_sigkill_with_manifest_leaves_log_and_manifest_consistent(
 ) -> None:
     root, pre, post = prepared_manifest
     _crash_and_recover(root, pre, post, cut, with_manifest=True)
+
+
+@pytest.fixture(scope="module")
+def prepared_restore(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, dict, dict]:
+    return _prepare(tmp_path_factory, with_manifest=True, prepare=PREPARE_RESTORE, crashing_op=RESTORE_OP)
+
+
+@pytest.mark.parametrize("cut", RESTORE_PATH_CUTS)
+def test_sigkill_during_restore_leaves_the_old_or_the_checkpoint_state(
+    prepared_restore: tuple[Path, dict, dict], cut: str
+) -> None:
+    root, pre, post = prepared_restore
+    _crash_and_recover(root, pre, post, cut, with_manifest=True, crashing_op=RESTORE_OP)

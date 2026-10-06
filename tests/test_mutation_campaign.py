@@ -42,6 +42,8 @@ class TestMutationCampaign:
             "content",
             "content_manifest",
             "draw",
+            "batch",
+            "telemetry",
         }
         assert required.issubset(category_names), (
             f"Missing categories: {required - category_names}"
@@ -82,3 +84,15 @@ class TestDrawCampaign:
         # Without the configuration, the reweighted sample always survives; the moved
         # draw survives unless it happened to cross a leaf boundary.
         assert "is_weight_replaced" in limit["survive_without_draw_config"]
+
+
+class TestBatchCampaign:
+    def test_batch_category_fully_rejected(self, results):
+        batch = next(d for d in results["details"] if d[0] == "batch")
+        assert batch[1] >= 12 and batch[1] == batch[2]
+
+
+class TestTelemetryCampaign:
+    def test_telemetry_category_fully_rejected(self, results):
+        telemetry = next(d for d in results["details"] if d[0] == "telemetry")
+        assert telemetry[1] >= 12 and telemetry[1] == telemetry[2]

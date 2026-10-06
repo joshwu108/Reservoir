@@ -1,6 +1,6 @@
 """Tests for the checker's replay of age-decayed logs.
 
-The checker (``checker/``) imports nothing from ``src/reservoir``. For a
+The checker (``reservoir_checker``) imports nothing from ``reservoir``. For a
 decayed log it must rebuild the decay table from the definition with its
 own integer arithmetic, recompute every leaf from the recorded
 ``(q, entry_version, base_epoch)``, and enforce the lifecycle protocol:

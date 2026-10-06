@@ -90,10 +90,30 @@ versions, or the attested rollout path. `RolloutBuffer` is pure Python.
 
 ### 12. Durable Rollout Buffer Scope
 
-`DurableRolloutBuffer` writes a full snapshot per operation. It is
-crash-atomic (140/140 SIGKILL tests on macOS/APFS, see §6) but makes no
+`DurableRolloutBuffer` logs each operation's inputs and snapshots every
+`compact_every` operations; recovery replays the log, which is exact
+because every operation is deterministic. It is crash-atomic (SIGKILL
+tests on macOS/APFS at every log and snapshot cut, see §6) but makes no
 throughput claim, does not persist custom success predicates, and requires
-JSON-serialisable rollout metadata.
+JSON-serialisable rollout metadata. Per-operation cost is flat but
+compaction and reopen cost grow with the attestation log, which the
+snapshot carries (`results/durable_overhead.json`); a run long enough for
+that to matter should raise `compact_every` or rotate the log, neither of
+which has been measured. The attestation and manifest files are written as
+each operation runs, before its command is fsynced, so a reader of those
+files during a crash window can see a record that recovery then retracts;
+only after reopen are the files and the buffer guaranteed to agree.
+Checkpoint binding rewinds the buffer to the trainer's step; it does not
+verify that the model checkpoint is the one the buffer was bound to, and
+it requires a durable buffer (an in-memory `ReservoirReplay` refuses to
+resume at a non-zero step rather than continue from an empty buffer). A
+trainer checkpoint written in the window before the buffer's `on_save`
+ran has no buffer checkpoint and resume fails closed. With
+`steps_per_generation > 1` a checkpoint taken inside a generation window
+holds the buffer operations of that window; the resumed trainer
+regenerates the window, so the buffer samples it a second time. The chain
+records both samples and verifies; it is not the chain an uninterrupted
+run would have produced. Untested against a real resume.
 
 ### 13. Replay in TRL and Training Quality
 
@@ -105,6 +125,15 @@ that the attestation log verifies. Loss curves in those files are recorded,
 not interpreted, and TRL's reward statistics (`reward`, `reward_std`,
 `frac_reward_zero_std`) are computed before the hook replaces dead rows, so
 they describe the generated batch rather than the batch trained on.
+
+The batch witness (version 0.5.0) closes the gap between the sampled batch
+and the batch the adapter hands back up to the adapter boundary. The
+adapter checks the written rows against the sampled rollouts and refuses
+otherwise; the checker proves the adapter's declared row-to-draw mapping
+consistent with the sample record. The checker cannot see the tensors:
+the tensor commitment can be opened only by someone holding the batch, and
+nothing in the log ties it to the declared rows. TRL's later row shuffle
+and the optimizer are outside.
 
 ### 14. TRL Integration Scope
 
@@ -121,8 +150,11 @@ Behavior logprobs stored for replay are those of the training model at
 generation time; when TRL does not compute them the adapter runs one extra
 no-grad forward, which under dropout consumes RNG state, so a step without
 replay is not promised to be bit-identical to a plain `GRPOTrainer` step.
-Priorities are fixed at insertion; the adapter does not re-score replayed
-rows from their training loss.
+Priorities are fixed at insertion unless the priority strategy implements
+`rescore`, which the adapter calls at placement time with the weighted
+advantage, importance weight, log-ratio and age; the training loss itself
+is not available to it. No rescoring strategy is shipped, and no claim is
+made that any rescoring improves training.
 
 ### 15. Relation to Verifiable Fine-Tuning
 
@@ -171,3 +203,12 @@ The numbers in `results/attestation_overhead.json` measure the pure-Python
 buffer on one laptop and describe the relative cost of attestation and
 verification. They are not throughput claims (§1) and say nothing about
 training quality (§10, §13).
+
+
+### 20. Telemetry
+
+The effective sample size and staleness in a telemetry record are
+recomputed by the checker; the log-ratio statistics are carried from the
+adapter and listed under `reported`, and nothing verifies them. No claim
+is made that any threshold on them improves training; the drift gate is
+off by default and, when on, only makes its declines visible.

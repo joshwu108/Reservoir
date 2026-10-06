@@ -32,9 +32,9 @@ Classic transition replay (the original surface):
 Shared:
     draw.py             Keyed BLAKE2b uniform draws; no RNG anywhere else.
     attest.py           Hash-chained attestation log records.
-    checker/            Independent verifier (verify), audit report (transcript)
-                        and two-log comparison (diff). Imports nothing from this
-                        package.
+    checker/            Independent verifier (verify), audit report (transcript),
+                        two-log comparison (diff). Imports nothing from the rest
+                        of this package; ships with console scripts.
 
 Fine-tuning tools (separate from replay): prefcheck.py, trajectory.py,
 report.py (preference-noise detection); anchor_set.py, forgetting_monitor.py,
@@ -47,53 +47,74 @@ this layout, one file per module.
 
 __version__ = "0.5.0"
 
-# Exact buffer (pure Python, arbitrary-precision integer arithmetic)
+# Importing the package needs numpy only. The rollout replay surface is
+# eager; the classic transition buffers, their wrappers and the
+# fine-tuning tools need torch and are resolved on first attribute access
+# (PEP 562), with an ImportError naming the extra to install when it is
+# missing.
 from reservoir.buffer import ExactPERBuffer
-
-# Fast buffer - auto-selects C-backed or pure-Python implementation
-try:
-    from reservoir.c_buffer import CFastPERBuffer as FastPERBuffer
-    _BACKEND = "c"
-except (ImportError, OSError):
-    # C extension not built, or ABI mismatch after Python upgrade - fall back
-    from reservoir.fast_buffer import FastPERBuffer  # type: ignore[assignment]
-    _BACKEND = "python"
-
-# Always importable by explicit name
-from reservoir.fast_buffer import FastPERBuffer as PyFastPERBuffer
-
-# Which backend FastPERBuffer resolves to at import time.
-# Read-only. Reflects import-time selection. Do not mutate at runtime.
-backend: str = _BACKEND
-
-# LLM-RL rollout replay: exact age-decayed priorities, attested, crash-atomic.
 from reservoir.rollout import Rollout, RolloutGroup
 from reservoir.rollout_buffer import RolloutBatch, RolloutBuffer
 from reservoir.durable_rollout import DurableRolloutBuffer
 
+# name -> (module, attribute, extra that provides its dependencies)
+_LAZY: dict[str, tuple[str, str, str]] = {
+    "FastPERBuffer": ("reservoir._classic", "FastPERBuffer", "classic"),
+    "PyFastPERBuffer": ("reservoir.fast_buffer", "FastPERBuffer", "classic"),
+    "backend": ("reservoir._classic", "backend", "classic"),
+    "DatasetBuffer": ("reservoir.dataset_buffer", "DatasetBuffer", "classic"),
+    "AnchorSet": ("reservoir.anchor_set", "AnchorSet", "anchor"),
+    "ForgettingMonitor": ("reservoir.forgetting_monitor", "ForgettingMonitor", "anchor"),
+    "ForgettingAlert": ("reservoir.forgetting_monitor", "ForgettingAlert", "anchor"),
+    "ReplayScheduler": ("reservoir.replay_scheduler", "ReplayScheduler", "anchor"),
+    "PreferenceQualityReport": ("reservoir.report", "PreferenceQualityReport", "prefcheck"),
+    "NoiseLabel": ("reservoir.report", "NoiseLabel", "prefcheck"),
+    "PreferenceNoiseDetector": ("reservoir.prefcheck", "PreferenceNoiseDetector", "prefcheck"),
+}
+
+
+_OPTIONAL_DEPENDENCIES = frozenset({"numpy", "torch", "gymnasium", "matplotlib", "transformers", "datasets", "accelerate", "trl"})
+
+
+def __getattr__(name: str):
+    """Resolve a classic or fine-tuning export on first use.
+
+    A missing optional dependency becomes an ImportError naming the extra
+    to install; any other ImportError (a defect in the module) is re-raised
+    untouched.
+    """
+    if name not in _LAZY:
+        raise AttributeError(f"module 'reservoir' has no attribute {name!r}")
+    module_name, attribute, extra = _LAZY[name]
+    import importlib
+
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        missing = (exc.name or "").split(".")[0]
+        if missing in _OPTIONAL_DEPENDENCIES:
+            raise ImportError(
+                f"reservoir.{name} needs the '{extra}' extra: pip install \"reservoir-replay[{extra}]\" "
+                f"(missing {missing})"
+            ) from exc
+        raise
+    value = getattr(module, attribute)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_LAZY))
+
+
+# Only the eager names: ``from reservoir import *`` must not import torch.
+# The lazy names in ``_LAZY`` are reached by attribute access.
 __all__ = [
     "ExactPERBuffer",
-    "FastPERBuffer",
-    "PyFastPERBuffer",
     "Rollout",
     "RolloutGroup",
     "RolloutBatch",
     "RolloutBuffer",
     "DurableRolloutBuffer",
-    "backend",
     "__version__",
 ]
-
-# Optional modules — imported lazily so missing/broken deps don't crash the package
-from reservoir.anchor_set import AnchorSet
-from reservoir.forgetting_monitor import ForgettingMonitor, ForgettingAlert
-from reservoir.replay_scheduler import ReplayScheduler
-from reservoir.dataset_buffer import DatasetBuffer
-from reservoir.report import PreferenceQualityReport, NoiseLabel
-
-try:
-    from reservoir.prefcheck import PreferenceNoiseDetector
-except (ImportError, RuntimeError):
-    # TRL not installed or incompatible (e.g. numpy version conflict on Colab).
-    # PreferenceNoiseDetector is unavailable but the rest of the package works.
-    PreferenceNoiseDetector = None  # type: ignore[assignment,misc]

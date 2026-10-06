@@ -1,1 +1,1 @@
-# Independent checker — imports NOTHING from src/reservoir
+"""Compatibility aliases: the checker lives in the ``reservoir_checker`` package."""

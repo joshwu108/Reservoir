@@ -286,9 +286,11 @@ Safety == I1_AtomicRecovery /\ I2_AttestationConsistency
   "Committed" as durable — which is WRONG without dir fsync — and show
   that I1 is violated: the recovered state is neither pre nor post.
 
-  NOTE: This counterexample module is included in the same file for
-  documentation. A separate TLC configuration file (NoParentFsync.cfg)
-  enables checking the violating variant.
+  The variant is checked by spec/NoParentFsync.tla (which EXTENDS this
+  module and swaps Recover for RecoverNoParentFsync plus
+  FilesystemRevertNoParentFsync) with spec/NoParentFsync.cfg; run
+  "bash spec/check.sh --with-counterexample". TLC must report that
+  I1_AtomicRecovery is violated.
 *)
 
 (* RecoverNoParentFsync: treats Committed as durable (INCORRECT without dir fsync) *)
@@ -332,7 +334,11 @@ FilesystemRevertNoParentFsync ==
       /\ torn # post_state
       /\ current_state' = torn
   /\ crashed' = FALSE
-  /\ stage' = "Idle"
+  (* The process is back up with the rename still not durable, so the
+     protocol stage stays "Committed"; it must not be "Idle", which
+     I1_AtomicRecovery exempts because Idle is only reached through a
+     recovery or a finished operation that leaves pre or post. *)
+  /\ stage' = "Committed"
   /\ UNCHANGED <<pre_state, post_state, n_ops, log_head>>
 
 =============================================================================

@@ -71,8 +71,9 @@ from reservoir.sumtree import ExactMinTree, ExactSumTree
 #   "stale"     its age exceeded max_policy_age during advance()
 #   "capacity"  the buffer was full and this was the oldest entry
 #   "explicit"  the caller asked for it
-EvictReason = Literal["stale", "capacity", "explicit"]
-EVICT_REASONS: Final[frozenset[str]] = frozenset({"stale", "capacity", "explicit"})
+#   "drift"     an adapter declined the entry: its behavior logprobs had drifted too far from the current policy
+EvictReason = Literal["stale", "capacity", "explicit", "drift"]
+EVICT_REASONS: Final[frozenset[str]] = frozenset({"stale", "capacity", "explicit", "drift"})
 
 WriteOp = Literal["insert", "update", "evict"]
 

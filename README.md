@@ -28,8 +28,13 @@ It is built around three properties:
    lose its rollout history.
 
 ```bash
-pip install reservoir
+pip install reservoir-replay          # import name: reservoir
 ```
+
+The distribution is `reservoir-replay` (the name `reservoir` on PyPI belongs
+to an unrelated package); the import name is `reservoir`. The rollout buffer,
+the attestation log and the checker are pure Python with no required
+dependencies; numpy and torch are pulled in by the extras that use them.
 
 ---
 
@@ -92,15 +97,24 @@ buf = RolloutBuffer(
 )
 ```
 
-Write your own by implementing one method:
+Write your own by implementing one method, and optionally a second that
+re-scores a rollout when it is replayed (the TRL adapter calls it with what
+is known at that moment: the weighted advantage, the importance weight, the
+log-ratio to the current policy, the age in steps):
 
 ```python
-from reservoir.priorities import PriorityStrategy
+from reservoir.priorities import PriorityStrategy, ReplaySignal
 
 class RewardGap(PriorityStrategy):
     def score(self, rollout, group) -> float:
         return abs(rollout.reward - group.mean_reward)
+
+    def rescore(self, rollout, group, signal: ReplaySignal) -> float | None:
+        return None if signal.log_ratio is None else abs(rollout.reward) / (1 + abs(signal.log_ratio))
 ```
+
+Rescoring is a hook, not a recommendation: the library ships no rescoring
+strategy of its own, and every rescoring is an `update` record in the log.
 
 **Age decay** is exact. Priorities decay by half-life in model versions, and
 the decayed distribution is the declared distribution the checker verifies.
@@ -217,8 +231,20 @@ including the stale evictions and rebase an operation may trigger. If the
 process is killed, reopening the same directory with the same parameters
 recovers the last committed state: the same live rollouts, the same next
 draw, and the same attestation chain and manifest, with no torn entries. Each
-operation writes a full snapshot, so cost grows with buffer size and run
-history; an incremental log is future work.
+operation appends one command to a write-ahead log and the buffer snapshots
+every 256 commands, so per-operation cost does not grow with history: in
+`results/durable_overhead.json` (3000 groups of 8 rollouts, 128 tokens each,
+Apple silicon) an `add_group` took 4.5 ms in the first tenth of the run and
+5.7 ms in the last, against 0.4 and 1.0 ms in memory. The snapshot does grow,
+because the attestation log is part of the state: compaction took 0.6 s at the
+median and 0.9 s by the end of that run, 3.4 ms per operation amortised, and
+reopening replayed in 5.3 s.
+`buf.checkpoint("step-100")` and `buf.restore_checkpoint("step-100")` bind the
+buffer to a training checkpoint; the TRL adapter does this on every save
+(pruning buffer checkpoints to the ones the trainer kept) and rewinds on
+resume, so a restarted run continues the chain from the checkpoint rather
+than from wherever the crash happened. Resume at a non-zero step without a
+matching buffer checkpoint is an error, not a fresh buffer.
 
 ---
 
@@ -227,7 +253,7 @@ history; an incremental log is future work.
 ### TRL
 
 ```bash
-pip install "reservoir[trl]"      # pins trl==1.13.0
+pip install "reservoir-replay[trl]"      # pins trl==1.13.0
 ```
 
 ```python
@@ -248,8 +274,17 @@ trainer.train()
 
 `ReservoirGRPOTrainer` is `GRPOTrainer` plus one override: after each
 generation step it stores every non-empty completion of a prompt whose rewards varied,
-and fills the rows of prompts whose rewards were all equal (which contribute no
-gradient) with rollouts replayed from the buffer. Replayed rows carry their
+fills the rows of prompts whose rewards were all equal (which contribute no
+gradient) with rollouts replayed from the buffer, checks the written rows
+against the sampled rollouts, and writes a batch witness naming which row
+holds which draw, which the checker proves consistent with the sample record
+(`reservoir-transcript --explain STEP ROW` says why a given row is in the
+batch). Every step it logs replay health under `reservoir/` in TRL's metrics
+(replay fraction, dead and near-dead groups, effective sample size and
+staleness of the replayed rows, log-ratio between stored and current
+logprobs) and into the attestation log, where the checker recomputes the
+effective sample size and the staleness. An optional drift gate (`max_log_ratio=`) declines rows whose
+log-ratio is too large; declines are recorded, never silent. Replayed rows carry their
 behavior logprobs, so the loss applies a real off-policy ratio, and their
 advantages are multiplied by the importance-sampling weight. Versions,
 half-life and `max_policy_age` are counted in optimizer steps. Every insertion
@@ -269,12 +304,8 @@ only the first group of each batch. See [`docs/design.md`](docs/design.md)
 
 ### verl
 
-```bash
-pip install reservoir-verl
-```
-
-A trajectory store and prioritized sampler plugin with WAL durability, so
-rollout history survives a failed trial.
+Not yet available. verl's disaggregated generation and update suit a
+rank-0 buffer; the adapter is planned after the multi-process TRL adapter.
 
 ### Classic RL
 
@@ -301,7 +332,7 @@ Finds likely mislabeled pairs in RLHF preference data from their loss
 trajectories during reward-model training.
 
 ```bash
-pip install "reservoir[prefcheck]"
+pip install "reservoir-replay[prefcheck]"
 ```
 
 ```python
@@ -332,7 +363,7 @@ Measures forgetting during fine-tuning on a held set of anchor examples, and
 can replay the most-forgotten anchors back into training.
 
 ```bash
-pip install "reservoir[anchor]"
+pip install "reservoir-replay[anchor]"
 ```
 
 ```python
@@ -364,11 +395,11 @@ report.to_html("forgetting_report.html")
 | Claim | Evidence |
 |-------|----------|
 | Sampling is deterministic and reproducible under a keyed draw | Property tests against a brute-force reference; the log records seed, buffer id and `beta`, and the checker recomputes every draw and importance weight from them |
-| The durable buffers are failure-atomic under SIGKILL | 140/140 crash tests across both buffers: every child was killed at its armed cut point (the campaign fails a row otherwise), 100 recovered the pre-state and 40 the post-state, zero torn; the rollout cases crash mid-rebase |
-| The independent checker rejects forged logs | 151/151 mutants rejected: 38 age-decay protocol forgeries, 29 content-commitment forgeries (3 of them chain-consistent, invisible without the manifest) and 21 draw and weight forgeries (2 of them invisible to a log that does not record its seed and `beta`) |
+| The durable buffers are failure-atomic under SIGKILL | 220/220 crash tests across both buffers: every child was killed at its armed cut point (the campaign fails a row otherwise), 165 recovered the pre-state and 55 the post-state (an unsynced write that SIGKILL leaves in the page cache recovers to the post-state; a power loss there would give the pre-state, which is also legal), zero torn; the rollout cases cross the command log and the snapshot protocol in one operation, crash mid-rebase, and crash inside a checkpoint restore |
+| The independent checker rejects forged logs | 183/183 mutants rejected: 38 age-decay protocol forgeries, 29 content-commitment forgeries (3 of them chain-consistent, invisible without the manifest), 21 draw and weight forgeries (2 of them invisible to a log that does not record its seed and `beta`), 14 batch-witness forgeries and 18 telemetry forgeries |
 | Two runs with the same inputs give one transcript | CPU demo: runs a and b byte-identical (102 records), run c differs at record 1, classified `data` |
 | Attestation is cheap relative to generation | about 3× the no-attestation insert cost in memory, 6× with a manifest file; the checker verifies 10k records in 0.3 s |
-| The lifecycle protocol is safe within a finite scope | TLA+ model, 44,611 states |
+| The lifecycle protocol is safe within a finite scope | TLA+ model, 44,611 states. A no-parent-fsync variant (`spec/NoParentFsync.tla`) is written to show why the directory fsync exists; `bash spec/check.sh --with-counterexample` runs it in CI and fails unless TLC reports the violation. It has not been run on a developer machine yet |
 
 Reservoir reports negative results. A pre-registered search for
 decision-relevant divergence between float and exact sum-trees
@@ -387,17 +418,21 @@ What Reservoir does not claim is listed in
 ## Install
 
 ```bash
-pip install reservoir                 # core
-pip install "reservoir[trl]"          # TRL integration
-pip install "reservoir[prefcheck]"    # preference noise detector
-pip install "reservoir[anchor]"       # forgetting monitor
-pip install "reservoir[atari]"        # Atari benchmark suite
+pip install reservoir-replay                 # rollout buffer, attestation, checker (no dependencies)
+pip install "reservoir-replay[classic]"      # transition buffers, C extension, wrappers (numpy, torch)
+pip install "reservoir-replay[trl]"          # TRL integration
+pip install "reservoir-replay[prefcheck]"    # preference noise detector
+pip install "reservoir-replay[anchor]"       # forgetting monitor
+pip install "reservoir-replay[atari]"        # Atari benchmark suite
 
-python -c "import reservoir; print(reservoir.backend)"  # "c" or "python"
+reservoir-verify run-01/attest.jsonl --manifest run-01/manifest.jsonl   # also: reservoir-transcript, reservoir-diff
+python -c "import reservoir; print(reservoir.backend)"                 # "c" or "python" (needs [classic])
 ```
 
-A C compiler is needed for the C extension. Without one, Reservoir falls back
-to the numpy implementation.
+The checker ships in the wheel as `reservoir_checker` with the three
+console scripts above; `python -m checker.verify` and friends keep working
+from a checkout. A C compiler is needed for the C extension; without one,
+the classic buffer falls back to the numpy implementation.
 
 ---
 

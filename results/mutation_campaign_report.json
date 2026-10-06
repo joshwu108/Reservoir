@@ -1,7 +1,7 @@
 {
   "campaign": "T4_mutation",
-  "total_mutants": 151,
-  "rejected": 151,
+  "total_mutants": 183,
+  "rejected": 183,
   "survived": [],
   "categories": [
     {
@@ -58,6 +58,16 @@
       "name": "draw",
       "total": 21,
       "rejected": 21
+    },
+    {
+      "name": "batch",
+      "total": 14,
+      "rejected": 14
+    },
+    {
+      "name": "telemetry",
+      "total": 18,
+      "rejected": 18
     }
   ],
   "content_limit": {

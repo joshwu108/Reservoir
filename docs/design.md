@@ -155,6 +155,42 @@ On startup, the buffer checks:
 
 The recovery is conservative: if any ambiguity exists, fall back to pre-state.
 
+### Command log (rollout buffer, version 0.5.0)
+
+`DurableRolloutBuffer` no longer writes a full state per operation. Every
+`RolloutBuffer` operation is a deterministic function of state and inputs
+(exact priorities, keyed draws, derived attestation and manifest records),
+so the wrapper applies the operation in memory, appends `{"epoch", "seq",
+"op", "args", "digest"}` to `wal.jsonl` with a full fsync (and an fsync of
+the directory when the file is created), and returns. Once `compact_every`
+commands have accumulated, the next operation first writes a snapshot
+(`state.json`, through the protocol above, carrying the `seq` and `epoch`
+it includes) and resets the log; a compaction failure therefore surfaces
+before that operation is applied and never after a result was returned.
+
+Recovery loads the snapshot, reads the log, cuts a torn tail (an
+incomplete or digest-mismatching *last* line; the same damage before the
+end, or a sequence gap, is corruption and refuses to open), skips lines the
+snapshot already includes and lines of another epoch, replays the rest onto
+a throwaway buffer to validate it, and only then rebuilds the live buffer
+and its attestation and manifest files. A command that raised was never
+logged, and a command whose append failed is cut off the log, so a failed
+operation is undone by rebuilding from disk. Witness and telemetry
+commands name the sample they were issued against (`sample_op`); the
+buffer rebuilds that batch only while every sampled slot still holds the
+rollout it held at sample time (insert stamps and versions are recorded
+with the sample), so a replay can never bind a witness to a later
+occupant.
+
+`checkpoint(tag)` compacts and copies the snapshot under
+`checkpoints/<tag>/` with fsyncs of the file and its directory.
+`restore_checkpoint(tag)` writes the checkpoint state as a new snapshot
+with a fresh epoch, then resets the log; lines of the abandoned timeline
+left by a crash between the two are ignored on replay whatever their
+`seq`. Cut points: `mid_wal_write`, `after_wal_write`, `after_wal_fsync`,
+the snapshot protocol's seven, `after_snapshot_before_wal_reset` and
+`after_restore_before_wal_reset`.
+
 ## 4. Attestation Schema
 
 ### MutationRecord
@@ -500,10 +536,12 @@ buffer built on §7. Its rules, each tested in `tests/test_rollout_buffer.py`:
 | IS weights | `(N·P(i))^-β / (N·P_min)^-β`, `P(i)` from the decayed leaf, min over positive leaves | Same formula as §6; zero-weight entries are live but excluded from the minimum |
 | Errors | All validation before any mutation; a bad group, score or index leaves the buffer unchanged | Lets the durable wrapper treat an exception as "nothing happened" |
 
-`DurableRolloutBuffer` (`durable_rollout.py`) commits each operation through
-the §3 protocol with full-state snapshots (`state_dict`/`load_state_dict`),
-including the attestation log; 70 SIGKILL tests in the crash campaign hit
-every cut point during an `add_group` that evicts and rebases.
+`DurableRolloutBuffer` (`durable_rollout.py`) appends each operation's inputs
+to a command log and writes a full-state snapshot (`state_dict`/
+`load_state_dict`, including the attestation log and manifest) through the §3
+protocol every `compact_every` commands; see "Command log" in §3. The crash
+campaign kills the process at every log and snapshot cut point during an
+`add_group` that evicts and rebases and during a `sample`.
 
 ## 9. TRL Integration
 
@@ -758,7 +796,69 @@ declares that boundary. Two runs that differ only in their seed now differ
 at record 0 (`config`), so `checker.diff`'s `sampler` class is reachable
 only for logs without the configuration or by a defect.
 
-### 10.8 Limit
+### 10.8 Batch witness
+
+After an adapter has placed a sampled batch into training-batch rows it
+writes one `batch` record (`RolloutBuffer.witness_batch`):
+
+```json
+{"op": "batch", "step": "<trainer step>", "sample_op_counter": <op_counter of the sample record>,
+ "batch_rows": <rows in the training batch>,
+ "replaced": [{"row": <int>, "draw": <position in the sample record>, "content_digest": "<hex>"}, ...],
+ "tensor_digest": "<BLAKE2b-256 of canonical JSON of the final prompt ids, completion ids and advantages>"}
+```
+
+An optional `declined` list names draw positions the adapter refused to
+place (see the drift gate below); placed and declined draws together must
+cover the sample exactly.
+
+The witness is the adapter's declaration. Before writing it the adapter
+re-reads every replaced row and refuses to continue unless it holds
+exactly the sampled rollout's prompt, tokens, behavior logprobs and
+weighted advantage, so a padding or masking mistake in the row writer
+fails loudly at the first replayed step. The checker then proves the
+declaration consistent with the sample record: it names the latest sample,
+every draw is placed or declined exactly once, every row is inside the
+batch and replaced at most once, each row's digest equals the digest the
+draw resolved to, sample `op_counter` values increase, and no sample is
+witnessed twice. `reservoir-transcript --explain STEP ROW` answers why a
+row holds what it holds. The tensor digest (prompt ids, masks, completion
+ids, advantages and behavior logprobs, in a fixed-width encoding) is a
+commitment the log cannot open; a holder of the batch can. The `format`
+field of `decay_config` is `"2"` for logs that may carry witnesses and
+telemetry; the checker reads formats 1 and 2 and refuses those records in
+a format-1 log.
+
+### 10.9 Telemetry and the drift gate
+
+One `telemetry` record per adapter step carries the integer counters
+(`batch_rows`, `replaced_rows`, `declined_rows`, `dead_groups`,
+`near_dead_groups`) and, for a replayed step, the exact effective sample
+size `(Σw)²/Σw²` of the sampled batch's importance weights and the maximum
+and sum of its rows' ages in model versions; the checker recomputes the
+latter two from the sample record and the live slots and cross-checks
+`replaced + declined` against the number of draws. Float measurements the
+log cannot recompute (the per-sequence log-ratio between stored behavior
+logprobs and the current policy, mean and max of the absolute value) are
+written in `float.hex()` form and listed under `reported`. The same
+numbers go to TRL's metrics under `reservoir/`.
+
+The log-ratio costs one extra no-grad forward over the replayed rows per
+step whenever telemetry is on, in whatever mode the trainer's model is in.
+The checker also cross-checks the telemetry counters against the batch
+witness of the same sample (step, batch size, placed and declined counts)
+and requires the sampled slots to still hold the drawn examples when the
+telemetry record is written.
+
+The drift gate is off by default. With `max_log_ratio` set, a sampled row
+whose absolute sequence log-ratio exceeds it, or is not finite, is
+declined: the dead row it would have filled stays dead, the witness lists
+the draw under `declined`, the entry is evicted with reason `drift` after
+the telemetry record (a slot drawn more than once is evicted only if every
+draw of it was declined), and more than `max_declines_per_step` declines in
+one step raise. A decline is never silent.
+
+### 10.10 Limit
 
 The log commits; the manifest opens. A chain-consistent change to an
 insert's `content_digest` or `source` is invisible without the manifest.

@@ -459,3 +459,20 @@ def test_rows_to_groups_then_write_rows_reproduces_the_batch():
 
     for key in out:
         assert torch.equal(new[key], out[key]), key
+
+
+
+def test_near_dead_groups_are_kept_and_counted():
+    from reservoir.integrations._trl_rows import NEAR_DEAD_ADVANTAGE, rows_to_groups
+
+    out = make_output(
+        prompts=[[1], [1], [2], [2], [3], [3]],
+        completions=[[4], [5], [6], [7], [8], [9]],
+        advantages=[1.0, -1.0, 5e-4, -5e-4, 0.0, 0.0],
+    )
+    logps = torch.full_like(out["completion_ids"], -0.5, dtype=torch.float32)
+    conv = rows_to_groups(out, num_generations=2, step=0, logprobs=logps)
+    assert conv.dead_groups == 1 and conv.dead_rows == (4, 5)
+    assert conv.near_dead_groups == 1
+    assert len(conv.groups) == 2            # the near-dead group is stored like any live group
+    assert 5e-4 < NEAR_DEAD_ADVANTAGE

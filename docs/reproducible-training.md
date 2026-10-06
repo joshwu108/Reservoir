@@ -112,6 +112,9 @@ python -m checker.transcript run/attest.jsonl --find <content digest> --json rep
   from that source.
 - **Find.** `--find <digest>` lists every sample record and batch position
   where that example appears, the question an unlearning audit asks.
+- **Explain.** `--explain STEP ROW` says whether row ROW of the training
+  batch built at step STEP was generated fresh or replayed, and from which
+  draw, example and slot. Needs the batch witnesses the TRL adapter writes.
 
 Every number comes from the log alone; the manifest only adds the
 human-readable example next to its digest. A log without content digests

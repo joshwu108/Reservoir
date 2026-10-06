@@ -91,14 +91,8 @@ from reservoir.draw import draw_uniform_below
 from reservoir.priorities import AdvantagePriority, PriorityStrategy, validated_score
 from reservoir.rollout import Rollout, RolloutGroup, default_is_success
 from reservoir.rollout_attest import AttestTarget, DrawConfig, ManifestTarget, RolloutAttester
-from reservoir.rollout_snapshot import (
-    _group_from_dict,
-    _group_to_dict,
-    _require_list,
-    _snapshot_int,
-    _strategy_fingerprint,
-    _validate_slots,
-)
+from reservoir.rollout_snapshot import buffer_fingerprint, buffer_state_dict, load_buffer_state
+from reservoir.rollout_telemetry import exact_telemetry
 from reservoir.sumtree import ExactMinTree
 
 
@@ -116,6 +110,8 @@ class RolloutBatch(NamedTuple):
     draw_integers: tuple[int, ...]        # the keyed draws, for the attestation log
     root_total: int                       # tree total at sample time
     min_priority_int: int                 # smallest positive leaf at sample time
+    op_counter: int = -1                  # the sample record's op_counter; names this batch to a witness
+    content_digests: tuple[str, ...] = () # content digest of each sampled rollout
 
     @property
     def float_is_weights(self) -> tuple[float, ...]:
@@ -239,6 +235,8 @@ class RolloutBuffer:
         self._free: list[int] = list(range(n))    # min-heap of empty slots
         self._insert_seq = 0
         self._op_counter = 0                      # bumped once per sampled batch; logged
+        self._witnessed = -1                      # op_counter of the last batch a witness was written for
+        self._last_sample: Optional[dict] = None  # what rebuilds ``last_batch`` after a snapshot
         self._draw_counter = 0                    # bumped once per sampled rollout; keys draws
         self._n_rebases = 0
         self._attester = RolloutAttester(
@@ -478,7 +476,46 @@ class RolloutBuffer:
             batch_op, root_total, batch.indices, batch.draw_integers,
             batch.priorities, batch.is_weights,
         )
+        self._last_sample = {"indices": list(indices), "draws": [str(d) for d in draws],
+                             "root_total": str(root_total), "min_priority": str(min_priority),
+                             "n": n, "priorities": [str(p) for p in batch.priorities],
+                             "op_counter": batch_op, "versions": list(batch.model_versions),
+                             "inserted": [self._inserted[i] for i in indices]}
         return batch
+
+    @property
+    def last_batch(self) -> Optional[RolloutBatch]:
+        """The most recent ``sample`` result, rebuilt from the buffer's own records.
+
+        Survives a snapshot (the durable command log replays witnesses and
+        telemetry against it). None before the first sample, or if a slot
+        of that batch has since been evicted or refilled: each slot's insert
+        stamp is checked against the one recorded at sample time, so a
+        rebuilt batch is the sampled batch, never a later occupant.
+        """
+        raw = self._last_sample
+        if raw is None:
+            return None
+        indices = tuple(raw["indices"])
+        if any(self._rollouts[i] is None or self._inserted[i] != stamp
+               for i, stamp in zip(indices, raw["inserted"])):
+            return None
+        priorities = tuple(int(p) for p in raw["priorities"])
+        root_total, min_priority, n = int(raw["root_total"]), int(raw["min_priority"]), raw["n"]
+        rollouts = tuple(self._rollouts[i] for i in indices)
+        groups = tuple(self._groups[i] for i in indices)
+        return RolloutBatch(
+            indices=indices, rollouts=rollouts, groups=groups,  # type: ignore[arg-type]
+            logprobs=tuple(r.logprobs for r in rollouts),  # type: ignore[union-attr]
+            model_versions=tuple(raw["versions"]),
+            rewards=tuple(r.reward for r in rollouts),  # type: ignore[union-attr]
+            is_weights=tuple(self._is_weight(p, root_total, min_priority, n) for p in priorities),
+            priorities=priorities, draw_integers=tuple(int(d) for d in raw["draws"]),
+            root_total=root_total, min_priority_int=min_priority, op_counter=raw["op_counter"],
+            content_digests=tuple(
+                g.content_digests[next(k for k, m in enumerate(g.rollouts) if m is r)]  # type: ignore[union-attr]
+                for r, g in zip(rollouts, groups)),
+        )
 
     def _draw_indices(
         self, batch_size: int, root_total: int
@@ -505,11 +542,16 @@ class RolloutBuffer:
     ) -> RolloutBatch:
         """Gather the stored data for the sampled slots into an immutable batch."""
         rollouts = tuple(self._rollouts[i] for i in indices)
+        groups = tuple(self._groups[i] for i in indices)
         priorities = tuple(self._tree.leaf(i) for i in indices)
+        digests = tuple(
+            g.content_digests[next(k for k, member in enumerate(g.rollouts) if member is r)]  # type: ignore[union-attr]
+            for r, g in zip(rollouts, groups)
+        )
         return RolloutBatch(
             indices=indices,
             rollouts=rollouts,  # type: ignore[arg-type]
-            groups=tuple(self._groups[i] for i in indices),  # type: ignore[arg-type]
+            groups=groups,  # type: ignore[arg-type]
             logprobs=tuple(r.logprobs for r in rollouts),  # type: ignore[union-attr]
             model_versions=tuple(self._tree.entry(i)[1] for i in indices),
             rewards=tuple(r.reward for r in rollouts),  # type: ignore[union-attr]
@@ -518,7 +560,85 @@ class RolloutBuffer:
             draw_integers=draws,
             root_total=root_total,
             min_priority_int=min_priority,
+            op_counter=self._op_counter,
+            content_digests=digests,
         )
+
+    def witness_batch(
+        self, batch: RolloutBatch, step: int, batch_rows: int, rows: Sequence[int], tensor_digest: str,
+        declined: Sequence[int] = (),
+    ) -> None:
+        """Record which training-batch rows now hold which draws of ``batch``.
+
+        ``rows[k]`` is the row that received draw ``placed[k]``, where
+        ``placed`` is every draw position of the batch not in ``declined``
+        (draws an adapter refused to train on; see ``evict`` with reason
+        ``"drift"``). The record names the sample record
+        (``batch.op_counter``), every placed draw with the content digest
+        of the rollout it delivered, the declined draws, and
+        ``tensor_digest``, the caller's commitment to the final tensors.
+        The checker then proves each row holds the example its draw
+        selected. Only the most recent batch can be witnessed, and only
+        once; a no-op when attestation is off.
+        """
+        if batch.op_counter != self._op_counter or batch.op_counter < 1:
+            raise ValueError(
+                f"witness_batch: batch op_counter {batch.op_counter} is not the buffer's latest sample "
+                f"({self._op_counter}); only the most recent batch can be witnessed"
+            )
+        if self._witnessed == batch.op_counter:
+            raise ValueError(f"witness_batch: sample {batch.op_counter} was already witnessed")
+        declined_set = {int(d) for d in declined}
+        if len(declined_set) != len(declined) or any(not 0 <= d < len(batch.rollouts) for d in declined_set):
+            raise ValueError(f"witness_batch: declined draws must be distinct positions of the batch, got {list(declined)}")
+        placed = [k for k in range(len(batch.rollouts)) if k not in declined_set]
+        if len(rows) != len(placed):
+            raise ValueError(f"witness_batch: {len(rows)} rows for {len(placed)} placed draws")
+        if not self._attester.enabled:
+            self._witnessed = batch.op_counter
+            return
+        replaced = [(int(r), k, batch.content_digests[k]) for r, k in zip(rows, placed)]
+        self._attester.record_batch(step, batch.op_counter, batch_rows, replaced, tensor_digest,
+                                    declined=sorted(declined_set))
+        self._witnessed = batch.op_counter
+
+    def evict(self, position: int, reason: str = "explicit") -> None:
+        """Remove the live entry at ``position`` with a recorded reason.
+
+        ``"explicit"`` is the caller's decision; ``"drift"`` is an adapter
+        declining an entry whose behavior logprobs drifted too far from
+        the current policy. ``"stale"`` and ``"capacity"`` are the buffer's
+        own reasons and cannot be given here.
+        """
+        if reason not in ("explicit", "drift"):
+            raise ValueError(f"evict reason must be 'explicit' or 'drift', got {reason!r}")
+        pos = self._to_index(position)
+        if pos not in self._tree.entries:
+            raise ValueError(f"evict: slot {pos} holds no live entry")
+        event = self._tree.evict(pos, reason)  # type: ignore[arg-type]
+        self._release_slot(pos)
+        self._attester.record_write(event, self._op_counter)
+
+    def record_telemetry(self, step: int, counts: dict, sample: Optional[RolloutBatch] = None,
+                         reported: Optional[dict] = None) -> None:
+        """Write a ``telemetry`` record for ``step``; see ``rollout_telemetry``.
+
+        ``counts`` holds the integer counters the adapter observed
+        (``batch_rows``, ``replaced_rows``, ``declined_rows``,
+        ``dead_groups``, ``near_dead_groups``); ``sample`` is the step's
+        batch when rows were replayed, from which the exact effective
+        sample size and staleness are derived here and re-derived by the
+        checker; ``reported`` holds float measurements the checker can only
+        carry (the log-ratio statistics). A no-op when attestation is off.
+        """
+        if not self._attester.enabled:
+            return
+        exact = None
+        if sample is not None:
+            if sample.op_counter != self._op_counter:
+                raise ValueError("record_telemetry: the sample is not the buffer's latest batch")
+            exact = exact_telemetry(sample.is_weights, [self.current_version - v for v in sample.model_versions])
+        self._attester.record_telemetry(step, counts, sample.op_counter if sample else None, exact, reported or {})
 
     def update_priorities(self, indices: Sequence[int], raw_scores: Sequence[float]) -> None:
         """Re-score live entries. All inputs are validated before any write.
@@ -557,119 +677,15 @@ class RolloutBuffer:
 
     def _fingerprint(self) -> dict:
         """The construction parameters a snapshot must be loaded with."""
-        p = self._params
-        return {
-            "half_life": p.half_life, "max_policy_age": p.max_policy_age,
-            "capacity": p.capacity, "priority_bits": p.priority_bits,
-            "priority_frac_bits": p.priority_frac_bits, "table_frac_bits": p.table_frac_bits,
-            "rebase_slack": p.rebase_slack, "alpha": self.alpha, "beta": self.beta,
-            "seed": self.seed, "buffer_id": self.buffer_id,
-            "reset_age_on_update": self.reset_age_on_update,
-            "priority": _strategy_fingerprint(self.priority),
-        }
+        return buffer_fingerprint(self)
 
     def state_dict(self) -> dict:
-        """Complete buffer state as a JSON-serialisable dict.
-
-        Groups are stored once each with all their rollouts (including any
-        already evicted from the buffer, since group statistics depend on
-        them) and their ``source``; live slots reference a group and a
-        member index. The attestation records and manifest lines are part
-        of the state, so a restored buffer continues the same chain. Integers
-        that may exceed 2^53 are stored as strings. Rollout metadata must
-        be JSON-serialisable and groups must use the default success
-        predicate, because a callable cannot be saved; both are checked
-        here with a clear error.
-        """
-        groups: list[RolloutGroup] = []
-        group_index: dict[int, int] = {}
-        slots: list[Optional[dict]] = []
-        for position in range(self.capacity):
-            group = self._groups[position]
-            if group is None:
-                slots.append(None)
-                continue
-            if id(group) not in group_index:
-                group_index[id(group)] = len(groups)
-                groups.append(group)
-            rollout = self._rollouts[position]
-            member = next(k for k, r in enumerate(group.rollouts) if r is rollout)
-            q, version = self._tree.entry(position)
-            slots.append({
-                "group": group_index[id(group)], "member": member,
-                "q": str(q), "version": version, "inserted": self._inserted[position],
-            })
-        log = self._attester.log
-        return {
-            "format": self.STATE_FORMAT,
-            "fingerprint": self._fingerprint(),
-            "current_version": self.current_version,
-            "base_epoch": self.base_epoch,
-            "op_counter": self._op_counter,
-            "draw_counter": self._draw_counter,
-            "insert_seq": self._insert_seq,
-            "n_rebases": self._n_rebases,
-            "groups": [_group_to_dict(g) for g in groups],
-            "slots": slots,
-            "attestation": log.records if log is not None else None,
-            "manifest": self._attester.manifest_records if self._attester.has_manifest else None,
-        }
+        """Complete buffer state as a JSON-serialisable dict; see ``rollout_snapshot.buffer_state_dict``."""
+        return buffer_state_dict(self)
 
     def load_state_dict(self, state: dict) -> None:
-        """Rebuild this (fresh) buffer from a ``state_dict()``.
-
-        Raises
-        ------
-        ValueError
-            If the buffer is not fresh, the snapshot format or construction
-            parameters do not match, or any value fails validation. A
-            failed load leaves the buffer unusable; construct a new one.
-        """
-        if self.size or self.current_version or self._op_counter or self._insert_seq:
-            raise ValueError("load_state_dict() requires a freshly constructed buffer")
-        if not isinstance(state, dict) or state.get("format") != self.STATE_FORMAT:
-            raise ValueError(f"unsupported snapshot format: {state.get('format') if isinstance(state, dict) else state!r}")
-        if state.get("fingerprint") != self._fingerprint():
-            raise ValueError(
-                "snapshot was written by a buffer with different parameters: "
-                f"{state.get('fingerprint')} vs {self._fingerprint()}"
-            )
-        groups = [_group_from_dict(g) for g in _require_list(state, "groups")]
-        slots = _validate_slots(_require_list(state, "slots"), self.capacity, groups)
-        counters = {name: _snapshot_int(state, name) for name in
-                    ("base_epoch", "current_version", "op_counter", "draw_counter",
-                     "insert_seq", "n_rebases")}
-        inserted_values = [slot["inserted"] for slot in slots.values()]
-        if inserted_values and max(inserted_values) > counters["insert_seq"]:
-            raise ValueError("a slot's insertion counter exceeds insert_seq")
-
-        entries = {pos: (slot["q"], slot["version"]) for pos, slot in slots.items()}
-        self._tree.restore(counters["base_epoch"], counters["current_version"], entries)
-        for position, slot in slots.items():
-            group = groups[slot["group"]]
-            self._groups[position] = group
-            self._rollouts[position] = group.rollouts[slot["member"]]
-            self._inserted[position] = slot["inserted"]
-        self._free = [p for p in range(self.capacity) if p not in entries]
-        heapq.heapify(self._free)
-        self._op_counter = counters["op_counter"]
-        self._draw_counter = counters["draw_counter"]
-        self._insert_seq = counters["insert_seq"]
-        self._n_rebases = counters["n_rebases"]
-        records = state.get("attestation")
-        if records is not None and not isinstance(records, list):
-            raise ValueError("snapshot attestation must be a list of records or null")
-        manifest = state.get("manifest")
-        if manifest is not None and not isinstance(manifest, list):
-            raise ValueError("snapshot manifest must be a list of records or null")
-        has_digests = any(
-            isinstance(r, dict) and r.get("op") == "insert" and "content_digest" in r for r in records or []
-        )
-        if manifest is None and self._attester.has_manifest and has_digests:
-            raise ValueError("saved state has no manifest but this buffer keeps one; reopen with manifest=None")
-        if manifest is not None and not self._attester.has_manifest:
-            raise ValueError("saved state carries a manifest; reopen with manifest=<path>")
-        self._attester.restore(records or [], manifest or [])
+        """Rebuild this (fresh) buffer from a ``state_dict()``; see ``rollout_snapshot.load_buffer_state``."""
+        load_buffer_state(self, state)
 
     def __enter__(self) -> "RolloutBuffer":
         return self

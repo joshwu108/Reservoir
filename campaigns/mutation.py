@@ -25,6 +25,12 @@ Categories (per spec):
      a draw moved inside its leaf, a reweighted sample, a changed seed,
      buffer id or beta, a deleted sample record. The report states which of
      these a log without the recorded draw configuration cannot see.
+ 11. Batch-witness forgeries (campaigns/mutation_batch.py): a training-batch
+     row pointed at the wrong draw, a swapped digest, a draw or row used
+     twice, a witness for the wrong sample or at the wrong place.
+ 12. Telemetry forgeries (campaigns/mutation_telemetry.py): a changed
+     effective sample size or staleness, counters that disagree with the
+     draws, an unlisted or non-canonical reported value.
 
 Run with: python -m campaigns.mutation
 Prints a report with exact counts.
@@ -462,6 +468,18 @@ def run_mutation_campaign() -> dict:
     # -----------------------------------------------------------------------
     from campaigns.mutation_draw import run_draw_category
     run_draw_category(results)
+
+    # -----------------------------------------------------------------------
+    # Category 11: Batch-witness forgeries
+    # -----------------------------------------------------------------------
+    from campaigns.mutation_batch import run_batch_category
+    run_batch_category(results)
+
+    # -----------------------------------------------------------------------
+    # Category 12: Telemetry forgeries
+    # -----------------------------------------------------------------------
+    from campaigns.mutation_telemetry import run_telemetry_category
+    run_telemetry_category(results)
 
     return results
 

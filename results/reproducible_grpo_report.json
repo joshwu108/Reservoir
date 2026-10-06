@@ -13,8 +13,8 @@
       "manifest": "benchmarks/modal/results/repro_cpu_12steps_seed42/a/manifest.jsonl",
       "seed": 42,
       "buffer_seed": 0,
-      "head_digest": "acafdbfb08c8927a5a79cf843290681a8b5c99e53812ece59ec68de5b1b1fe79",
-      "records": 102,
+      "head_digest": "78f14c388f625c71d1d1d0fb1ff5173d89f5db2a36436ba04a949d0802613221",
+      "records": 116,
       "examples_committed": 88,
       "totals": {
         "hook_calls": 12,
@@ -25,22 +25,25 @@
         "clamped_logprobs": 0,
         "replaced_rows": 8,
         "logprob_forwards": 12,
-        "dropped_sampling_logprobs": 0
+        "dropped_sampling_logprobs": 0,
+        "near_dead_groups": 0,
+        "declined_rows": 0,
+        "telemetry_forwards": 2
       },
       "versions": {
         "trl": "1.13.0",
         "transformers": "5.17.0",
         "torch": "2.14.0"
       },
-      "wall_clock_seconds": 8.64
+      "wall_clock_seconds": 7.2
     },
     "b": {
       "attest": "benchmarks/modal/results/repro_cpu_12steps_seed42/b/attest.jsonl",
       "manifest": "benchmarks/modal/results/repro_cpu_12steps_seed42/b/manifest.jsonl",
       "seed": 42,
       "buffer_seed": 0,
-      "head_digest": "acafdbfb08c8927a5a79cf843290681a8b5c99e53812ece59ec68de5b1b1fe79",
-      "records": 102,
+      "head_digest": "78f14c388f625c71d1d1d0fb1ff5173d89f5db2a36436ba04a949d0802613221",
+      "records": 116,
       "examples_committed": 88,
       "totals": {
         "hook_calls": 12,
@@ -51,22 +54,25 @@
         "clamped_logprobs": 0,
         "replaced_rows": 8,
         "logprob_forwards": 12,
-        "dropped_sampling_logprobs": 0
+        "dropped_sampling_logprobs": 0,
+        "near_dead_groups": 0,
+        "declined_rows": 0,
+        "telemetry_forwards": 2
       },
       "versions": {
         "trl": "1.13.0",
         "transformers": "5.17.0",
         "torch": "2.14.0"
       },
-      "wall_clock_seconds": 5.58
+      "wall_clock_seconds": 4.52
     },
     "c": {
       "attest": "benchmarks/modal/results/repro_cpu_12steps_seed42/c/attest.jsonl",
       "manifest": "benchmarks/modal/results/repro_cpu_12steps_seed42/c/manifest.jsonl",
       "seed": 43,
       "buffer_seed": 0,
-      "head_digest": "6a8ec0e9cb11c0396ec79b8a9bad28950cb27ac7c9de3a927c3cc18fbf2b65a6",
-      "records": 102,
+      "head_digest": "0a705cdd155159a262f82bfed44bebd72c31c5d61f0347611f419e9c175afd10",
+      "records": 116,
       "examples_committed": 88,
       "totals": {
         "hook_calls": 12,
@@ -77,24 +83,27 @@
         "clamped_logprobs": 0,
         "replaced_rows": 8,
         "logprob_forwards": 12,
-        "dropped_sampling_logprobs": 0
+        "dropped_sampling_logprobs": 0,
+        "near_dead_groups": 0,
+        "declined_rows": 0,
+        "telemetry_forwards": 2
       },
       "versions": {
         "trl": "1.13.0",
         "transformers": "5.17.0",
         "torch": "2.14.0"
       },
-      "wall_clock_seconds": 4.47
+      "wall_clock_seconds": 4.48
     }
   },
   "same_seed_identical": true,
   "different_data_seed_class": "data",
   "diffs": {
     "a_vs_b": {
-      "records_a": 102,
-      "records_b": 102,
-      "head_a": "acafdbfb08c8927a5a79cf843290681a8b5c99e53812ece59ec68de5b1b1fe79",
-      "head_b": "acafdbfb08c8927a5a79cf843290681a8b5c99e53812ece59ec68de5b1b1fe79",
+      "records_a": 116,
+      "records_b": 116,
+      "head_a": "78f14c388f625c71d1d1d0fb1ff5173d89f5db2a36436ba04a949d0802613221",
+      "head_b": "78f14c388f625c71d1d1d0fb1ff5173d89f5db2a36436ba04a949d0802613221",
       "identical": true,
       "first_difference": null,
       "class": "identical",
@@ -105,10 +114,10 @@
       "detail": "the logs are identical"
     },
     "a_vs_c": {
-      "records_a": 102,
-      "records_b": 102,
-      "head_a": "acafdbfb08c8927a5a79cf843290681a8b5c99e53812ece59ec68de5b1b1fe79",
-      "head_b": "6a8ec0e9cb11c0396ec79b8a9bad28950cb27ac7c9de3a927c3cc18fbf2b65a6",
+      "records_a": 116,
+      "records_b": 116,
+      "head_a": "78f14c388f625c71d1d1d0fb1ff5173d89f5db2a36436ba04a949d0802613221",
+      "head_b": "0a705cdd155159a262f82bfed44bebd72c31c5d61f0347611f419e9c175afd10",
       "identical": false,
       "first_difference": 1,
       "class": "data",
@@ -123,28 +132,28 @@
         "base_epoch": "0",
         "base_priority_int": "32761",
         "content_digest": "7da3748959e0ec68609cda7e28c9800f5d4a46334f95b8588161dca8dba6d083",
-        "digest": "4a3a344204da31ad267b224c3c5a4b643d849cf4ce173d6955766583803c3df7",
+        "digest": "780a12e6d0724f850783143413ff87ee530d4b88e217baddfb0a62b0c929554a",
         "entry_version": "0",
         "index": 0,
         "new_priority_int": "32761",
         "old_priority_int": "0",
         "op": "insert",
         "op_counter": 0,
-        "prev_digest": "6d9b2bbb721213464cffa0ff93385e79908c37d19f268a39f02eba40a42fa6d5",
+        "prev_digest": "bdf6a789e61fd0fbc2e9b5219a402a8c4eda8e2a9d09736f1c502876aa47c99e",
         "source": "zen"
       },
       "record_b": {
         "base_epoch": "0",
         "base_priority_int": "32761",
         "content_digest": "e101eb691645254d74844afb8920c852e5ed045e534bc47b449169fe4146aca3",
-        "digest": "0c5cb150f53bbf73331476fa460e8a7857189a2aa5bf4ff2ceaca0ad4752788e",
+        "digest": "140e4faca1af8551f99fee45b96caaa284b7b71823936082004e6d47375dc908",
         "entry_version": "0",
         "index": 0,
         "new_priority_int": "32761",
         "old_priority_int": "0",
         "op": "insert",
         "op_counter": 0,
-        "prev_digest": "6d9b2bbb721213464cffa0ff93385e79908c37d19f268a39f02eba40a42fa6d5",
+        "prev_digest": "bdf6a789e61fd0fbc2e9b5219a402a8c4eda8e2a9d09736f1c502876aa47c99e",
         "source": "zen"
       },
       "detail": "the stored examples, their scores or the group sizes differed upstream of the buffer (generation, rewards, dead groups); every draw before this point was identical"

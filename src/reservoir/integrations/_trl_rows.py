@@ -73,6 +73,18 @@ class GroupSpec(NamedTuple):
     rows: tuple[int, ...]
 
 
+NEAR_DEAD_ADVANTAGE: Final[float] = 1e-3
+"""A live group whose every |advantage| is below this is counted as near-dead.
+
+A group is replaced only when its advantages are exactly zero, which is
+exactly when it contributes no gradient. TRL computes advantages in
+float32, and for a non-power-of-two group size with equal non-integer
+rewards the mean can carry a rounding residue that TRL then trains on;
+such a group is live for the loss and is therefore kept, but it is
+counted so the condition is visible in the adapter's statistics.
+"""
+
+
 class RowConversion(NamedTuple):
     """Result of ``rows_to_groups``: the groups to store plus what was left out."""
 
@@ -81,6 +93,7 @@ class RowConversion(NamedTuple):
     dead_groups: int
     skipped_rows: int            # rows of live groups with an empty completion mask
     clamped_logprobs: int        # tiny positive logprobs clamped to 0
+    near_dead_groups: int = 0    # live groups with every |advantage| below NEAR_DEAD_ADVANTAGE
 
 
 # ---------------------------------------------------------------------------
@@ -243,19 +256,21 @@ def rows_to_groups(
     cols = _columns(output, logprobs)
     groups: list[GroupSpec] = []
     dead_rows: list[int] = []
-    skipped = clamped = 0
+    skipped = clamped = near_dead = 0
     for g in range(batch // num_generations):
         rows = range(g * num_generations, (g + 1) * num_generations)
         if all(cols.advantages[r] == 0.0 for r in rows):
             dead_rows.extend(rows)
             continue
+        if all(abs(cols.advantages[r]) < NEAR_DEAD_ADVANTAGE for r in rows):
+            near_dead += 1
         rollouts, kept, n_skipped, n_clamped = _group_rollouts(cols, rows, g, step)
         skipped += n_skipped
         clamped += n_clamped
         if rollouts:
             groups.append(GroupSpec(prompt_id_of(cols.prompts[rows.start]), tuple(rollouts), tuple(kept)))
     return RowConversion(
-        tuple(groups), tuple(dead_rows), len(dead_rows) // num_generations, skipped, clamped
+        tuple(groups), tuple(dead_rows), len(dead_rows) // num_generations, skipped, clamped, near_dead
     )
 
 
@@ -407,6 +422,31 @@ def _write_row(new: dict, r: int, rollout: Rollout, adv: float, pad_token_id: in
     new["advantages"][r] = adv
 
 
+def verify_written_rows(output: dict, rows: Sequence[int], rollouts: Sequence[Rollout],
+                        advantages: Sequence[float]) -> None:
+    """Re-read ``rows`` of ``output`` and confirm each holds exactly its rollout.
+
+    Prompt ids under the prompt mask, completion ids and behavior logprobs
+    under the completion mask, and the advantage must all equal what the
+    rollout and the caller supplied. A padding or masking mistake in
+    ``write_rows`` is a ``ValueError`` here, before any witness is written.
+    """
+    for r, rollout, adv in zip(rows, rollouts, advantages):
+        pmask = output["prompt_mask"][r].bool()
+        cmask = output["completion_mask"][r].bool()
+        prompt = output["prompt_ids"][r][pmask].tolist()
+        tokens = output["completion_ids"][r][cmask].tolist()
+        logps = output["old_per_token_logps"][r][cmask].tolist()
+        if prompt != list(rollout.metadata["prompt_ids"]):
+            raise ValueError(f"row {r}: written prompt ids differ from the replayed rollout's")
+        if tokens != list(rollout.tokens):
+            raise ValueError(f"row {r}: written completion ids differ from the replayed rollout's tokens")
+        if any(abs(a - b) > 0.0 for a, b in zip(logps, rollout.logprobs)) or len(logps) != len(rollout.logprobs):
+            raise ValueError(f"row {r}: written behavior logprobs differ from the replayed rollout's")
+        if float(output["advantages"][r]) != float(torch.tensor(adv, dtype=output["advantages"].dtype)):
+            raise ValueError(f"row {r}: written advantage {float(output['advantages'][r])} is not {adv}")
+
+
 __all__ = [
     "MAX_POSITIVE_LOGPROB",
     "GroupSpec",
@@ -417,5 +457,6 @@ __all__ = [
     "prompt_id_of",
     "rows_to_groups",
     "suffix_mask_lengths",
+    "verify_written_rows",
     "write_rows",
 ]

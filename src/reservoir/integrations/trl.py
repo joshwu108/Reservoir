@@ -119,6 +119,9 @@ first access through ``build_trainer_class``, which imports TRL.
 from __future__ import annotations
 
 import functools
+import hashlib
+import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Optional, Union
@@ -127,8 +130,15 @@ import torch
 
 from reservoir.durable_rollout import DurableRolloutBuffer
 from reservoir.integrations._trl_compat import require_trl
-from reservoir.integrations._trl_rows import RowConversion, rows_to_groups, write_rows
-from reservoir.priorities import DEFAULT_EPSILON, PriorityStrategy, _require_epsilon
+from reservoir.integrations._trl_rows import RowConversion, rows_to_groups, verify_written_rows, write_rows
+from reservoir.integrations._trl_telemetry import (
+    StepTelemetry,
+    choose_declines,
+    log_metrics,
+    sequence_log_ratios,
+    summarize,
+)
+from reservoir.priorities import DEFAULT_EPSILON, PriorityStrategy, ReplaySignal, _require_epsilon, validated_rescore
 from reservoir.rollout import Rollout, RolloutGroup
 from reservoir.rollout_attest import AttestTarget
 from reservoir.rollout_buffer import RolloutBatch, RolloutBuffer
@@ -153,6 +163,7 @@ UNSUPPORTED_OUTPUT_KEYS: Final[tuple[str, ...]] = (
 STAT_NAMES: Final[tuple[str, ...]] = (
     "hook_calls", "ingested_rows", "ingested_groups", "dead_groups", "skipped_rows",
     "clamped_logprobs", "replaced_rows", "logprob_forwards", "dropped_sampling_logprobs",
+    "near_dead_groups", "declined_rows", "telemetry_forwards", "rescored_rows",
 )
 
 SAMPLING_LOGPROBS_KEY: Final[str] = "sampling_per_token_logps"
@@ -200,6 +211,15 @@ class ReservoirReplay:
     manifest : path, optional
         Also write the opening of every stored row's content digest here.
         Requires ``attest``.
+    telemetry : bool
+        Measure replay health every step (default True). The log-ratio
+        statistics cost one no-grad forward over the replayed rows.
+    max_log_ratio : float, optional
+        Drift gate, off by default: decline replayed rows whose absolute
+        sequence log-ratio exceeds this. Declines are never silent.
+    max_declines_per_step : int, optional
+        With the gate on, raise if more rows than this would be declined
+        in one step.
 
     Attributes
     ----------
@@ -229,6 +249,9 @@ class ReservoirReplay:
         directory: Union[str, Path, None] = None,
         source: Optional[str] = None,
         manifest: Union[str, Path, None] = None,
+        telemetry: bool = True,
+        max_log_ratio: Optional[float] = None,
+        max_declines_per_step: Optional[int] = None,
         **rollout_buffer_kwargs: Any,
     ) -> None:
         kwargs = dict(
@@ -248,6 +271,12 @@ class ReservoirReplay:
             self.buffer = DurableRolloutBuffer(directory, attest=attest, manifest=manifest, **kwargs)
         self.source = source
         self.beta = float(beta)
+        self.telemetry = bool(telemetry)
+        if max_log_ratio is not None and (not isinstance(max_log_ratio, (int, float)) or max_log_ratio <= 0):
+            raise ValueError(f"max_log_ratio must be a positive number or None, got {max_log_ratio!r}")
+        self.max_log_ratio = float(max_log_ratio) if max_log_ratio is not None else None
+        self.max_declines_per_step = max_declines_per_step
+        self.last_telemetry: Optional[StepTelemetry] = None
         self.stats: dict[str, int] = {name: 0 for name in STAT_NAMES}
         self.last_replay: Optional[RolloutBatch] = None
 
@@ -278,8 +307,9 @@ class ReservoirReplay:
         if step > self.buffer.current_version:
             self.buffer.advance(step)
         if not conversion.dead_rows or self.buffer.size == 0 or self.buffer.total == 0:
+            self._telemetry(trainer, step, None, [], [], output["advantages"].size(0), conversion, 0)
             return output
-        return self._replay(output, trainer, step, logprobs, conversion.dead_rows)
+        return self._replay(output, trainer, step, logprobs, conversion)
 
     def _drop_unused_sampling_logprobs(self, output: dict, trainer: Any) -> dict:
         """Remove vLLM's sampling logprobs when nothing downstream reads them.
@@ -350,29 +380,97 @@ class ReservoirReplay:
         self.stats["ingested_rows"] += sum(len(group.rollouts) for group in conversion.groups)
         self.stats["ingested_groups"] += len(conversion.groups)
         self.stats["dead_groups"] += conversion.dead_groups
+        self.stats["near_dead_groups"] += conversion.near_dead_groups
         self.stats["skipped_rows"] += conversion.skipped_rows
         self.stats["clamped_logprobs"] += conversion.clamped_logprobs
         return conversion
 
     def _replay(
-        self, output: dict, trainer: Any, step: int, logprobs: torch.Tensor, dead_rows: tuple[int, ...]
+        self, output: dict, trainer: Any, step: int, logprobs: torch.Tensor, conversion: RowConversion
     ) -> dict:
-        """Sample one rollout per dead row and write them into the batch.
+        """Sample one rollout per dead row, write them in, gate, verify, witness, measure.
 
         ``write_rows`` recomputes ``num_items_in_batch`` from the final
         mask; with a single process that is the value TRL would gather.
         """
+        dead_rows = conversion.dead_rows
         batch = self.buffer.sample(len(dead_rows), current_version=step)
-        advantages = [
-            rollout.reward * float(weight) for rollout, weight in zip(batch.rollouts, batch.is_weights)
-        ]
+        weighted = [r.reward * float(w) for r, w in zip(batch.rollouts, batch.is_weights)]
         with_logprobs = output if "old_per_token_logps" in output else {**output, "old_per_token_logps": logprobs}
-        new = write_rows(
-            with_logprobs, dead_rows, batch.rollouts, advantages, trainer._tokenizer.pad_token_id
-        )
+        pad = trainer._tokenizer.pad_token_id
+        provisional = write_rows(with_logprobs, dead_rows, batch.rollouts, weighted, pad)
+        ratios = self._log_ratios(provisional, list(dead_rows), trainer)
+        declined = choose_declines(ratios, self.max_log_ratio, self.max_declines_per_step)
+        declined_set = set(declined)
+        kept = [k for k in range(len(dead_rows)) if k not in declined_set]
+        if declined:
+            new = write_rows(with_logprobs, [dead_rows[k] for k in kept], [batch.rollouts[k] for k in kept],
+                             [weighted[k] for k in kept], pad) if kept else with_logprobs
+        else:
+            new = provisional
+        rows = [dead_rows[k] for k in kept]
+        verify_written_rows(new, rows, [batch.rollouts[k] for k in kept], [weighted[k] for k in kept])
+        self.buffer.witness_batch(batch, step=step, batch_rows=new["advantages"].size(0), rows=rows,
+                                  tensor_digest=tensor_digest(new), declined=declined)
+        # Telemetry describes the sampled batch and is recomputed by the checker from the live
+        # slots, so it is written before any declined entry is evicted.
+        self._telemetry(trainer, step, batch, ratios, kept, new["advantages"].size(0), conversion, len(declined))
+        # A slot drawn more than once is evicted only if every draw of it was declined.
+        for slot in sorted({batch.indices[k] for k in declined} - {batch.indices[k] for k in kept}):
+            self.buffer.evict(slot, "drift")
+        self._rescore(batch, kept, weighted, ratios, step)
         self.last_replay = batch
-        self.stats["replaced_rows"] += len(dead_rows)
+        self.stats["replaced_rows"] += len(kept)
+        self.stats["declined_rows"] += len(declined)
         return new
+
+    def _rescore(self, batch: RolloutBatch, kept: list[int], weighted: list[float], ratios: list[float],
+                 step: int) -> None:
+        """Ask the strategy for new priorities of the placed rollouts; write them as updates.
+
+        A slot drawn more than once is rescored once, from its first
+        placement. Declined draws are not rescored (their entries are gone).
+        """
+        strategy = self.buffer.priority
+        indices: list[int] = []
+        scores: list[float] = []
+        seen: set[int] = set()
+        for k in kept:
+            slot = batch.indices[k]
+            if slot in seen:
+                continue
+            seen.add(slot)
+            ratio = ratios[k] if ratios else None
+            signal = ReplaySignal(
+                advantage=weighted[k], is_weight=float(batch.is_weights[k]),
+                log_ratio=ratio if ratio is not None and math.isfinite(ratio) else None,
+                age=self.buffer.current_version - batch.model_versions[k], step=step,
+            )
+            value = validated_rescore(strategy, batch.rollouts[k], batch.groups[k], signal)
+            if value is not None:
+                indices.append(slot)
+                scores.append(value)
+        if indices:
+            self.buffer.update_priorities(indices, scores)
+            self.stats["rescored_rows"] += len(indices)
+
+    def _log_ratios(self, output: dict, rows: list[int], trainer: Any) -> list[float]:
+        """Sequence log-ratios of the replayed rows, when telemetry or the gate needs them."""
+        if not rows or (not self.telemetry and self.max_log_ratio is None):
+            return []
+        self.stats["telemetry_forwards"] += 1
+        return sequence_log_ratios(output, rows, trainer)
+
+    def _telemetry(self, trainer: Any, step: int, batch: Optional[RolloutBatch], ratios: list[float],
+                   kept: list[int], batch_rows: int, conversion: RowConversion, declined: int) -> None:
+        """Summarise the step, log it to the trainer and write the telemetry record."""
+        if not self.telemetry:
+            return
+        point = summarize(batch, self.buffer.current_version, ratios, kept, batch_rows,
+                          conversion.dead_groups, conversion.near_dead_groups, declined)
+        self.last_telemetry = point
+        log_metrics(trainer, point)
+        self.buffer.record_telemetry(step, point.counts(), batch, point.reported())
 
     def close(self) -> None:
         """Close the attestation file, if one was opened."""
@@ -381,6 +479,32 @@ class ReservoirReplay:
     def __repr__(self) -> str:
         source = f", source={self.source!r}" if self.source is not None else ""
         return f"ReservoirReplay({self.buffer!r}, beta={self.beta}{source})"
+
+
+TENSOR_DIGEST_KEYS: Final[tuple[str, ...]] = (
+    "prompt_ids", "prompt_mask", "completion_ids", "completion_mask", "advantages", "old_per_token_logps",
+)
+
+
+def tensor_digest(output: dict) -> str:
+    """BLAKE2b-256 over the final batch tensors the loss consumes.
+
+    Each tensor in ``TENSOR_DIGEST_KEYS`` that the batch has (and
+    ``ref_per_token_logps`` when present) is fed as ``name|shape|kind`` followed by its values in a
+    fixed-width little-endian encoding: integer tensors as int64, float
+    tensors as float64. The digest therefore depends on the values and the
+    padded shape, not on dtype or device, and a holder of the batch can
+    recompute it without this package.
+    """
+    h = hashlib.blake2b(digest_size=32, person=b"batch-tensors\x00\x00")
+    keys = [k for k in TENSOR_DIGEST_KEYS + ("ref_per_token_logps",) if k in output]
+    for key in keys:
+        t = output[key].detach().cpu().contiguous()
+        kind = "f64" if t.is_floating_point() else "i64"
+        h.update(f"{key}|{'x'.join(str(d) for d in t.shape)}|{kind}\n".encode())
+        t = t.to(torch.float64) if t.is_floating_point() else t.to(torch.int64)
+        h.update(t.numpy().astype("<f8" if kind == "f64" else "<i8", copy=False).tobytes())
+    return h.hexdigest()
 
 
 class ReservoirReplayMixin:
@@ -409,19 +533,87 @@ def assert_hook_ran(replay: ReservoirReplay, global_step: int) -> None:
         )
 
 
+def checkpoint_tag(global_step: int) -> str:
+    return f"step-{int(global_step)}"
+
+
+def trainer_checkpoint_steps(output_dir) -> Optional[set[int]]:
+    """Steps of the ``checkpoint-N`` directories under ``output_dir``, or None if it cannot be listed."""
+    if output_dir is None:
+        return None
+    root = Path(output_dir)
+    if not root.is_dir():
+        return None
+    steps = set()
+    for entry in root.iterdir():
+        name = entry.name
+        if entry.is_dir() and name.startswith("checkpoint-") and name[len("checkpoint-"):].isdigit():
+            steps.add(int(name[len("checkpoint-"):]))
+    return steps
+
+
+def bind_checkpoint(replay: ReservoirReplay, global_step: int, output_dir=None) -> None:
+    """When the trainer saves a checkpoint, snapshot the durable buffer under the same step.
+
+    With ``output_dir`` the buffer's checkpoints are pruned to the steps the
+    trainer still has (it rotates its own under ``save_total_limit`` before
+    this is called), so the buffer directory does not grow without bound.
+    A buffer without a directory has nothing to bind; the call is a no-op.
+    """
+    if not isinstance(replay.buffer, DurableRolloutBuffer):
+        return
+    replay.buffer.checkpoint(checkpoint_tag(global_step))
+    steps = trainer_checkpoint_steps(output_dir)
+    if steps is not None:
+        replay.buffer.prune_checkpoints({checkpoint_tag(n) for n in steps | {global_step}})
+
+
+def resume_from_checkpoint(replay: ReservoirReplay, global_step: int) -> None:
+    """When training (re)starts at ``global_step > 0``, rewind the buffer to that step's snapshot.
+
+    Without the rewind the buffer would carry every operation the crashed
+    run logged after the checkpoint while the model restarts before them.
+    A durable buffer with no snapshot for the step is an error, so a resume
+    cannot silently continue from the wrong point; a non-durable buffer
+    cannot resume and raises if asked to.
+    """
+    if global_step <= 0:
+        return
+    tag = checkpoint_tag(global_step)
+    if not isinstance(replay.buffer, DurableRolloutBuffer):
+        raise RuntimeError(
+            f"resuming at step {global_step} needs a durable buffer: pass ReservoirReplay(directory=...)"
+        )
+    if tag not in replay.buffer.checkpoints():
+        raise RuntimeError(
+            f"resuming at step {global_step} but the buffer has no checkpoint {tag!r} "
+            f"(available: {replay.buffer.checkpoints()}); the buffer directory does not belong to this run"
+        )
+    replay.buffer.restore_checkpoint(tag)
+
+
 @functools.lru_cache(maxsize=None)
 def build_trainer_class() -> type:
     """Import TRL (checked by ``require_trl``) and build ``ReservoirGRPOTrainer``."""
     support = require_trl()
 
     class ReservoirReplayCallback(support.trainer_callback):  # type: ignore[misc,valid-type]
-        """Fails the run early if the replay hook is not being called."""
+        """Fails the run early if the replay hook is not being called; binds a durable
+        buffer to the trainer's checkpoints (see ``bind_checkpoint`` and ``resume_from_checkpoint``)."""
 
         def __init__(self, replay: ReservoirReplay) -> None:
             self.replay = replay
 
         def on_step_end(self, args, state, control, **kwargs):
             assert_hook_ran(self.replay, state.global_step)
+            return control
+
+        def on_save(self, args, state, control, **kwargs):
+            bind_checkpoint(self.replay, state.global_step, getattr(args, "output_dir", None))
+            return control
+
+        def on_train_begin(self, args, state, control, **kwargs):
+            resume_from_checkpoint(self.replay, state.global_step)
             return control
 
     class ReservoirGRPOTrainer(ReservoirReplayMixin, support.grpo_trainer):  # type: ignore[misc,valid-type]
@@ -462,7 +654,13 @@ __all__ = [
     "ReservoirReplay",
     "ReservoirReplayMixin",
     "StoredAdvantagePriority",
+    "TENSOR_DIGEST_KEYS",
+    "tensor_digest",
     "UNSUPPORTED_OUTPUT_KEYS",
     "assert_hook_ran",
+    "bind_checkpoint",
     "build_trainer_class",
+    "checkpoint_tag",
+    "resume_from_checkpoint",
+    "trainer_checkpoint_steps",
 ]

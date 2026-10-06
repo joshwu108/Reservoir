@@ -12,7 +12,8 @@ about crash atomicity and is recorded as a failure, not a pass.
 Operation types:
   - insert, update            (classic DurableBuffer)
   - rollout_add_group,        (DurableRolloutBuffer; the add forces stale
-    rollout_update             evictions and a rebase inside one operation)
+    rollout_update,            evictions and a rebase inside one operation;
+    rollout_restore            the restore rewinds to a checkpoint)
 Cut points:
   - after_intent_write
   - after_intent_fsync
@@ -211,7 +212,28 @@ def _verdict(op_type, cut_point, seed, recovered, pre_state, post_state, cut_fir
 # Rollout buffer variant
 # ---------------------------------------------------------------------------
 
-_ROLLOUT_KW = dict(capacity=8, half_life=1, max_policy_age=2)
+_ROLLOUT_KW = dict(capacity=8, half_life=1, max_policy_age=2, compact_every=1)
+
+# The rollout buffer logs each command and, with compact_every=1, snapshots
+# right after, so its crashing operation passes the log cuts and then the
+# snapshot protocol's cuts. The classic buffer has only the latter.
+ROLLOUT_CUT_POINTS = [
+    "mid_wal_write", "after_wal_write", "after_wal_fsync",
+    "after_intent_write", "after_intent_fsync", "mid_segment_write", "after_segment_fsync",
+    "before_rename", "after_rename_before_dir_fsync", "after_snapshot_before_wal_reset", "after_dir_fsync",
+]
+# Restoring a checkpoint writes a snapshot (the protocol's cuts) and then
+# resets the log; no command is appended, so the WAL cuts cannot fire there.
+RESTORE_CUT_POINTS = [
+    "after_intent_write", "after_intent_fsync", "mid_segment_write", "after_segment_fsync",
+    "before_rename", "after_rename_before_dir_fsync", "after_dir_fsync", "after_restore_before_wal_reset",
+]
+
+
+def _cuts_for(op_type: str) -> list[str]:
+    if op_type == "rollout_restore":
+        return RESTORE_CUT_POINTS
+    return ROLLOUT_CUT_POINTS if op_type.startswith("rollout_") else CUT_POINTS
 
 
 def _rollouts(rewards):
@@ -223,7 +245,9 @@ def _rollout_prepare(directory: str, seed: int) -> None:
     """Two groups at versions 0 and 1; the add at version 4 will expire both and rebase."""
     buf = DurableRolloutBuffer(directory, seed=seed, **_ROLLOUT_KW)
     buf.add_group("g0", 0, _rollouts([1.0, 0.0, 0.5]))
+    buf.checkpoint("a")                      # what rollout_restore rewinds to
     buf.add_group("g1", 1, _rollouts([0.0, 1.0]))
+    buf.sample(2, current_version=1)
     buf.close()
 
 
@@ -232,6 +256,8 @@ def _rollout_apply(directory: str, seed: int, op_type: str) -> None:
     buf = DurableRolloutBuffer(directory, seed=seed, **_ROLLOUT_KW)
     if op_type == "rollout_add_group":
         buf.add_group("g4", 4, _rollouts([1.0, 0.0]))
+    elif op_type == "rollout_restore":
+        buf.restore_checkpoint("a")
     else:
         buf.update_priorities([0, 1], [0.9, 0.1])
     buf.close()
@@ -281,7 +307,7 @@ def run_rollout_crash_test(op_type: str, cut_point: str, seed: int, base_tmpdir:
 # Full campaign
 # ---------------------------------------------------------------------------
 
-OP_TYPES = ["insert", "update", "rollout_add_group", "rollout_update"]
+OP_TYPES = ["insert", "update", "rollout_add_group", "rollout_update", "rollout_restore"]
 
 CUT_POINTS = [
     "after_intent_write",
@@ -309,7 +335,7 @@ def run_campaign() -> dict:
 
     with tempfile.TemporaryDirectory(prefix="reservoir_crash_") as tmpdir:
         for op in OP_TYPES:
-            for cut in CUT_POINTS:
+            for cut in _cuts_for(op):
                 for seed in SEEDS:
                     runner = run_rollout_crash_test if op.startswith("rollout_") else run_crash_test
                     result = runner(op, cut, seed, tmpdir)
@@ -343,7 +369,7 @@ def main() -> None:
     print(f"Operations: {OP_TYPES}")
     print(f"Cut points: {len(CUT_POINTS)}")
     print(f"Seeds: {SEEDS}")
-    print(f"Total tests: {len(OP_TYPES) * len(CUT_POINTS) * len(SEEDS)}")
+    print(f"Total tests: {sum(len(_cuts_for(op)) for op in OP_TYPES) * len(SEEDS)}")
     print()
 
     campaign = run_campaign()

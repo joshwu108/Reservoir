@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install
+        # The atari extra (ROM download) is not needed by any test; CPU torch keeps the install small.
+        env:
+          UV_TORCH_BACKEND: cpu
+        run: uv sync --extra classic --extra trl --extra prefcheck --extra anchor
+      - name: Import isolation of the checker
+        run: make check-imports
+      - name: Tests
+        # Durability is claimed for macOS/APFS only (docs/nonclaims.md §6); the
+        # Linux job exercises the protocol without making a durability claim.
+        run: uv run --no-sync pytest tests -q -x --ignore=tests/test_reproducible_demo.py
+      - name: Forgery campaign
+        run: uv run --no-sync python -m campaigns.mutation
+
+  tla:
+    name: TLA+ model check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Correct protocol holds, no-parent-fsync variant violates I1
+        run: bash spec/check.sh --with-counterexample
