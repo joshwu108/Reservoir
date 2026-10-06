@@ -20,8 +20,11 @@ a separate empirical question not addressed here.
 
 ### 3. Distributed Buffers
 
-This is a single-process, single-machine buffer. No claims about distributed
-experience replay, multi-actor systems, or network-replicated buffers are made.
+The buffer itself is single-owner: one process holds it and writes its log.
+The TRL adapter lets several training processes share that one buffer by
+gathering their groups to rank 0 (§21), under DDP only; sharded strategies
+(DeepSpeed, FSDP, Megatron) are refused. No claims about network-replicated
+buffers, multi-actor replay or more than one writer are made.
 
 ### 4. Security Boundary
 
@@ -61,7 +64,7 @@ mismatch rather than accept it. The declared value is the producer's.
 ### 8. TLA+ Model Scope
 
 The TLA+ model (`spec/ReplayLifecycle.tla`) uses a finite scope (capacity 2,
-2-value priority set, ≤3 operations). It establishes the safety properties
+three-value priority set {0, 1, 2}, ≤3 operations). It establishes the safety properties
 within that finite scope only. It does not constitute a proof for all possible
 buffer sizes, priority values, or operation sequences. It is a falsification tool:
 if the model checker finds a counterexample in the small scope, the protocol is wrong.
@@ -140,7 +143,7 @@ not interpreted, and TRL's reward statistics (`reward`, `reward_std`,
 `frac_reward_zero_std`) are computed before the hook replaces dead rows, so
 they describe the generated batch rather than the batch trained on.
 
-The batch witness (version 0.5.0) closes the gap between the sampled batch
+The batch witness (version 0.6.0) closes the gap between the sampled batch
 and the batch the adapter hands back up to the adapter boundary. The
 adapter checks the written rows against the sampled rollouts and refuses
 otherwise; the checker proves the adapter's declared row-to-draw mapping
@@ -246,7 +249,8 @@ accelerator of two and four ranks in one interpreter, by parity with the
 single-process adapter on the concatenated batch, and on real
 `torch.distributed` process groups of two ranks through
 `benchmarks/modal/trl_replay_distributed.py`: two CPU processes on the
-gloo backend (`torchrun`, 40 steps, run locally) and two A10G GPUs on
+gloo backend (`torchrun`, 40 steps, run locally; that run left no
+committed artifact) and two A10G GPUs on
 NCCL (`accelerate launch --num_processes 2 --multi_gpu`, 40 steps, on
 Modal); the committed record of the GPU run is re-verified by
 `tests/test_trl_results.py`. What those runs establish: every rank made
@@ -289,9 +293,14 @@ trained fresh is the `entry_version` of its insert (the trainer's step in
 the TRL adapter), which the transcript reports; the row it occupied then
 is not in the log. The manifest's per-reward-function values are the
 adapter's statement, numeric only and outside the content digest: the log
-does not commit to them, a changed or dropped value passes the checker
-(the mutation campaign measures this), and the adapter wiring that
-supplies them to the row conversion is not yet in `ReservoirReplay`.
+does not commit to them, and a changed or dropped value passes the checker
+(the mutation campaign measures this). The TRL adapter supplies them from
+the trainer's `_calculate_rewards`; the verl adapter records the summed
+score only. The values are written as JSON floats whose bytes are
+canonical only by CPython's shortest-repr rule, not by the format, so a
+manifest written by another runtime may differ byte for byte while
+carrying the same values. A quarantine on a buffer with no attestation log
+keeps no record of the predicate or reason (the buffer warns).
 
 ### 23. Offline Replay
 

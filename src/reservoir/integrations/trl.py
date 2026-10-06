@@ -144,7 +144,7 @@ import torch
 
 from reservoir.durable_rollout import DurableRolloutBuffer
 from reservoir.integrations._trl_compat import require_trl
-from reservoir.integrations._trl_distributed import OWNER_RANK, Communicator, communicator_for, mix_distributed
+from reservoir.integrations._trl_distributed import OWNER_RANK, owner_step, Communicator, communicator_for, mix_distributed
 from reservoir.integrations._trl_lifecycle import (
     RANK_ENV_VARS,
     bind_checkpoint,
@@ -216,12 +216,39 @@ class StoredAdvantagePriority(PriorityStrategy):
 
 
 def _validated_gate(max_log_ratio: Optional[float]) -> Optional[float]:
-    """The drift gate threshold as a float, or None when off; anything else is a ValueError."""
+    """The drift gate threshold as a finite positive float, or None when off; anything else is a ValueError."""
     if max_log_ratio is None:
         return None
-    if not isinstance(max_log_ratio, (int, float)) or max_log_ratio <= 0:
-        raise ValueError(f"max_log_ratio must be a positive number or None, got {max_log_ratio!r}")
+    if (isinstance(max_log_ratio, bool) or not isinstance(max_log_ratio, (int, float))
+            or not math.isfinite(max_log_ratio) or max_log_ratio <= 0):
+        raise ValueError(f"max_log_ratio must be a finite positive number or None, got {max_log_ratio!r}")
     return float(max_log_ratio)
+
+
+def _validated_decline_cap(max_declines_per_step: Optional[int]) -> Optional[int]:
+    """The per-step decline cap as a non-negative int, or None when uncapped."""
+    if max_declines_per_step is None:
+        return None
+    if isinstance(max_declines_per_step, bool) or not isinstance(max_declines_per_step, int) or max_declines_per_step < 0:
+        raise ValueError(f"max_declines_per_step must be a non-negative int or None, got {max_declines_per_step!r}")
+    return max_declines_per_step
+
+
+SHARDED_STRATEGIES: Final[tuple[str, ...]] = ("DEEPSPEED", "FSDP", "MEGATRON_LM")
+"""Accelerate distributed types the adapter refuses: the owner-only telemetry and drift-gate forward
+needs the whole model on rank 0, which a sharded strategy does not provide (only DDP is verified)."""
+
+
+def refuse_sharded(accelerator: Any, num_processes: int) -> None:
+    """Raise if ``accelerator`` shards parameters across more than one process."""
+    kind = getattr(accelerator, "distributed_type", None)
+    name = getattr(kind, "name", None) or (str(kind) if kind is not None else "")
+    if num_processes > 1 and any(tag in name.upper() for tag in SHARDED_STRATEGIES):
+        raise RuntimeError(
+            f"ReservoirReplay does not support the {name} strategy: rank 0 alone runs the telemetry and "
+            "drift-gate forward over the gathered batch, which under sharded parameters would wait on an "
+            "all-gather the other ranks never join. Use DDP (the verified configuration)."
+        )
 
 
 class ReservoirReplay:
@@ -325,7 +352,8 @@ class ReservoirReplay:
         self.beta = float(beta)
         self.telemetry = bool(telemetry)
         self.max_log_ratio = _validated_gate(max_log_ratio)
-        self.max_declines_per_step = max_declines_per_step
+        self.max_declines_per_step = _validated_decline_cap(max_declines_per_step)
+        self._pending_rewards: Optional[tuple[tuple[str, ...], torch.Tensor]] = None  # from _calculate_rewards
         self.last_telemetry: Optional[StepTelemetry] = None
         self.stats: dict[str, int] = {name: 0 for name in STAT_NAMES}
         self.last_replay: Optional[RolloutBatch] = None
@@ -373,16 +401,20 @@ class ReservoirReplay:
         """
         comm = communicator_for(accelerator)
         rank = int(comm.process_index)
+        refuse_sharded(accelerator, comm.num_processes)
         if comm.num_processes > 1:
             self._refuse_foreign_file_state(comm, rank)
         self._comm = comm
         self.rank = rank
         self._owner = rank == OWNER_RANK
-        if self._owner:
+
+        def build() -> None:
             if self._buffer is None:
                 self._buffer = self._build_buffer()
-            return
-        if self._buffer is not None:
+        # Building the buffer can fail (a bad directory, a mismatched snapshot); every rank
+        # hears about it rather than waiting for rank 0 in the first gather.
+        owner_step(comm, self._owner, build)
+        if not self._owner and self._buffer is not None:
             self._buffer.close()
             self._buffer = None
 
@@ -512,10 +544,40 @@ class ReservoirReplay:
         self.stats["logprob_forwards"] += 1
         return logprobs
 
+    def note_rewards_per_func(self, rewards_per_func: Any, reward_names: Any) -> None:
+        """Remember the per-reward-function values TRL computed for the batch about to be ingested.
+
+        ``ReservoirReplayMixin`` calls this from ``_calculate_rewards``; TRL
+        gathers the tensor across processes in rank order, which is the
+        order the owner's global batch is assembled in. Anything that is
+        not a 2-D tensor with matching names is ignored, so a trainer that
+        computes rewards differently simply records no provenance.
+        """
+        if (isinstance(rewards_per_func, torch.Tensor) and rewards_per_func.dim() == 2 and reward_names
+                and len(tuple(reward_names)) == rewards_per_func.size(1)):
+            self._pending_rewards = (tuple(str(n) for n in reward_names), rewards_per_func.detach())
+        else:
+            self._pending_rewards = None
+
+    def _take_rewards_per_func(self, batch_rows: int) -> tuple[Optional[tuple[str, ...]], Optional[torch.Tensor]]:
+        """The pending per-function rewards if they describe this batch, else none; always consumed."""
+        pending, self._pending_rewards = self._pending_rewards, None
+        if pending is None:
+            return None, None
+        names, values = pending
+        if values.size(0) != batch_rows:
+            raise ValueError(
+                f"_calculate_rewards produced {values.size(0)} rows of rewards but the batch has {batch_rows}; "
+                "reward provenance cannot be attributed to rows"
+            )
+        return names, values.to("cpu", torch.float64)
+
     def _ingest(self, output: dict, trainer: Any, step: int, logprobs: torch.Tensor) -> RowConversion:
         """Convert the batch and add every live group to the buffer."""
+        names, values = self._take_rewards_per_func(int(output["advantages"].size(0)))
         conversion = rows_to_groups(
-            output, num_generations=trainer.num_generations, step=step, logprobs=logprobs
+            output, num_generations=trainer.num_generations, step=step, logprobs=logprobs,
+            reward_names=names, rewards_per_func=values,
         )
         for group in conversion.groups:
             self.buffer.add_group(group.prompt_id, step, group.rollouts, source=self.source)
@@ -673,9 +735,15 @@ class ReservoirReplayMixin:
 
     replay_buffer: ReservoirReplay
 
+    def _calculate_rewards(self, *args, **kwargs):  # type: ignore[override]
+        rewards_per_func = super()._calculate_rewards(*args, **kwargs)  # type: ignore[misc]
+        self.replay_buffer.note_rewards_per_func(rewards_per_func, getattr(self, "reward_func_names", None))
+        return rewards_per_func
+
     def _generate_and_score_completions(self, inputs):  # type: ignore[override]
         output = super()._generate_and_score_completions(inputs)  # type: ignore[misc]
         if not self.model.training:  # type: ignore[attr-defined]
+            self.replay_buffer.note_rewards_per_func(None, None)
             return output
         return self.replay_buffer.mix(output, self)
 

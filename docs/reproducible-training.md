@@ -121,7 +121,7 @@ python -m checker.diff a/attest.jsonl c/attest.jsonl
 | `config` | the `decay_config` records differ, or two sample records have identical draws and slots but different weights (a different `beta`) |
 | `data` | the first differing record is an insert or update, the runs perform different operations at that point (other than the cases below), or two sample records have different sizes: the stored examples, their scores or the group sizes differed upstream; every draw before it was identical |
 | `schedule` | the runs advanced through model versions on a different cadence |
-| `sampler` | two sample records of the same size on an identical prefix differ: the draws differed on identical state. A 0.5.0 log records the seed and buffer id, so two seeds differ at record 0 as `config`; this class is reachable only for older logs or by a Reservoir defect |
+| `sampler` | two sample records of the same size on an identical prefix differ: the draws differed on identical state. A format-3 log (0.6.0) records the seed and buffer id, so two seeds differ at record 0 as `config`; this class is reachable only for older logs or by a Reservoir defect |
 | `internal` | an evict or rebase differs on identical state, or a rebase appears where the other log has a different record; both are deterministic and this must never happen |
 | `truncated` | one log is a prefix of the other |
 

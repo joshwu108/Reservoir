@@ -173,9 +173,9 @@ The demo runs the TRL integration three times on CPU and compares:
 
 ```bash
 uv run python -m demo.reproducible_grpo        # output abridged
-# run a: seed=42 buffer_seed=0 records=102 replaced_rows=8 head=f81a9b4b6aeb1335…
-# run b: seed=42 buffer_seed=0 records=102 replaced_rows=8 head=f81a9b4b6aeb1335…
-# run c: seed=43 buffer_seed=0 records=102 replaced_rows=8 head=eb6853bf6f813344…
+# run a: seed=42 buffer_seed=0 records=116 replaced_rows=8 head=78f14c388f625c71…
+# run b: seed=42 buffer_seed=0 records=116 replaced_rows=8 head=78f14c388f625c71…
+# run c: seed=43 buffer_seed=0 records=116 replaced_rows=8 head=0a705cdd155159a2…
 # a vs b (same seeds): identical
 # a vs c (different data seed): first difference at record 1 (data) ... differing fields: content_digest
 ```
@@ -244,8 +244,9 @@ every 256 commands, so per-operation cost does not grow with history: in
 Apple silicon) an `add_group` took 4.5 ms in the first tenth of the run and
 5.7 ms in the last, against 0.4 and 1.0 ms in memory. The snapshot does grow,
 because the attestation log is part of the state: compaction took 0.6 s at the
-median and 0.9 s by the end of that run, 3.4 ms per operation amortised, and
-reopening replayed in 5.3 s.
+median and 0.9 s by the end of that run (2.3 ms per operation amortised at the
+median, 3.4 ms at the end), and reopening replayed in 5.3 s. Measured on the
+0.5.0 code; the 0.6.0 changes to that path are limited to failure handling.
 `buf.checkpoint("step-100")` and `buf.restore_checkpoint("step-100")` bind the
 buffer to a training checkpoint; the TRL adapter does this on every save
 (pruning buffer checkpoints to the ones the trainer kept) and rewinds on
@@ -297,8 +298,10 @@ log-ratio is too large; declines are recorded, never silent. After an incident,
 `buffer.quarantine(predicate, reason)` evicts every matching entry with a record
 that carries the predicate text and the reason, and
 `reservoir-transcript --blast-radius <digest>` lists every step and training-batch
-row the example (or, with the manifest, its prompt) reached. The manifest can carry
-each example's per-reward-function values, numeric only and outside the digest. Replayed rows carry their
+row the example (or, with the manifest, its prompt) reached. The manifest carries
+each example's per-reward-function values, numeric only and outside the digest; the
+TRL adapter takes them from the trainer's own reward computation (the verl adapter
+records the summed score only). The committed GPU manifests predate this wiring. Replayed rows carry their
 behavior logprobs, so the loss applies a real off-policy ratio, and their
 advantages are multiplied by the importance-sampling weight. Versions,
 half-life and `max_policy_age` are counted in optimizer steps. Every insertion
@@ -453,13 +456,13 @@ report.to_html("forgetting_report.html")
 | Claim | Evidence |
 |-------|----------|
 | Sampling is deterministic and reproducible under a keyed draw | Property tests against a brute-force reference; the log records seed, buffer id and `beta`, and the checker recomputes every draw and importance weight from them |
-| The durable buffers are failure-atomic under SIGKILL | 315/315 crash tests across both buffers: every child was killed at its armed cut point (the campaign fails a row otherwise), 240 recovered the pre-state and 75 the post-state (an unsynced write that SIGKILL leaves in the page cache recovers to the post-state; a power loss there would give the pre-state, which is also legal), zero torn; the rollout cases cross the command log and the snapshot protocol in one operation, crash mid-rebase, crash inside a quarantine of a whole group, crash inside a checkpoint restore, and crash in the two windows of the single-write snapshot install |
+| The durable buffers are failure-atomic under SIGKILL | 315/315 crash tests on macOS/APFS across both buffers: every child was killed at its armed cut point (the campaign fails a row otherwise), 240 recovered the pre-state and 75 the post-state (an unsynced write that SIGKILL leaves in the page cache recovers to the post-state; a power loss there would give the pre-state, which is also legal), zero torn; the rollout cases cross the command log and the snapshot protocol in one operation, crash mid-rebase, crash inside a quarantine of a whole group, crash inside a checkpoint restore, and crash in the two windows of the single-write snapshot install |
 | The independent checker rejects forged logs | 221/221 mutants rejected: 63 chain, draw-arithmetic and record-order forgeries (bit flips, off-by-one draws, swapped indices, non-reduced fractions, deleted, reordered and stale-suffix records), 38 age-decay protocol forgeries, 29 content-commitment forgeries (3 of them chain-consistent, invisible without the manifest), 21 draw and weight forgeries (2 of them invisible to a log that does not record its seed and `beta`), 14 batch-witness forgeries, 18 telemetry forgeries, 22 quarantine and reward-provenance forgeries (the campaign also records that a quarantine record's texts and the manifest's reward values are not committed: 4 such changes pass, by design) and 16 manifest tamperings against the offline replay (the campaign also measures that 3 tamperings of the reward-provenance values, which the log does not commit to, run and change only those fields of the output) |
 | A witnessed batch can be rebuilt as content from the log and manifest alone | `reservoir-replay-offline` emits every witnessed batch as JSON lines (rows, draws, exact importance weights, tokens, rewards, sources) importing nothing from the library; on the committed CPU and T4 reproducibility runs, runs a and b replay byte-identically and run c differs; fresh rows are listed by index only (`docs/nonclaims.md` §23) |
 | Two runs with the same inputs give one transcript | CPU demo: runs a and b byte-identical (116 records, one head digest), run c differs at record 1, classified `data`; the same triplet on a T4 with HF generation, with and without deterministic kernels, is `IDENTICAL` in both variants (`benchmarks/modal/results/repro_hf_t4_*`) |
-| The adapters survive a real trainer's call path | TRL 1.13.0 on two A10G GPUs under `accelerate launch` (40 steps, 14 dead groups replaced with 56 rows, 1019 records, manifest opens all 584 examples) and verl 0.9.1 on one T4 (12 steps, 14 dead groups replaced with 56 rows, 445 records, manifest opens all 328 examples, buffer snapshots at every trainer checkpoint); both records are re-verified by the test suite (`tests/test_trl_results.py`, `tests/test_verl_results.py`); no training-quality claim (`docs/nonclaims.md` §13) |
+| The adapters survive a real trainer's call path | TRL 1.13.0 on two A10G GPUs (the driver reports them as NVIDIA A10) under `accelerate launch` (40 steps, 14 dead groups replaced with 56 rows, 1019 records, manifest opens all 584 examples) and verl 0.9.1 on one T4 (12 steps, 14 dead groups replaced with 56 rows, 445 records, manifest opens all 328 examples, buffer snapshots at every trainer checkpoint); both records are re-verified by the test suite (`tests/test_trl_results.py`, `tests/test_verl_results.py`); no training-quality claim (`docs/nonclaims.md` §13) |
 | Attestation is cheap relative to generation | about 3× the no-attestation insert cost in memory, 6× with a manifest file; the checker verifies 10k records in 0.3 s |
-| The lifecycle protocol is safe within a finite scope | TLA+ model, 44,611 states. A no-parent-fsync variant (`spec/NoParentFsync.tla`) is written to show why the directory fsync exists; `bash spec/check.sh --with-counterexample` runs it in CI and fails unless TLC reports the violation; the CI job passes on `main` (last checked 2026-10-06). It has not been run on a developer machine |
+| The lifecycle protocol is safe within a finite scope | TLA+ model checked by TLC in CI (the state count is not recorded in the repository). A no-parent-fsync variant (`spec/NoParentFsync.tla`) is written to show why the directory fsync exists; `bash spec/check.sh --with-counterexample` runs it in CI and fails unless TLC reports the violation; the CI workflow passed on `release/0.6.0` at af4f4c6 (2026-10-06); the last pre-release run on `main` failed its macOS test job and is re-run on the next push. It has not been run on a developer machine |
 
 Reservoir reports negative results. A pre-registered search for
 decision-relevant divergence between float and exact sum-trees
@@ -481,6 +484,7 @@ What Reservoir does not claim is listed in
 pip install reservoir-replay                 # rollout buffer, attestation, checker (no dependencies)
 pip install "reservoir-replay[classic]"      # transition buffers, C extension, wrappers (numpy, torch)
 pip install "reservoir-replay[trl]"          # TRL integration
+pip install "reservoir-replay[verl]"         # verl integration (Python < 3.13)
 pip install "reservoir-replay[prefcheck]"    # preference noise detector
 pip install "reservoir-replay[anchor]"       # forgetting monitor
 pip install "reservoir-replay[atari]"        # Atari benchmark suite

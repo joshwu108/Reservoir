@@ -159,5 +159,5 @@ def run_draw_category(results: dict) -> None:
         "survive_without_draw_config": without,
         "rejected_with_draw_config": with_config,
         "statement": "a draw moved inside its leaf's range, or a reweighted sample, is invisible to a log "
-                     "that does not record seed, buffer_id and beta; a 0.5.0 log records them and both are rejected",
+                     "that does not record seed, buffer_id and beta; a format-3 log records them and both are rejected",
     }

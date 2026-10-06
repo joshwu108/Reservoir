@@ -230,7 +230,12 @@ def verify_chain(
     prev_digest = _GENESIS
     for record_idx, record in enumerate(records):
         prev_digest = _verify_link(record, record_idx, prev_digest)
-        _verify_record(record, record_idx, tree, priorities, decay, content)
+        try:
+            _verify_record(record, record_idx, tree, priorities, decay, content)
+        except CheckerError:
+            raise
+        except Exception as exc:  # a malformed field the per-record checks did not anticipate
+            raise CheckerError(f"Record {record_idx}: malformed record ({type(exc).__name__}: {exc})") from exc
 
     if decay is not None:
         decay.close_capacity_run(len(records))
@@ -239,6 +244,27 @@ def verify_chain(
     if manifest is not None:
         content.check_manifest(manifest)
     return VerifiedLog(records, capacity, content)
+
+
+def _strict_int_value(obj: object, name: str, idx: int) -> int:
+    """A JSON integer (not bool, not float) or a decimal digit string, else CheckerError.
+
+    ``int()`` alone would accept ``True``, ``1.5`` and ``" 1_0 "``; two
+    verifiers must not disagree about what a field says.
+    """
+    if not isinstance(obj, dict):
+        raise CheckerError(f"Record {idx}: expected an object with {name!r}, got {type(obj).__name__}")
+    value = obj.get(name)
+    if isinstance(value, bool) or isinstance(value, float) or value is None:
+        raise CheckerError(f"Record {idx}: {name} must be an integer, got {value!r}")
+    if isinstance(value, str) and not (value.isascii() and value.isdigit()):
+        raise CheckerError(f"Record {idx}: {name} must be an integer, got {value!r}")
+    if not isinstance(value, (int, str)):
+        raise CheckerError(f"Record {idx}: {name} must be an integer, got {value!r}")
+    try:
+        return int(value)
+    except (ValueError, OverflowError) as exc:
+        raise CheckerError(f"Record {idx}: {name} must be an integer, got {value!r}") from exc
 
 
 def _verify_link(record: dict, idx: int, prev_digest: str) -> str:
@@ -370,8 +396,8 @@ def _verify_mutation(
     """Verify a MutationRecord and update the replayed tree state."""
     try:
         pos = record["index"]
-        old_p = int(record["old_priority_int"])
-        new_p = int(record["new_priority_int"])
+        old_p = _strict_int_value(record, "old_priority_int", idx)
+        new_p = _strict_int_value(record, "new_priority_int", idx)
         op = record["op"]
     except (KeyError, ValueError, TypeError) as e:
         raise CheckerError(f"Record {idx}: malformed mutation record: {e}") from e
@@ -409,7 +435,7 @@ def _verify_sample(
 ) -> None:
     """Verify a SampleAttestation against the replayed tree state."""
     try:
-        declared_root_total = int(record["root_total"])
+        declared_root_total = _strict_int_value(record, "root_total", idx)
         samples = record["samples"]
     except (KeyError, ValueError) as e:
         raise CheckerError(f"Record {idx}: malformed sample record: {e}") from e
@@ -425,11 +451,11 @@ def _verify_sample(
     for k, s in enumerate(samples):
         try:
             leaf_index = s["leaf_index"]
-            draw_int = int(s["draw_int"])
-            prob_num = int(s["prob_num"])
-            prob_den = int(s["prob_den"])
-            is_w_num = int(s["is_weight_num"])
-            is_w_den = int(s["is_weight_den"])
+            draw_int = _strict_int_value(s, "draw_int", idx)
+            prob_num = _strict_int_value(s, "prob_num", idx)
+            prob_den = _strict_int_value(s, "prob_den", idx)
+            is_w_num = _strict_int_value(s, "is_weight_num", idx)
+            is_w_den = _strict_int_value(s, "is_weight_den", idx)
         except (KeyError, ValueError) as e:
             raise CheckerError(
                 f"Record {idx}, sample {k}: malformed entry: {e}"
@@ -500,7 +526,7 @@ def _verify_declared_draws(record: dict, idx: int, tree: _SumTree, decay: DecayS
     if not decay.cfg.get("has_draw_config"):
         decay.draw_counter += len(samples)
         return
-    root_total = int(record["root_total"])
+    root_total = _strict_int_value(record, "root_total", idx)
     n = len(decay.entries)
     positive = [tree.get(pos) for pos in decay.entries if tree.get(pos) > 0]
     min_leaf = min(positive) if positive else 0
@@ -508,7 +534,7 @@ def _verify_declared_draws(record: dict, idx: int, tree: _SumTree, decay: DecayS
     for k, s in enumerate(samples):
         counter = decay.draw_counter + k
         expected = draw_uniform_below(root_total, decay.cfg["seed"], decay.cfg["buffer_id"], counter)
-        if int(s["draw_int"]) != expected:
+        if _strict_int_value(s, "draw_int", idx) != expected:
             raise CheckerError(
                 f"Record {idx}, sample {k}: draw_int {s['draw_int']} is not the keyed draw for "
                 f"counter {counter} (expected {expected})"
@@ -516,7 +542,7 @@ def _verify_declared_draws(record: dict, idx: int, tree: _SumTree, decay: DecayS
         if min_leaf > 0:
             leaf = tree.get(s["leaf_index"])
             w = _declared_weight(n, leaf, min_leaf, root_total, beta, idx, k)
-            declared = Fraction(int(s["is_weight_num"]), int(s["is_weight_den"]))
+            declared = Fraction(_strict_int_value(s, "is_weight_num", idx), _strict_int_value(s, "is_weight_den", idx))
             if declared != w:
                 raise CheckerError(
                     f"Record {idx}, sample {k}: IS weight {declared} is not the declared formula's value {w}"
@@ -598,7 +624,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         n_records = sum(1 for line in data.strip().split("\n") if line)
         result = verify_json_lines(data, args.capacity, args.allow_truncated, manifest_text)
     except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, ArithmeticError,
-            RecursionError, CheckerError) as exc:
+            RecursionError, MemoryError, CheckerError) as exc:
         # Everything a malformed file can raise is reported as a failure, never a traceback.
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1

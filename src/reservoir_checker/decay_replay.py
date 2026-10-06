@@ -58,6 +58,8 @@ from typing import Optional
 
 # Mirrors the library's documented limit (design.md §7.5). Not imported.
 MAX_HALF_LIFE = 1024
+MAX_CAPACITY = 1 << 24
+"""Largest slot count the checker will replay; bounds the sum tree a hostile decay_config can make it allocate."""
 UINT64_BITS = 64
 
 
@@ -193,6 +195,10 @@ def parse_config(record: dict, idx: int) -> dict:
     cfg = {name: _int_field(record, name, idx) for name in _CONFIG_INT_FIELDS}
     if cfg["half_life"] < 1 or cfg["capacity"] < 1:
         raise CheckerError(f"Record {idx}: half_life and capacity must be >= 1")
+    if cfg["capacity"] > MAX_CAPACITY:
+        # The replayed sum tree is allocated from this field; the 64-bit budget alone
+        # admits capacities near 2**60, which a one-line log could use to exhaust memory.
+        raise CheckerError(f"Record {idx}: capacity {cfg['capacity']} exceeds the checker's limit of {MAX_CAPACITY}")
     if cfg["half_life"] > MAX_HALF_LIFE:
         raise CheckerError(f"Record {idx}: half_life {cfg['half_life']} exceeds {MAX_HALF_LIFE}")
     if cfg["priority_bits"] < 1 or cfg["table_frac_bits"] < 1:

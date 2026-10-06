@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Final, Optional
 
 from reservoir.durable_rollout import DurableRolloutBuffer
+from reservoir.integrations._trl_distributed import owner_step
 
 RANK_ENV_VARS: Final[tuple[str, ...]] = ("RANK", "LOCAL_RANK")
 """Set by torchrun / accelerate launch before user code runs; a non-zero value means "not rank 0"."""
@@ -201,7 +202,12 @@ def bind_checkpoint(replay: ReservoirReplay, global_step: int, output_dir=None) 
     rank but the owner.
     """
     _wait_for_all_ranks(replay)
-    if not replay.is_owner or not isinstance(replay.buffer, DurableRolloutBuffer):
+    owner_step(getattr(replay, "_comm", None), replay.is_owner,
+               lambda: _bind_on_owner(replay, global_step, output_dir))
+
+
+def _bind_on_owner(replay: ReservoirReplay, global_step: int, output_dir) -> None:
+    if not isinstance(replay.buffer, DurableRolloutBuffer):
         return
     model_checkpoint = trainer_checkpoint_dir(output_dir, global_step)
     binding = model_binding(model_checkpoint)
@@ -209,11 +215,13 @@ def bind_checkpoint(replay: ReservoirReplay, global_step: int, output_dir=None) 
         warnings.warn(
             f"no model checkpoint at {model_checkpoint} when the buffer checkpoint {checkpoint_tag(global_step)!r} "
             "was taken; a resume at this step will not be checked against the model",
-            RuntimeWarning, stacklevel=2,
+            RuntimeWarning, stacklevel=3,
         )
     replay.buffer.checkpoint(checkpoint_tag(global_step), binding=binding)
     steps = trainer_checkpoint_steps(output_dir)
-    if steps is not None:
+    # Prune only to a non-empty set of trainer checkpoints: an output_dir that holds none
+    # (a relocated resume, a different run) says nothing about which buffer checkpoints are stale.
+    if steps:
         replay.buffer.prune_checkpoints({checkpoint_tag(n) for n in steps | {global_step}})
 
 
@@ -229,8 +237,13 @@ def resume_from_checkpoint(replay: ReservoirReplay, global_step: int, model_chec
     a model digest, it must be that directory's (``check_model_binding``).
     Off the owner rank there is no buffer to rewind and the call is a no-op.
     """
-    if global_step <= 0 or not replay.is_owner:
+    if global_step <= 0:
         return
+    owner_step(getattr(replay, "_comm", None), replay.is_owner,
+               lambda: _resume_on_owner(replay, global_step, model_checkpoint))
+
+
+def _resume_on_owner(replay: ReservoirReplay, global_step: int, model_checkpoint) -> None:
     tag = checkpoint_tag(global_step)
     if not isinstance(replay.buffer, DurableRolloutBuffer):
         raise RuntimeError(

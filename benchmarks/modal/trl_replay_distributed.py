@@ -87,7 +87,9 @@ def launch_command(driver_args: list[str], *, cpu: bool) -> list[str]:
             "--multi_gpu", "--mixed_precision=no", str(DRIVER), *driver_args]
 
 
-def _tail(text: str | None) -> str:
+def _tail(text: str | bytes | None) -> str:
+    if isinstance(text, bytes):          # TimeoutExpired carries bytes even with text=True
+        text = text.decode("utf-8", errors="replace")
     return (text or "")[-TAIL_CHARS:]
 
 

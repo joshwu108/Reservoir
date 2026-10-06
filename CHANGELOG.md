@@ -8,7 +8,7 @@ minor bump may change interfaces.
 ## [0.6.0] - 2026-10-06
 
 Phase 5: the developer-facing release. Everything below is implemented,
-tested (1805 tests) and, where it makes a claim, backed by a committed
+tested (about 1,880 tests) and, where it makes a claim, backed by a committed
 result; `docs/nonclaims.md` lists what is not claimed.
 
 ### Added
@@ -37,7 +37,7 @@ result; `docs/nonclaims.md` lists what is not claimed.
   damage. `checkpoint(tag)` / `restore_checkpoint(tag)` bind the buffer to a
   trainer checkpoint; a restore starts a new log epoch. The TRL adapter
   snapshots on every save and rewinds on resume, failing closed when the
-  snapshot is missing. Crash campaign: 275/275 cut points, 0 torn.
+  snapshot is missing. Crash campaign: 315/315 cut points on macOS/APFS, 0 torn.
 - **Multi-process TRL adapter.** Under `accelerate` with more than one
   process, rank 0 owns the buffer and the single log writer; behavior
   logprobs are computed per rank, slices gathered, the single-process hook
@@ -52,7 +52,10 @@ result; `docs/nonclaims.md` lists what is not claimed.
 - **Reward provenance.** Per-reward-function values and the function names
   travel in insert metadata and in the manifest (`rewards`), numeric only
   and outside the content digest, so "verifier high, judge low" can be
-  queried after the fact.
+  queried after the fact. The TRL adapter captures them from the trainer's
+  `_calculate_rewards`; the verl adapter records the summed score only.
+  The committed GPU manifests were produced before this wiring and have no
+  `rewards` field.
 - **Offline replay.** `reservoir-replay-offline` rebuilds every witnessed
   batch as content (rows, draws, exact importance weights, tokens, rewards,
   sources) from the log and manifest alone, importing nothing from the
@@ -99,6 +102,37 @@ result; `docs/nonclaims.md` lists what is not claimed.
   to §12 and `docs/nonclaims.md` §13 to §24.
 
 ### Fixed
+
+Review round of 2026-10-06 (five independent reviews over the release
+tree; every item below has a regression test in
+`tests/test_review_round_0_6.py`):
+
+- Checker: integer fields given as floats or negatives are refused instead
+  of truncated (`0.7` no longer verifies as `0`); every malformed field
+  surfaces as `CheckerError` from the library, not a raw Python error; a
+  `decay_config` may not declare more than 2^24 slots and a witness more
+  than 2^20 rows, so a one-line log can no longer make the checker
+  allocate unbounded memory; the CLIs report `MemoryError` as a failure.
+- Durable buffer: the crash-test cut points need `RESERVOIR_CRASH_TEST=1`
+  in addition to `RESERVOIR_CUT_POINT`, so a stray name in a launcher's
+  environment cannot kill a run; the checkpoint a buffer last restored
+  from is never pruned; slot positions given to the durable quarantine
+  must be plain ints.
+- Buffer: rollout metadata is deep-copied, so a caller mutating a nested
+  value after `add_group` cannot make live and replayed state differ;
+  quarantine on a buffer without a log warns that no record is kept.
+- TRL adapter: reward provenance is wired (it was accepted by the row
+  converter but never supplied); owner-only steps (building the buffer,
+  binding and restoring checkpoints) broadcast their outcome so a failure
+  on rank 0 raises on every rank instead of hanging the others; sharded
+  strategies (DeepSpeed, FSDP, Megatron) are refused because the
+  owner-only telemetry forward would deadlock under them; `max_log_ratio`
+  must be finite and `max_declines_per_step` a non-negative int; a NaN
+  under the completion mask no longer poisons a row's log-ratio (TRL and
+  verl); the Modal result writer raises when the checker rejects a log.
+- Transcript: `--blast-radius` reports `declined_draws` separately.
+- Docs reconciled with the evidence files (demo output, crash and test
+  counts, version attributions, the TLA+ state count, CI status).
 
 - Crash and divergence campaigns report what they measured (cut points that
   never fired are failures, not passes; the reduced divergence grid is

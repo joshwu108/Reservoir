@@ -214,7 +214,7 @@ def test_replayed_slices_match_the_single_process_adapter_on_the_concatenated_ba
     assert owner.last_replay.indices == single.last_replay.indices
     assert owner.last_telemetry == single.last_telemetry
     assert owner.buffer.attestation_log is None
-    assert world.collectives == 1 + 2 * 2  # the attach check, then one gather and one broadcast per step
+    assert world.collectives == 2 + 2 * 2  # attach (file-state gather, build broadcast), then one gather and one broadcast per step
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
@@ -386,7 +386,8 @@ def test_checkpoint_binding_is_a_no_op_off_the_owner_and_works_on_it(tmp_path):
     owner, other = replays
     # bind_checkpoint is a collective (every rank waits before the owner digests), so all ranks call it.
     run_ranks([lambda r=r: bind_checkpoint(r, 3, tmp_path) for r in replays])
-    resume_from_checkpoint(other, 3)
+    # resume is collective too: the owner's outcome is broadcast so no rank can be left waiting.
+    run_ranks([lambda r=r: resume_from_checkpoint(r, 3) for r in replays])
     assert other._buffer is None and not other.is_owner
     assert owner.buffer.checkpoints() == ["step-3"]         # only the owner's buffer took the checkpoint
     assert owner.buffer.checkpoint_binding("step-3") is None  # no checkpoint-3 directory existed
@@ -411,7 +412,7 @@ def test_the_owner_digests_the_model_checkpoint_only_after_every_rank_wrote_into
     run_ranks([lambda: bind_checkpoint(replays[0], 5, tmp_path / "out"), rank_1_saves_then_binds])
     recorded = replays[0].buffer.checkpoint_binding("step-5")["model_checkpoint"]
     assert recorded["files"] == 2 and recorded["digest"] == directory_digest(model_dir)["digest"]
-    assert world.collectives == 2       # attach's own collective, then the barrier before the digest
+    assert world.collectives == 4       # attach (gather + build broadcast), the barrier before the digest, the owner-step status broadcast
     replays[0].close()
 
 

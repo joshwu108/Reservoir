@@ -253,6 +253,7 @@ def _radius_entry(verified: VerifiedLog, prompt_id: Optional[str], examples: lis
                   evicted_at: dict[int, Optional[int]], with_manifest: bool) -> dict:
     wanted = set(examples)
     witnessed_ops = {w["sample_op_counter"] for w in verified.content.witnesses}
+    declined_at = {(w["sample_op_counter"], k) for w in verified.content.witnesses for k in w["declined"]}
     draws = [s for s in verified.content.samples if s.content_digest in wanted]
     rows = sorted(
         ({"step": w.step, "row": w.row, "sample_op_counter": w.sample_op_counter, "draw": w.draw,
@@ -272,6 +273,8 @@ def _radius_entry(verified: VerifiedLog, prompt_id: Optional[str], examples: lis
         "steps": sorted({r["step"] for r in rows}),
         "times_sampled": len(draws),
         "unwitnessed_draws": sum(1 for s in draws if s.op_counter not in witnessed_ops),
+        # Drawn, then declined by the drift gate: never reached a training batch, so not in ``rows``.
+        "declined_draws": sum(1 for s in draws if (s.op_counter, s.position_in_batch) in declined_at),
         "quarantined": [
             {"record_index": q.record_index, "index": q.index, "content_digest": q.content_digest,
              "predicate": q.predicate, "note": q.note}
@@ -501,7 +504,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             with open(args.json, "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2)
     except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError,
-            RecursionError, CheckerError) as exc:
+            RecursionError, MemoryError, CheckerError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
     print(render_text(report, args.by))

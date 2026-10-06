@@ -92,6 +92,13 @@ BINDING_FILE = "binding.json"
 CHECKPOINT_DIR = "checkpoints"
 
 
+def _strict_position(value: object) -> int:
+    """A slot number given as a plain int; bools and floats are refused rather than coerced."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"slot positions must be plain ints, got {value!r}")
+    return value
+
+
 class DurableRolloutBuffer:
     """``RolloutBuffer`` whose every operation is crash-atomic on disk.
 
@@ -150,6 +157,7 @@ class DurableRolloutBuffer:
         self._manifest = Path(manifest) if manifest is not None else None
         self.compact_every = compact_every
         self._epoch = 0
+        self._restored_tag: Optional[str] = None   # kept by prune_checkpoints
         self._wal = CommandLog(self.directory)
         self._seq = 0                  # seq of the last durable command
         self._snapshot_seq = 0         # seq the snapshot on disk includes
@@ -422,11 +430,19 @@ class DurableRolloutBuffer:
         self._wal.reset()
         self._snapshot_seq = self._seq = seq
         self._epoch = epoch
+        self._restored_tag = tag
         self._buf = self._buffer_from_state(state)
 
     def prune_checkpoints(self, keep: Iterable[str]) -> list[str]:
-        """Delete every checkpoint whose tag is not in ``keep``; returns the deleted tags."""
+        """Delete every checkpoint whose tag is not in ``keep``; returns the deleted tags.
+
+        The checkpoint this buffer last restored from is always kept: it is
+        the one a resumed run would need again if it crashes before its next
+        save, whatever the trainer's directory says.
+        """
         keep_set = {self._check_tag(t) for t in keep}
+        if self._restored_tag is not None:
+            keep_set.add(self._restored_tag)
         deleted = [tag for tag in self.checkpoints() if tag not in keep_set]
         for tag in deleted:
             shutil.rmtree(self.directory / CHECKPOINT_DIR / tag)
@@ -507,7 +523,7 @@ class DurableRolloutBuffer:
         validate_text(predicate_text, "predicate text", MAX_PREDICATE_LENGTH)
         validate_text(reason, "quarantine reason", MAX_NOTE_LENGTH)
         require_quarantine_format(self._buf)
-        slots = [int(p) for p in positions]
+        slots = [_strict_position(p) for p in positions]
         if not slots:
             return
         self._commit("quarantine", {"positions": slots, "predicate": predicate_text, "note": reason},

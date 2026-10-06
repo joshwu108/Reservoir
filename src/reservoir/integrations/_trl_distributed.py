@@ -46,7 +46,7 @@ them.
 
 from __future__ import annotations
 
-from typing import Any, Final, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Final, Optional, Protocol, runtime_checkable
 
 import torch
 
@@ -185,6 +185,31 @@ class _OwnerFailure(Exception):
     """Carried from rank 0 to the other ranks through the broadcast."""
 
 
+def owner_step(comm: Optional[Communicator], is_owner: bool, fn: Callable[[], Any]) -> Any:
+    """Run ``fn`` on the owner rank only and tell every rank how it went.
+
+    One broadcast per call on every rank: the owner sends ``None`` or the
+    error text, so a failure in an owner-only step (building the buffer,
+    taking or restoring a checkpoint) raises on every rank instead of
+    leaving the others waiting in their next collective. With one process,
+    or no communicator, it is just ``fn()``.
+    """
+    if comm is None or comm.num_processes <= 1:
+        return fn()
+    result, error, cause = None, None, None
+    if is_owner:
+        try:
+            result = fn()
+        except Exception as exc:  # reported to every rank, re-raised here
+            error, cause = f"{type(exc).__name__}: {exc}", exc
+    error = comm.broadcast_object(error)
+    if error is not None:
+        if cause is not None:
+            raise cause
+        raise RuntimeError(f"rank {OWNER_RANK} failed in an owner-only step: {error}")
+    return result
+
+
 def _owner_mix(replay: Any, shards: list[dict], steps: list[int], trainer: Any, step: int,
                device: torch.device):
     """Rank 0's half: assemble, run the single-process hook, return the CPU payload (or None).
@@ -272,6 +297,7 @@ __all__ = [
     "AcceleratorCommunicator",
     "Communicator",
     "OWNER_RANK",
+    "owner_step",
     "PADDED_KEYS",
     "communicator_for",
     "concat_shards",

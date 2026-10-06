@@ -432,8 +432,9 @@ class ReservoirReplay:
                 f"_compute_old_log_prob returned old_log_probs of shape {tuple(proto.batch['old_log_probs'].shape)} "
                 f"for {len(padded_rows)} rows, expected a {tuple(behavior.shape)} prefix"
             )
-        mask = tensors["response_mask"][idx].to(behavior.dtype)
-        ratios = ((current.to(behavior.dtype).to(behavior.device) - behavior) * mask).sum(dim=1)
+        mask = tensors["response_mask"][idx].bool()
+        diff = current.to(behavior.dtype).to(behavior.device) - behavior
+        ratios = torch.where(mask, diff, torch.zeros_like(diff)).sum(dim=1)   # masked NaNs must not poison the row
         return [float(x) for x in ratios.detach().cpu().tolist()]
 
     def _rescore(self, batch: RolloutBatch, kept: list[int], weighted: list[float], ratios: list[float], step: int) -> None:

@@ -56,6 +56,7 @@ from reservoir.rollout import Rollout
 def _worker_insert(directory: str, seed: int, cut_point: str, cut_byte: int) -> None:
     """Child process: insert a transition, cut at cut_point."""
     env_vars = {
+        "RESERVOIR_CRASH_TEST": "1",
         "RESERVOIR_CUT_POINT": cut_point,
         "RESERVOIR_CUT_BYTE_OFFSET": str(cut_byte),
     }
@@ -73,6 +74,7 @@ def _worker_insert(directory: str, seed: int, cut_point: str, cut_byte: int) -> 
 
 def _worker_update(directory: str, seed: int, cut_point: str, position: int, cut_byte: int) -> None:
     """Child process: update a priority, cut at cut_point."""
+    os.environ["RESERVOIR_CRASH_TEST"] = "1"
     os.environ["RESERVOIR_CUT_POINT"] = cut_point
     os.environ["RESERVOIR_CUT_BYTE_OFFSET"] = str(cut_byte)  # the mid-segment cut needs it
     buf = DurableBuffer(directory, capacity=4, seed=seed)
@@ -271,6 +273,7 @@ def _rollout_apply(directory: str, seed: int, op_type: str) -> None:
 
 def _rollout_worker(directory: str, seed: int, op_type: str, cut_point: str, cut_byte: int) -> None:
     """Child process body: arm the cut point, then run the operation until SIGKILL."""
+    os.environ["RESERVOIR_CRASH_TEST"] = "1"
     os.environ["RESERVOIR_CUT_POINT"] = cut_point
     os.environ["RESERVOIR_CUT_BYTE_OFFSET"] = str(cut_byte)
     _rollout_apply(directory, seed, op_type)

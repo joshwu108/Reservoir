@@ -302,6 +302,11 @@ def write_results(results: dict, label: str, out_dir: Path = RESULTS_DIR) -> Pat
     }
     out = out_dir / f"{label}.json"
     out.write_text(json.dumps(results, indent=2))
+    if verify.returncode != 0:
+        raise RuntimeError(
+            f"the independent checker rejected the run's log ({results['attestation']['checker']['output']}); "
+            f"the files were written to {out_dir} for inspection but this is not a verified result"
+        )
     return out
 
 

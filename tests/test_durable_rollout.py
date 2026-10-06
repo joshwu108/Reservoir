@@ -586,7 +586,7 @@ def _crash_and_recover(root: Path, pre: dict, post: dict, cut: str, with_manifes
 
     crashed = run_script(
         crashing_op, buf_dir, attest,
-        {"RESERVOIR_CUT_POINT": cut, "RESERVOIR_CUT_BYTE_OFFSET": "40"}, manifest=manifest,
+        {"RESERVOIR_CRASH_TEST": "1", "RESERVOIR_CUT_POINT": cut, "RESERVOIR_CUT_BYTE_OFFSET": "40"}, manifest=manifest,
     )
     assert crashed.returncode != 0, f"child was not killed at cut {cut}"
 

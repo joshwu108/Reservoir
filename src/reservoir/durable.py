@@ -47,13 +47,24 @@ from typing import Any, Optional
 # the child before the worker function runs), so an import-time binding
 # would never fire. The cost is one dictionary lookup per cut point, on a
 # path dominated by fsync.
+CRASH_TEST_ENV = "RESERVOIR_CRASH_TEST"
+"""Must be ``"1"`` for ``RESERVOIR_CUT_POINT`` to do anything: a stray cut-point name in a launcher's
+environment must not be able to SIGKILL a training run."""
+
+
 def _cut_point() -> Optional[str]:
+    if os.environ.get(CRASH_TEST_ENV) != "1":
+        return None
     return os.environ.get("RESERVOIR_CUT_POINT")
 
 
 def _cut_byte_offset() -> Optional[int]:
     value = os.environ.get("RESERVOIR_CUT_BYTE_OFFSET")
-    return int(value) if value else None
+    if not value:
+        return None
+    if not value.isdigit():
+        raise ValueError(f"RESERVOIR_CUT_BYTE_OFFSET must be a non-negative integer, got {value!r}")
+    return int(value)
 
 
 def _should_cut(cut_name: str) -> bool:

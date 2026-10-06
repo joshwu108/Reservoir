@@ -54,6 +54,8 @@ code.
 
 from __future__ import annotations
 
+import copy
+
 import hashlib
 import json
 import math
@@ -215,12 +217,17 @@ def _validate_reward(reward: object) -> float:
 
 
 def _validate_metadata(metadata: object) -> Mapping[str, Any]:
-    """Return metadata as a read-only mapping (shallow copy), or the shared empty one."""
+    """Return metadata as a read-only mapping holding a deep copy, or the shared empty one.
+
+    A deep copy, so a caller that keeps mutating a nested value (a
+    ``rewards`` dict, say) after ``add_group`` cannot make the live buffer
+    disagree with what the manifest recorded and the command log replays.
+    """
     if metadata is None:
         return _EMPTY_METADATA
     if not isinstance(metadata, Mapping):
         raise ValueError(f"metadata must be a mapping, got {type(metadata).__name__}")
-    return MappingProxyType(dict(metadata))
+    return MappingProxyType(copy.deepcopy(dict(metadata)))
 
 
 def _validate_source(source: object) -> Optional[str]:

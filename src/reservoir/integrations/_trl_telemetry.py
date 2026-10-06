@@ -105,8 +105,10 @@ def sequence_log_ratios(output: dict, rows: list[int], trainer: Any) -> list[flo
             batch_size=trainer.args.per_device_train_batch_size,
         )
     behavior = output["old_per_token_logps"][idx]
-    mask = output["completion_mask"][idx].to(current.dtype)
-    ratios = ((current.to(behavior.dtype) - behavior) * mask).sum(dim=1)
+    mask = output["completion_mask"][idx].bool()
+    # where(), not multiply: a NaN at a masked position would otherwise poison the whole row.
+    diff = current.to(behavior.dtype) - behavior
+    ratios = torch.where(mask, diff, torch.zeros_like(diff)).sum(dim=1)
     return [float(x) for x in ratios.detach().cpu().tolist()]
 
 

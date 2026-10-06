@@ -49,7 +49,7 @@ def test_missing_trl_is_an_import_error_with_install_hint(monkeypatch):
         require_trl()
 
     message = str(excinfo.value)
-    assert 'pip install "reservoir[trl]"' in message
+    assert 'pip install "reservoir-replay[trl]"' in message
     assert PINNED_TRL_VERSION in message
 
 

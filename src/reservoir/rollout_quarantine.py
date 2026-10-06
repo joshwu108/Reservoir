@@ -32,6 +32,8 @@ callable, so recovery replays the same records without the predicate.
 
 from __future__ import annotations
 
+import warnings
+
 import copy
 import inspect
 from typing import Callable, Final, Optional, Sequence
@@ -121,9 +123,20 @@ def select_positions(buf, predicate: QuarantinePredicate) -> tuple[int, ...]:
 
 
 def require_quarantine_format(buf) -> None:
-    """A quarantine record needs log format 3 or later; refuse it in a buffer restored from an older log."""
+    """A quarantine record needs log format 3 or later; refuse it in a buffer restored from an older log.
+
+    A buffer with no attestation log at all writes no record anywhere, so
+    the reason and predicate text are lost; that is allowed but warned.
+    """
     fmt = buf._attester.log_format
-    if fmt is not None and fmt < QUARANTINE_FORMAT:
+    if fmt is None:
+        warnings.warn(
+            "quarantine on a buffer without an attestation log keeps no record of the predicate or reason; "
+            "pass attest=<path> to the buffer if the incident must be auditable",
+            RuntimeWarning, stacklevel=3,
+        )
+        return
+    if fmt < QUARANTINE_FORMAT:
         raise ValueError(
             f"quarantine needs an attestation log of format {QUARANTINE_FORMAT} or later; this buffer continues a "
             f"format-{fmt} log, whose checker would reject the record"
