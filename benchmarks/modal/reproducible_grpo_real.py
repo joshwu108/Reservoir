@@ -54,16 +54,13 @@ from pathlib import Path
 
 import modal
 
-from benchmarks.modal.trl_replay_real import _repo_src, base_image, hf_cache, image, run_grpo
+from benchmarks.modal.trl_replay_real import base_image, hf_cache, image, repo_root, run_grpo, with_sources
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = repo_root()
 RESULTS_DIR = REPO / "benchmarks" / "modal" / "results"
 GPU = "T4"
 
-deterministic_image = (
-    base_image.env({"CUBLAS_WORKSPACE_CONFIG": ":4096:8"})
-    .add_local_dir(_repo_src, remote_path="/reservoir_src")
-)
+deterministic_image = with_sources(base_image.env({"CUBLAS_WORKSPACE_CONFIG": ":4096:8"}))
 
 app = modal.App("reservoir-reproducible-grpo-hf")
 

@@ -198,6 +198,8 @@ def apply_command(buf, command: dict) -> None:
         buf.advance(args["current_version"])
     elif op == "evict":
         buf.evict(args["position"], args["reason"])
+    elif op == "quarantine":
+        buf.quarantine_positions(args["positions"], args["predicate"], args["note"])
     elif op == "witness_batch":
         buf.witness_batch(_sampled_batch(buf, args), args["step"], args["batch_rows"], args["rows"],
                           args["tensor_digest"], args.get("declined", ()))

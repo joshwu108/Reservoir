@@ -144,3 +144,63 @@ class TestValidateManifestRecords:
         w = ManifestWriter(tmp_path / "m.jsonl")
         w.close()
         w.close()
+
+
+class TestRewardProvenance:
+    def test_rewards_are_written_when_given_and_absent_otherwise(self) -> None:
+        rec = _record(rewards={"verifier": 1.0, "judge": 0})
+        assert rec["rewards"] == {"verifier": 1.0, "judge": 0.0}
+        assert all(isinstance(v, float) for v in rec["rewards"].values())
+        assert set(rec) == set(MANIFEST_KEYS) | {"rewards"}
+        assert "rewards" not in _record()
+        assert "rewards" not in _record(rewards=None)
+
+    def test_rewards_do_not_change_the_digest(self) -> None:
+        assert _record(rewards={"judge": 0.5})["content_digest"] == _record()["content_digest"]
+
+    def test_empty_rewards_mean_every_function_abstained(self) -> None:
+        assert _record(rewards={})["rewards"] == {}
+
+    @pytest.mark.parametrize("rewards", [
+        [], {"judge": "high"}, {"judge": True}, {"judge": float("nan")}, {"judge": float("inf")},
+        {"": 1.0}, {"a\nb": 1.0}, {3: 1.0}, {"x" * 257: 1.0}, {"judge": [1.0]},
+    ])
+    def test_malformed_rewards_are_rejected(self, rewards) -> None:
+        with pytest.raises(ValueError, match="rewards"):
+            _record(rewards=rewards)
+
+    def test_validate_accepts_and_rejects_rewards(self) -> None:
+        good = _record(rewards={"judge": 0.5})
+        assert validate_manifest_records([good]) == [good]
+        bad = dict(good, rewards={"judge": "0.5"})
+        with pytest.raises(ValueError, match="rewards"):
+            validate_manifest_records([bad])
+
+    def test_buffer_reads_rewards_from_rollout_metadata(self) -> None:
+        from reservoir.attest import AttestationLog
+        from reservoir.rollout import Rollout
+        from reservoir.rollout_buffer import RolloutBuffer
+
+        manifest = ManifestWriter()
+        buf = RolloutBuffer(capacity=4, attest=AttestationLog(), manifest=manifest)
+        buf.add_group("p", 0, [
+            Rollout(tokens=[1], logprobs=[-0.1], reward=1.0, metadata={"rewards": {"verifier": 1.0}}),
+            Rollout(tokens=[2], logprobs=[-0.1], reward=0.0),
+        ])
+        first, second = manifest.records
+        assert first["rewards"] == {"verifier": 1.0} and "rewards" not in second
+        assert first["content_digest"] == content_digest_of("p", [1], 1.0)
+
+    def test_malformed_metadata_rewards_fail_before_any_insert(self) -> None:
+        from reservoir.attest import AttestationLog
+        from reservoir.rollout import Rollout
+        from reservoir.rollout_buffer import RolloutBuffer
+
+        manifest = ManifestWriter()
+        buf = RolloutBuffer(capacity=4, attest=AttestationLog(), manifest=manifest)
+        with pytest.raises(ValueError, match="rewards"):
+            buf.add_group("p", 0, [
+                Rollout(tokens=[1], logprobs=[-0.1], reward=1.0),
+                Rollout(tokens=[2], logprobs=[-0.1], reward=0.0, metadata={"rewards": {"judge": "high"}}),
+            ])
+        assert buf.size == 0 and manifest.records == []

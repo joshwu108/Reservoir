@@ -67,22 +67,52 @@ DATASET_ID = "trl-internal-testing/zen"
 DATASET_CONFIG = "standard_prompt_only"
 RESULTS_DIR = Path(__file__).parent / "results"
 
-try:
-    _repo_src = str(Path(__file__).parents[2] / "src")
-except IndexError:
-    _repo_src = "."  # inside the container the image already holds the sources
+
+def repo_root() -> Path:
+    """The checkout root locally; ``/root`` inside the container.
+
+    Locally this file sits at ``<repo>/benchmarks/modal/``. In the container
+    the entrypoint copy lives at ``/root/<script>.py`` (one parent only) and
+    the package copy at ``/root/benchmarks/modal/``; both resolve to /root,
+    where the ``benchmarks`` mount is, with the sources at ``/reservoir_src``.
+    """
+    here = Path(__file__).resolve()
+    return here.parents[2] if len(here.parents) > 2 else Path("/root")
+
+
+_REPO = repo_root()
+_repo_src = str(_REPO / "src") if (_REPO / "src").is_dir() else "/reservoir_src"
+_repo_benchmarks = str(_REPO / "benchmarks")
+
+
+def _skip_results(path: Path) -> bool:
+    """Leave the committed results and bytecode out of the benchmarks mount."""
+    return "results" in path.parts or "__pycache__" in path.parts
+
+
+def with_sources(img: modal.Image) -> modal.Image:
+    """Mount the package sources and the ``benchmarks`` package into ``img``.
+
+    Modal ships only the entrypoint file by itself, so a script that imports
+    ``benchmarks.modal.trl_replay_real`` (the derived tiers) needs the
+    package mounted next to it: ``/root`` is the container's working
+    directory and on ``sys.path``.
+    """
+    return (img.add_local_dir(_repo_src, remote_path="/reservoir_src")
+               .add_local_dir(_repo_benchmarks, remote_path="/root/benchmarks", ignore=_skip_results))
+
 
 hf_cache = modal.Volume.from_name("reservoir-hf-cache", create_if_missing=True)
 
-# Build steps first, the local source mount last: Modal refuses a build step
-# after an add_local_* layer, so scripts that derive a variant (an extra env
-# var, say) start from ``base_image`` and add the mount themselves.
+# Build steps first, the local mounts last: Modal refuses a build step after
+# an add_local_* layer, so scripts that derive a variant (an extra env var,
+# say) start from ``base_image`` and call ``with_sources`` themselves.
 base_image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(*_DEPS)
     .env({"HF_HOME": "/hf_cache"})
 )
-image = base_image.add_local_dir(_repo_src, remote_path="/reservoir_src")
+image = with_sources(base_image)
 
 app = modal.App("reservoir-trl-replay-real")
 
@@ -250,7 +280,7 @@ def write_results(results: dict, label: str, out_dir: Path = RESULTS_DIR) -> Pat
         manifest = out_dir / f"{label}.manifest.jsonl"
         manifest.write_text(manifest_text)
         command += ["--manifest", str(manifest)]
-    verify = subprocess.run(command, capture_output=True, text=True, cwd=str(Path(__file__).parents[2]))
+    verify = subprocess.run(command, capture_output=True, text=True, cwd=str(_REPO))
     results["attestation"]["checker"] = {
         "command": "python -m " + " ".join(command[2:]),
         "returncode": verify.returncode,

@@ -476,3 +476,96 @@ def test_near_dead_groups_are_kept_and_counted():
     assert conv.near_dead_groups == 1
     assert len(conv.groups) == 2            # the near-dead group is stored like any live group
     assert 5e-4 < NEAR_DEAD_ADVANTAGE
+
+
+# ---------------------------------------------------------------------------
+# reward provenance
+# ---------------------------------------------------------------------------
+
+def test_rows_to_groups_attaches_per_reward_function_values_to_metadata():
+    out = make_output(
+        prompts=[[9], [9], [7], [7]],
+        completions=[[1, 2], [3], [5], [6]],
+        advantages=[0.5, -0.5, 0.25, -0.25],
+    )
+    per_func = torch.tensor([[1.0, 0.2], [0.0, 0.8], [1.0, float("nan")], [0.0, 0.1]])
+    conversion = rows_to_groups(
+        out, num_generations=2, step=4, logprobs=torch.zeros(4, 2),
+        reward_names=["verifier", "judge"], rewards_per_func=per_func,
+    )
+    rollouts = [r for g in conversion.groups for r in g.rollouts]
+    assert rollouts[0].metadata["rewards"] == {"verifier": 1.0, "judge": f32([0.2])[0]}
+    assert rollouts[1].metadata["rewards"] == {"verifier": 0.0, "judge": f32([0.8])[0]}
+    assert rollouts[2].metadata["rewards"] == {"verifier": 1.0}       # NaN: the judge abstained on this row
+    assert rollouts[3].metadata["rewards"] == {"verifier": 0.0, "judge": f32([0.1])[0]}
+    assert all(isinstance(v, float) for r in rollouts for v in r.metadata["rewards"].values())
+
+
+def test_rows_to_groups_without_provenance_adds_no_rewards_key():
+    out = make_output(prompts=[[9], [9]], completions=[[1], [2]], advantages=[0.5, -0.5])
+    conversion = rows_to_groups(out, num_generations=2, step=0, logprobs=torch.zeros(2, 1))
+    assert all("rewards" not in r.metadata for g in conversion.groups for r in g.rollouts)
+
+
+def test_rows_to_groups_writes_an_empty_mapping_when_every_function_abstained():
+    # {} says "provenance recorded, every function abstained"; an absent key says "no provenance".
+    out = make_output(prompts=[[9], [9]], completions=[[1], [2]], advantages=[0.5, -0.5])
+    per_func = torch.tensor([[float("nan")], [1.0]])
+    conversion = rows_to_groups(out, num_generations=2, step=0, logprobs=torch.zeros(2, 1),
+                                reward_names=["judge"], rewards_per_func=per_func)
+    rollouts = conversion.groups[0].rollouts
+    assert rollouts[0].metadata["rewards"] == {} and rollouts[1].metadata["rewards"] == {"judge": 1.0}
+
+
+@pytest.mark.parametrize("name", ["a\tb", "x" * 257, "   "])
+def test_rows_to_groups_rejects_names_the_manifest_would_refuse(name):
+    out = make_output(prompts=[[9], [9]], completions=[[1], [2]], advantages=[0.5, -0.5])
+    with pytest.raises(ValueError, match="reward_names"):
+        rows_to_groups(out, num_generations=2, step=0, logprobs=torch.zeros(2, 1),
+                       reward_names=[name], rewards_per_func=torch.zeros(2, 1))
+
+
+@pytest.mark.parametrize("names, shape, message", [
+    (["a"], (2, 2), "reward_names"),
+    (["a", "a"], (2, 2), "distinct"),
+    (["a", ""], (2, 2), "non-empty"),
+    (["a", "b"], (3, 2), "rows"),
+    (["a", "b"], (2,), "shape"),
+])
+def test_rows_to_groups_rejects_misaligned_provenance(names, shape, message):
+    out = make_output(prompts=[[9], [9]], completions=[[1], [2]], advantages=[0.5, -0.5])
+    with pytest.raises(ValueError, match=message):
+        rows_to_groups(out, num_generations=2, step=0, logprobs=torch.zeros(2, 1),
+                       reward_names=names, rewards_per_func=torch.zeros(*shape))
+
+
+def test_rows_to_groups_requires_names_and_values_together():
+    out = make_output(prompts=[[9], [9]], completions=[[1], [2]], advantages=[0.5, -0.5])
+    with pytest.raises(ValueError, match="together"):
+        rows_to_groups(out, num_generations=2, step=0, logprobs=torch.zeros(2, 1), reward_names=["a"])
+
+
+def test_rows_to_groups_rejects_an_infinite_reward_by_row():
+    out = make_output(prompts=[[9], [9]], completions=[[1], [2]], advantages=[0.5, -0.5])
+    per_func = torch.tensor([[1.0], [float("inf")]])
+    with pytest.raises(ValueError, match="row 1"):
+        rows_to_groups(out, num_generations=2, step=0, logprobs=torch.zeros(2, 1),
+                       reward_names=["judge"], rewards_per_func=per_func)
+
+
+def test_reward_metadata_survives_json_and_the_manifest():
+    import json
+    from reservoir.attest import AttestationLog
+    from reservoir.rollout_buffer import RolloutBuffer
+    from reservoir.rollout_manifest import ManifestWriter
+
+    out = make_output(prompts=[[9], [9]], completions=[[1], [2]], advantages=[0.5, -0.5])
+    conversion = rows_to_groups(out, num_generations=2, step=0, logprobs=torch.zeros(2, 1),
+                                reward_names=["verifier"], rewards_per_func=torch.tensor([[1.0], [0.0]]))
+    manifest = ManifestWriter()
+    buf = RolloutBuffer(capacity=4, attest=AttestationLog(), manifest=manifest)
+    spec = conversion.groups[0]
+    buf.add_group(spec.prompt_id, 0, spec.rollouts, source="s")
+    lines = manifest.records
+    assert [l["rewards"] for l in lines] == [{"verifier": 1.0}, {"verifier": 0.0}]
+    assert json.loads(json.dumps(lines)) == lines

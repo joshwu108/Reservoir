@@ -13,7 +13,9 @@ Operation types:
   - insert, update            (classic DurableBuffer)
   - rollout_add_group,        (DurableRolloutBuffer; the add forces stale
     rollout_update,            evictions and a rebase inside one operation;
-    rollout_restore            the restore rewinds to a checkpoint)
+    rollout_quarantine,        the quarantine evicts a whole group with a
+    rollout_restore            reasoned record; the restore rewinds to a
+                               checkpoint)
 Cut points:
   - after_intent_write
   - after_intent_fsync
@@ -252,10 +254,12 @@ def _rollout_prepare(directory: str, seed: int) -> None:
 
 
 def _rollout_apply(directory: str, seed: int, op_type: str) -> None:
-    """The operation under test: a group add that evicts and rebases, or a priority update."""
+    """The operation under test: a group add that evicts and rebases, a quarantine, a restore, or a priority update."""
     buf = DurableRolloutBuffer(directory, seed=seed, **_ROLLOUT_KW)
     if op_type == "rollout_add_group":
         buf.add_group("g4", 4, _rollouts([1.0, 0.0]))
+    elif op_type == "rollout_quarantine":
+        buf.quarantine(lambda r, g: g.prompt_id == "g1", "campaign: g1 is quarantined")
     elif op_type == "rollout_restore":
         buf.restore_checkpoint("a")
     else:
@@ -307,7 +311,7 @@ def run_rollout_crash_test(op_type: str, cut_point: str, seed: int, base_tmpdir:
 # Full campaign
 # ---------------------------------------------------------------------------
 
-OP_TYPES = ["insert", "update", "rollout_add_group", "rollout_update", "rollout_restore"]
+OP_TYPES = ["insert", "update", "rollout_add_group", "rollout_update", "rollout_quarantine", "rollout_restore"]
 
 CUT_POINTS = [
     "after_intent_write",

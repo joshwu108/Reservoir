@@ -181,8 +181,10 @@ record and why: `data` (the stored examples differed upstream; every draw
 before that point was identical), `schedule`, or `config` (different buffer
 parameters, including the seed, which the log records). Logs and the report are committed under
 `benchmarks/modal/results/repro_cpu_12steps_seed42/` and
-`results/reproducible_grpo_report.json`. The write-up is
-[`docs/reproducible-training.md`](docs/reproducible-training.md).
+`results/reproducible_grpo_report.json`; the same triplet on a T4 with HF
+generation, with and without deterministic kernels, is under
+`benchmarks/modal/results/repro_hf_t4_*` (verdict IDENTICAL in both). The
+write-up is [`docs/reproducible-training.md`](docs/reproducible-training.md).
 
 ---
 
@@ -194,6 +196,7 @@ The transcript tool turns a verified log into the answers an audit asks for:
 python -m checker.transcript run-01/attest.jsonl --manifest run-01/manifest.jsonl --by source
 python -m checker.transcript run-01/attest.jsonl --quota scraped=0 --quota licensed=50000   # exit 2 if exceeded
 python -m checker.transcript run-01/attest.jsonl --find <content digest>                     # every time it was sampled
+python -m checker.transcript run-01/attest.jsonl --manifest run-01/manifest.jsonl --blast-radius <content digest>  # what it reached
 ```
 
 Exposure per example (times sampled, exact importance-weight sum), mixture
@@ -284,7 +287,12 @@ batch). Every step it logs replay health under `reservoir/` in TRL's metrics
 staleness of the replayed rows, log-ratio between stored and current
 logprobs) and into the attestation log, where the checker recomputes the
 effective sample size and the staleness. An optional drift gate (`max_log_ratio=`) declines rows whose
-log-ratio is too large; declines are recorded, never silent. Replayed rows carry their
+log-ratio is too large; declines are recorded, never silent. After an incident,
+`buffer.quarantine(predicate, reason)` evicts every matching entry with a record
+that carries the predicate text and the reason, and
+`reservoir-transcript --blast-radius <digest>` lists every step and training-batch
+row the example (or, with the manifest, its prompt) reached. The manifest can carry
+each example's per-reward-function values, numeric only and outside the digest. Replayed rows carry their
 behavior logprobs, so the loss applies a real off-policy ratio, and their
 advantages are multiplied by the importance-sampling weight. Versions,
 half-life and `max_policy_age` are counted in optimizer steps. Every insertion
@@ -395,8 +403,8 @@ report.to_html("forgetting_report.html")
 | Claim | Evidence |
 |-------|----------|
 | Sampling is deterministic and reproducible under a keyed draw | Property tests against a brute-force reference; the log records seed, buffer id and `beta`, and the checker recomputes every draw and importance weight from them |
-| The durable buffers are failure-atomic under SIGKILL | 220/220 crash tests across both buffers: every child was killed at its armed cut point (the campaign fails a row otherwise), 165 recovered the pre-state and 55 the post-state (an unsynced write that SIGKILL leaves in the page cache recovers to the post-state; a power loss there would give the pre-state, which is also legal), zero torn; the rollout cases cross the command log and the snapshot protocol in one operation, crash mid-rebase, and crash inside a checkpoint restore |
-| The independent checker rejects forged logs | 183/183 mutants rejected: 38 age-decay protocol forgeries, 29 content-commitment forgeries (3 of them chain-consistent, invisible without the manifest), 21 draw and weight forgeries (2 of them invisible to a log that does not record its seed and `beta`), 14 batch-witness forgeries and 18 telemetry forgeries |
+| The durable buffers are failure-atomic under SIGKILL | 275/275 crash tests across both buffers: every child was killed at its armed cut point (the campaign fails a row otherwise), 210 recovered the pre-state and 65 the post-state (an unsynced write that SIGKILL leaves in the page cache recovers to the post-state; a power loss there would give the pre-state, which is also legal), zero torn; the rollout cases cross the command log and the snapshot protocol in one operation, crash mid-rebase, crash inside a quarantine of a whole group, and crash inside a checkpoint restore |
+| The independent checker rejects forged logs | 205/205 mutants rejected: 38 age-decay protocol forgeries, 29 content-commitment forgeries (3 of them chain-consistent, invisible without the manifest), 21 draw and weight forgeries (2 of them invisible to a log that does not record its seed and `beta`), 14 batch-witness forgeries, 18 telemetry forgeries and 22 quarantine and reward-provenance forgeries (the campaign also records that a quarantine record's texts and the manifest's reward values are not committed: 4 such changes pass, by design) |
 | Two runs with the same inputs give one transcript | CPU demo: runs a and b byte-identical (102 records), run c differs at record 1, classified `data` |
 | Attestation is cheap relative to generation | about 3× the no-attestation insert cost in memory, 6× with a manifest file; the checker verifies 10k records in 0.3 s |
 | The lifecycle protocol is safe within a finite scope | TLA+ model, 44,611 states. A no-parent-fsync variant (`spec/NoParentFsync.tla`) is written to show why the directory fsync exists; `bash spec/check.sh --with-counterexample` runs it in CI and fails unless TLC reports the violation. It has not been run on a developer machine yet |

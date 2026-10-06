@@ -209,6 +209,12 @@ Every buffer mutation (insert, update, evict) appends a `MutationRecord`:
 }
 ```
 
+A decayed buffer adds `base_priority_int`, `entry_version` and `base_epoch`
+(§7) and, on an evict, `reason`: `stale`, `capacity`, `explicit`, `drift`
+or `quarantine`. A `quarantine` evict also carries `predicate` (the text
+of the predicate that selected the entry, at most 1024 printable
+characters) and `note` (the operator's reason, at most 256); see §10.10.
+
 ### SampleAttestation
 
 Every sampled batch appends a `SampleAttestation`:
@@ -609,8 +615,8 @@ survived truncation.
 ### 9.4 One generation step
 
 1. Refuse what the adapter does not handle: `global_step` below the buffer's
-   version, more than one process, `loss_type == "vespo"` with `beta > 0`,
-   or any of the tool, vLLM or vision keys.
+   version, `loss_type == "vespo"` with `beta > 0`, or any of the tool, vLLM
+   or vision keys (more than one process is routed through §9.8).
 2. Behavior logprobs: use `old_per_token_logps` if TRL computed it (it does
    so only when generation and optimizer steps are misaligned, or under vLLM
    importance correction); otherwise one no-grad forward through
@@ -669,6 +675,69 @@ the torch RNG, so the adapter does not perturb the rest of the run the way
   are replayed.
 - `mask_truncated_completions=True` zeroes a row's whole mask; such rows
   cannot form a `Rollout` and are skipped.
+
+### 9.8 More than one process
+
+Under `accelerate` with `N > 1` processes, `_generate_and_score_completions`
+runs on every rank over that rank's prompts; rewards and advantages are
+gathered, computed on the whole generation batch, and sliced back with
+`advantages[process_slice]`, where the slice of rank `k` is rows
+`[k·n, (k+1)·n)` of the global batch. So each rank sees a contiguous,
+rank-ordered slice; a prompt group of `G` rows straddles two ranks whenever
+`n` is not a multiple of `G`; and `num_items_in_batch` is already the
+global mask sum (`accelerator.gather(loss_mask.sum()).sum()`), which the
+loss divides by `num_processes`.
+
+`reservoir.integrations._trl_distributed` keeps §9.4 unchanged and adds a
+transport around it:
+
+1. **Ownership.** Rank 0 owns the buffer and is the only log writer. A
+   `ReservoirReplay` constructed under a launcher that sets `RANK` or
+   `LOCAL_RANK` to a non-zero value builds no buffer (its `is_owner` is
+   False and `.buffer` raises); `ReservoirGRPOTrainer` calls
+   `attach(accelerator)` at construction, which fixes the rank from the
+   process group. A log, manifest or directory is not opened until the rank
+   is known; in-memory state built before that is closed and dropped on a
+   non-owner. `attach` is itself a collective under more than one process:
+   if any rank but 0 has already opened file-backed state (a launcher that
+   sets no `RANK`, since `LOCAL_RANK=0` alone decides nothing, and a `.buffer`
+   touched before the trainer was built), every rank raises together and
+   nothing is attached. `bind_checkpoint` and
+   `resume_from_checkpoint` are no-ops off the owner.
+2. **Behavior logprobs** are computed per rank for its own rows (one
+   no-grad forward, balanced across devices), then every rank's slice, with
+   its `global_step`, is all-gathered as CPU tensors (`gather_object`; every
+   rank receives every slice and holds them until the step returns).
+   A rank whose local work fails contributes its error instead of a batch.
+3. **Rank 0 runs §9.4 on the global batch**: shards are padded to common
+   widths (`pad_batch`, prompts on the left, completions on the right) and
+   concatenated in rank order, so groups are whole and the insert order in
+   the log is the global row order. `old_per_token_logps` is present, so no
+   second forward runs. The witness, telemetry, gate and rescoring see the
+   global batch.
+4. **The result is broadcast** (`broadcast_object`) and each rank takes
+   back its rows, padded to the global width when replay widened the batch,
+   together with the recomputed global `num_items_in_batch`. When rank 0
+   had nothing to replay, every rank returns the dict TRL produced, as in
+   one process; a step whose every draw was declined returns the batch with
+   behavior logprobs attached in both paths, and the witness digest is over
+   that batch.
+5. **Every rank performs exactly one gather and one broadcast per hook
+   call** (plus the one gather of `attach` on the first call). A failure before the gather on any rank (a refused key, a bad
+   logprob, an out-of-memory forward) travels in that rank's shard; rank 0
+   turns it, or its own failure (a version regression, ranks disagreeing on
+   `global_step`, a gather that returned fewer shards than the world size),
+   into the broadcast value; every rank raises after the broadcast, the
+   failing rank with its own exception and the others naming it. No rank
+   is left waiting in a collective.
+
+`Communicator` is the four-member interface this needs (`num_processes`,
+`process_index`, `gather_object`, `broadcast_object`). A real `Accelerator`
+is wrapped over `accelerate.utils.gather_object` / `broadcast_object_list`;
+the tests drive the same code with a fake accelerator of two and four ranks
+on threads that rendezvous on a barrier, with a parity check against the
+single-process adapter on the concatenated batch. The adapter has not been
+run on a real multi-GPU process group (nonclaims §21).
 
 ## 10. Content Commitment, Transcript and Diff
 
@@ -823,11 +892,13 @@ batch and replaced at most once, each row's digest equals the digest the
 draw resolved to, sample `op_counter` values increase, and no sample is
 witnessed twice. `reservoir-transcript --explain STEP ROW` answers why a
 row holds what it holds. The tensor digest (prompt ids, masks, completion
-ids, advantages and behavior logprobs, in a fixed-width encoding) is a
+ids, advantages and behavior logprobs, the per-token logprobs zeroed outside
+the completion mask, in a fixed-width encoding) is a
 commitment the log cannot open; a holder of the batch can. The `format`
 field of `decay_config` is `"2"` for logs that may carry witnesses and
-telemetry; the checker reads formats 1 and 2 and refuses those records in
-a format-1 log.
+telemetry and `"3"` for logs that may also carry quarantine evictions
+(§10.10); the checker reads formats 1 to 3 and refuses each record kind in
+a log whose format predates it.
 
 ### 10.9 Telemetry and the drift gate
 
@@ -858,7 +929,62 @@ the telemetry record (a slot drawn more than once is evicted only if every
 draw of it was declined), and more than `max_declines_per_step` declines in
 one step raise. A decline is never silent.
 
-### 10.10 Limit
+### 10.10 Quarantine and blast radius
+
+Incident response has two halves: remove what a bad reward function or a
+leaked prompt set put into the buffer, and find out what it reached.
+
+`RolloutBuffer.quarantine(predicate, reason, predicate_text=None)` runs
+`predicate(rollout, group)` over a copy of every live entry before anything
+is mutated (a predicate that raises, or returns anything but a `bool`,
+leaves the buffer unchanged, and one that writes into its arguments
+changes nothing the buffer stores, so the live state and the replayed log
+agree), then evicts each match with reason `quarantine`. A buffer that
+continues a format-1 or format-2 log refuses, before mutating, because
+that log's checker would reject the record.
+Each such `evict` record carries `predicate`, the caller's text or the
+predicate's source line collapsed to one line, and `note`, the `reason`
+argument. Nothing is written when nothing matches. The durable buffer
+evaluates the predicate against the committed state and logs a
+`quarantine` command holding the selected positions and both texts, never
+the callable, so recovery replays the same evictions; the crash campaign
+cuts inside it (`rollout_quarantine`).
+
+The checker requires both texts on a `quarantine` evict, refuses them on
+any other record, refuses the reason in a log of format 1 or 2, and
+otherwise treats the record as the evict it is (a live slot, leaf set to
+zero, no pending stale evictions). It resolves the slot to the example it
+held, so `reservoir-transcript --blast-radius <digest>` can answer the
+question an incident asks: every insert of the example, every
+training-batch row that held it (from the batch witnesses) with its step,
+the sorted steps touched, how often it was drawn and how many of those
+draws have no witness (rows and steps are then a lower bound, and the
+entry says so), and the quarantine records that removed it.
+With the manifest the radius covers every committed example of the same
+prompt; without it only the exact digest is followed, and the entry says
+so. A log without witnesses lists no rows and says so. The earliest step
+in the radius is the checkpoint a run has to be rolled back to.
+
+### 10.11 Reward provenance
+
+GRPO rewards are usually a weighted sum of several functions (a verifier,
+a format check, a judge). The example's `reward` in the content digest is
+the advantage the loss consumed; which function produced it is lost. The
+TRL row conversion accepts `reward_names` and a `(B, F)` tensor of
+per-function values and stores `{name: value}` under the reserved
+metadata key `rewards` (`rollout_manifest.REWARDS_KEY`); the buffer
+validates it before any insert and writes it as the optional `rewards`
+field of the manifest line. The field is numeric only (printable names to
+finite JSON numbers; a `NaN`, TRL's "this function abstained", is left
+out; text is refused) and outside the content digest, so the log does not
+commit to it: it is reported, like the telemetry log-ratios, and the
+checker verifies only its shape. The transcript shows it next to each
+example, which is what "verifier high, judge low" queries need after the
+fact. Wiring the two arguments into `ReservoirReplay._ingest` is a
+two-line change in the adapter that reads `trainer.reward_func_names` and
+the per-function rewards TRL computes.
+
+### 10.12 Limit
 
 The log commits; the manifest opens. A chain-consistent change to an
 insert's `content_digest` or `source` is invisible without the manifest.
@@ -866,3 +992,10 @@ The mutation campaign measures this (`content_limit` in
 `results/mutation_campaign_report.json`): 3 such forgeries survive the
 log-only check and all 3 are rejected with the manifest. The campaign fails
 if that measurement ever changes.
+
+The log commits to neither a quarantine record's texts nor the manifest's
+`rewards`. A chain-consistent change to the predicate text or the note, a
+changed reward value and a dropped `rewards` field all pass the checker;
+the campaign measures these four (`provenance_limit`) and fails if the
+measurement changes. They are the operator's and the adapter's statements,
+recorded so an auditor can read them, checked for shape only.

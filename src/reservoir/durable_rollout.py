@@ -77,6 +77,10 @@ from reservoir.durable import CorruptStateError, _full_fsync, _kill_self, _shoul
 from reservoir.rollout import Rollout
 from reservoir.rollout_buffer import RolloutBatch, RolloutBuffer
 from reservoir.rollout_manifest import ManifestWriter
+from reservoir.rollout_quarantine import (
+    MAX_NOTE_LENGTH, MAX_PREDICATE_LENGTH, QuarantinePredicate, quarantine_text, require_quarantine_format,
+    select_positions, validate_text,
+)
 from reservoir.rollout_snapshot import _require_json_round_trip
 from reservoir.rollout_wal import CommandLog, _fsync_directory, apply_command, encode_rollouts
 
@@ -427,6 +431,37 @@ class DurableRolloutBuffer:
         """Durably remove a live entry with a reason; see ``RolloutBuffer.evict``."""
         self._commit("evict", {"position": int(position), "reason": reason},
                      lambda: self._buf.evict(position, reason))
+
+    def quarantine(self, predicate: QuarantinePredicate, reason: str,
+                   predicate_text: Optional[str] = None) -> tuple[int, ...]:
+        """Durably quarantine every matching entry; see ``RolloutBuffer.quarantine``.
+
+        The predicate is evaluated against the committed state first; the
+        command logs the selected positions and both texts, never the
+        callable, so recovery replays the same evictions. No command is
+        logged when nothing matches.
+        """
+        text = quarantine_text(predicate, predicate_text)
+        validate_text(reason, "quarantine reason", MAX_NOTE_LENGTH)
+        require_quarantine_format(self._buf)
+        positions = select_positions(self._buf, predicate)
+        self.quarantine_positions(positions, text, reason)
+        return positions
+
+    def quarantine_positions(self, positions: Sequence[int], predicate_text: str, reason: str) -> None:
+        """Durably quarantine the given slots; see ``RolloutBuffer.quarantine_positions``.
+
+        Texts and format are validated before anything is logged; an
+        empty list logs nothing.
+        """
+        validate_text(predicate_text, "predicate text", MAX_PREDICATE_LENGTH)
+        validate_text(reason, "quarantine reason", MAX_NOTE_LENGTH)
+        require_quarantine_format(self._buf)
+        slots = [int(p) for p in positions]
+        if not slots:
+            return
+        self._commit("quarantine", {"positions": slots, "predicate": predicate_text, "note": reason},
+                     lambda: self._buf.quarantine_positions(slots, predicate_text, reason))
 
     def record_telemetry(self, step: int, counts: dict, sample=None, reported=None) -> None:
         """Durably write a telemetry record; see ``RolloutBuffer.record_telemetry``."""

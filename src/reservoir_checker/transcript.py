@@ -23,11 +23,20 @@ into the answers an auditor asks for:
   this step) or replayed from a given draw, with the example's digest,
   its source, the weight it was replayed with and the record that stored
   it. Needs batch witnesses in the log.
+- **Blast radius.** ``--blast-radius <digest>`` lists every insert of the
+  example, every training-batch row that held it (from the batch
+  witnesses) with its step, the steps touched, how often it was drawn
+  and how many of those draws have no witness (rows and steps are then a
+  lower bound), and every quarantine record that removed it. With a
+  manifest the radius widens to every example of the same prompt. The
+  question it answers after an incident: what did this example reach, and
+  back to which step must a run go.
 
 Every statement is derived from the log alone; the manifest, when given,
 only adds the human-readable example (prompt id, tokens, reward) next to
-its digest. A log without content digests supports the per-slot view
-only, and the report says so.
+its digest (and its per-reward-function values when the manifest carries
+them). A log without content digests supports the per-slot view only, and
+the report says so.
 
 Command line::
 
@@ -39,7 +48,8 @@ Command line::
 
 Exit status: 0 verified (and every quota met), 2 a quota was exceeded,
 1 the log did not verify, an argument was malformed, or ``--quota`` /
-``--find`` were asked of a log that has no content digests.
+``--find`` / ``--blast-radius`` were asked of a log that has no content
+digests.
 
 The input to ``build_transcript`` must be a ``VerifiedLog``: the walk
 reads record fields without re-validating them.
@@ -156,10 +166,10 @@ def _quotas(sources: dict, quotas: dict[str, int]) -> list[dict]:
     ]
 
 
-def _require_digests(values: list[str]) -> None:
+def _require_digests(values: list[str], flag: str = "--find") -> None:
     for value in values:
         if not (isinstance(value, str) and len(value) == 64 and set(value) <= _HEX):
-            raise CheckerError(f"--find expects a 64-character lowercase hex content digest, got {value!r}")
+            raise CheckerError(f"{flag} expects a 64-character lowercase hex content digest, got {value!r}")
 
 
 def _find(verified: VerifiedLog, digests: list[str]) -> dict[str, list[dict]]:
@@ -210,6 +220,77 @@ def explain_row(verified: VerifiedLog, step: int, row: int, sample_op_counter: O
     }
 
 
+_NOT_COMMITTED = "this digest was never committed in the log"
+
+
+def blast_radius(verified: VerifiedLog, digests: list[str], manifest: Optional[list[dict]] = None) -> dict[str, dict]:
+    """What each example reached: inserts, witnessed rows and steps, quarantine records.
+
+    With ``manifest`` the radius covers every committed example of the
+    same prompt; without it only the exact digest is followed. Rows come
+    from the batch witnesses, so a log without them lists none and the
+    entry says so.
+    """
+    by_digest = {line["content_digest"]: line for line in manifest} if manifest else {}
+    committed = {i.content_digest for i in verified.content.history}
+    evicted_at = _walk(verified.records)[2]
+    report: dict[str, dict] = {}
+    for digest in digests:
+        if digest not in committed:
+            report[digest] = {"found": False, "prompt_id": None, "examples": [], "inserts": [], "rows": [],
+                              "steps": [], "times_sampled": 0, "unwitnessed_draws": 0, "quarantined": [],
+                              "note": _NOT_COMMITTED}
+            continue
+        line = by_digest.get(digest)
+        prompt_id = line["prompt_id"] if line is not None else None
+        examples = [digest] if line is None else sorted(
+            d for d, l in by_digest.items() if l["prompt_id"] == prompt_id and d in committed)
+        report[digest] = _radius_entry(verified, prompt_id, examples, evicted_at, manifest is not None)
+    return report
+
+
+def _radius_entry(verified: VerifiedLog, prompt_id: Optional[str], examples: list[str],
+                  evicted_at: dict[int, Optional[int]], with_manifest: bool) -> dict:
+    wanted = set(examples)
+    witnessed_ops = {w["sample_op_counter"] for w in verified.content.witnesses}
+    draws = [s for s in verified.content.samples if s.content_digest in wanted]
+    rows = sorted(
+        ({"step": w.step, "row": w.row, "sample_op_counter": w.sample_op_counter, "draw": w.draw,
+          "content_digest": w.content_digest, "record_index": w.record_index}
+         for w in verified.content.witnessed_rows if w.content_digest in wanted),
+        key=lambda r: (r["step"], r["row"]),
+    )
+    entry: dict = {
+        "found": True, "prompt_id": prompt_id, "examples": examples,
+        "inserts": [
+            {"record_index": i.record_index, "op_counter": i.op_counter, "index": i.index,
+             "entry_version": i.entry_version, "content_digest": i.content_digest,
+             "evicted_at_record": evicted_at.get(i.record_index)}
+            for i in verified.content.history if i.content_digest in wanted
+        ],
+        "rows": rows,
+        "steps": sorted({r["step"] for r in rows}),
+        "times_sampled": len(draws),
+        "unwitnessed_draws": sum(1 for s in draws if s.op_counter not in witnessed_ops),
+        "quarantined": [
+            {"record_index": q.record_index, "index": q.index, "content_digest": q.content_digest,
+             "predicate": q.predicate, "note": q.note}
+            for q in verified.content.quarantines if q.content_digest in wanted
+        ],
+    }
+    notes = []
+    if not verified.content.witnesses:
+        notes.append("the log has no batch witnesses, so no training-batch rows can be listed")
+    elif entry["unwitnessed_draws"]:
+        notes.append(f"{entry['unwitnessed_draws']} draw(s) of these examples have no batch witness, so rows and "
+                     "steps are a lower bound")
+    if not with_manifest:
+        notes.append("without a manifest only this exact example is followed, not the prompt's other examples")
+    if notes:
+        entry["note"] = "; ".join(notes)
+    return entry
+
+
 def build_transcript(
     verified: VerifiedLog,
     quotas: Optional[dict[str, int]] = None,
@@ -217,13 +298,15 @@ def build_transcript(
     manifest: Optional[list[dict]] = None,
     explain: Optional[tuple[int, int]] = None,
     explain_sample: Optional[int] = None,
+    blast: Optional[list[str]] = None,
 ) -> dict:
     """The full report as a JSON-serialisable dict. See the module docstring for its parts.
 
-    Raises ``CheckerError`` when ``quotas`` or ``find`` are asked of a log
-    without content digests (a silent pass there would be a false
-    assurance), when a ``find`` value is not a digest, or when a real
-    source tag collides with the report's key for untagged examples.
+    Raises ``CheckerError`` when ``quotas``, ``find`` or ``blast`` are asked
+    of a log without content digests (a silent pass there would be a
+    false assurance), when a ``find`` or ``blast`` value is not a digest,
+    or when a real source tag collides with the report's key for untagged
+    examples.
     """
     records = verified.records
     window_at, windows, evicted_at = _walk(records)
@@ -235,9 +318,11 @@ def build_transcript(
     }
     if find is not None:
         _require_digests(find)
+    if blast is not None:
+        _require_digests(blast, "--blast-radius")
     if not verified.content.has_content:
-        if quotas is not None or find is not None:
-            raise CheckerError("--quota and --find need content digests; this log has none")
+        if quotas is not None or find is not None or blast is not None:
+            raise CheckerError("--quota, --find and --blast-radius need content digests; this log has none")
         slots: Counter = Counter(str(s.leaf_index) for s in verified.content.samples)
         report["slots"] = dict(sorted(slots.items(), key=lambda kv: int(kv[0])))
         report["note"] = "the log has no content digests; only per-slot exposure is available"
@@ -251,6 +336,8 @@ def build_transcript(
             line = by_digest.get(digest)
             if line is not None:
                 entry["example"] = {k: line[k] for k in ("prompt_id", "tokens", "reward_hex")}
+                if "rewards" in line:
+                    entry["example"]["rewards"] = line["rewards"]
     sources, windows = _mixture(verified, window_at, windows)
     report["content"] = content
     report["sources"] = sources
@@ -271,6 +358,8 @@ def build_transcript(
     ]
     if explain is not None:
         report["explain"] = explain_row(verified, *explain, sample_op_counter=explain_sample)
+    if blast is not None:
+        report["blast_radius"] = blast_radius(verified, blast, manifest)
     return report
 
 
@@ -324,7 +413,25 @@ def render_text(report: dict, by: str = "all") -> str:
         lines.append(f"find {digest[:16]}…: {len(hits)} occurrence(s)")
         lines += [f"  record {h['record_index']} position {h['position_in_batch']} op_counter {h['op_counter']}"
                   for h in hits]
+    for digest, entry in report.get("blast_radius", {}).items():
+        lines += _render_radius(digest, entry)
     return "\n".join(lines)
+
+
+def _render_radius(digest: str, b: dict) -> list[str]:
+    if not b["found"]:
+        return [f"blast radius {digest[:16]}…: {b['note']}"]
+    prompt = f" prompt {b['prompt_id']!r}," if b["prompt_id"] is not None else ""
+    lines = [f"blast radius {digest[:16]}…:{prompt} {len(b['examples'])} example(s), {len(b['inserts'])} insert(s), "
+             f"sampled {b['times_sampled']}x ({b['unwitnessed_draws']} unwitnessed), {len(b['rows'])} witnessed "
+             f"row(s) over steps {b['steps']}, quarantined {len(b['quarantined'])}x"]
+    lines += [f"  step {r['step']} row {r['row']}: sample {r['sample_op_counter']} draw {r['draw']}, "
+              f"example {r['content_digest'][:16]}…" for r in b["rows"]]
+    lines += [f"  quarantined at record {q['record_index']} (slot {q['index']}): {q['note']} [{q['predicate']}]"
+              for q in b["quarantined"]]
+    if b.get("note"):
+        lines.append(f"  note: {b['note']}")
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +475,9 @@ def _parser() -> argparse.ArgumentParser:
                         help="why this training-batch row holds what it holds (needs batch witnesses)")
     parser.add_argument("--explain-sample", type=int, default=None, metavar="OP_COUNTER",
                         help="with --explain: which sample's witness, when a step has several")
+    parser.add_argument("--blast-radius", action="append", default=[], metavar="DIGEST",
+                        help="every insert, witnessed training-batch row, step and quarantine of this example "
+                             "(with --manifest: of every example of its prompt); repeatable")
     parser.add_argument("--json", default=None, metavar="PATH", help="also write the full report as JSON")
     return parser
 
@@ -386,7 +496,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         verified = verify_chain(records, args.capacity, args.allow_truncated, manifest=manifest)
         report = build_transcript(verified, quotas=quotas, find=args.find or None, manifest=manifest,
                                   explain=tuple(args.explain) if args.explain else None,
-                                  explain_sample=args.explain_sample)
+                                  explain_sample=args.explain_sample, blast=args.blast_radius or None)
         if args.json is not None:
             with open(args.json, "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2)

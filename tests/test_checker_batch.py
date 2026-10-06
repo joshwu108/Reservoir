@@ -81,7 +81,7 @@ class TestBufferSide:
         assert [e["row"] for e in rec["replaced"]] == [4, 5]
         assert [e["draw"] for e in rec["replaced"]] == [0, 1]
         assert rec["tensor_digest"] == DIGEST
-        assert records[0]["format"] == "2"
+        assert records[0]["format"] == "3"
 
     def test_only_the_latest_batch_once(self) -> None:
         buf = RolloutBuffer(capacity=4, attest=AttestationLog())

@@ -73,11 +73,25 @@ tiny Qwen2 test model) three times: **a** and **b** with the same seeds,
 (`results/reproducible_grpo_report.json`, logs under
 `benchmarks/modal/results/repro_cpu_12steps_seed42/`) shows a and b with
 byte-identical logs and manifests and the same head digest, and a and c
-first differing at record 1, an insert, classified `data`. The GPU
-versions are `benchmarks/modal/reproducible_grpo_real.py` (HF generate on a
-T4, with and without PyTorch's deterministic kernels) and
-`benchmarks/modal/reproducible_grpo_vllm.py` (vLLM batch-invariant mode on
-an A10G, on a 0.5B model); neither has been run yet.
+first differing at record 1, an insert, classified `data`.
+
+The same triplet on a GPU (`benchmarks/modal/reproducible_grpo_real.py`,
+HF generate on a T4, torch 2.14.0+cu130, run 2026-10-05) gave the verdict
+`IDENTICAL` both with PyTorch's default kernels and with
+`torch.use_deterministic_algorithms` plus `CUBLAS_WORKSPACE_CONFIG`: a and
+b byte-identical, a and c first differing at record 1 (`data`). The two
+variants even share the same head digest, and it differs from the CPU
+run's, as it must: the GPU generated different tokens than the CPU did.
+Logs and reports are under `benchmarks/modal/results/repro_hf_t4_*`. This
+is one observation for a tiny model and twelve steps, not a guarantee that
+HF generation on a GPU is reproducible.
+
+The vLLM tier (`benchmarks/modal/reproducible_grpo_vllm.py`, batch-invariant
+mode on a 0.5B model) has not produced a result yet. Its first attempt used
+TRL's colocate mode and failed at the first backward pass: vLLM's
+batch-invariant mode replaces PyTorch's CUDA matmul kernels process-wide
+with inference-only ones (`aten::linear_backward` is then missing). The
+script now runs vLLM in TRL's server mode on a second GPU.
 
 ## Reading a diff
 
@@ -101,6 +115,7 @@ python -m checker.diff a/attest.jsonl c/attest.jsonl
 python -m checker.transcript run/attest.jsonl --manifest run/manifest.jsonl --by source
 python -m checker.transcript run/attest.jsonl --quota scraped=0 --quota licensed=50000
 python -m checker.transcript run/attest.jsonl --find <content digest> --json report.json
+python -m checker.transcript run/attest.jsonl --manifest run/manifest.jsonl --blast-radius <content digest>
 ```
 
 - **Exposure.** For every committed example: how many times it was drawn,
@@ -115,12 +130,20 @@ python -m checker.transcript run/attest.jsonl --find <content digest> --json rep
 - **Explain.** `--explain STEP ROW` says whether row ROW of the training
   batch built at step STEP was generated fresh or replayed, and from which
   draw, example and slot. Needs the batch witnesses the TRL adapter writes.
+- **Blast radius.** `--blast-radius <digest>` is the incident question:
+  every insert of the example, every training-batch row that held it with
+  its step, the steps touched (the earliest is the checkpoint to roll back
+  to), and every `quarantine` eviction that removed it, with the predicate
+  text and the operator's note. With `--manifest` the radius widens to every
+  example of the same prompt. `buffer.quarantine(predicate, reason)` is what
+  writes those evictions.
 
 Every number comes from the log alone; the manifest only adds the
-human-readable example next to its digest. A log without content digests
+human-readable example next to its digest (and its per-reward-function
+values when the adapter recorded them). A log without content digests
 (written before version 0.5.0, or by the classic transition buffers)
-supports a per-slot view only, and `--quota` and `--find` refuse it rather
-than pass silently.
+supports a per-slot view only, and `--quota`, `--find` and
+`--blast-radius` refuse it rather than pass silently.
 
 ## Relation to Verifiable Fine-Tuning
 
@@ -187,6 +210,6 @@ made for replay (`docs/nonclaims.md` §10, §13).
   tokenizers has two digests.
 - Prompt selection (which prompts to generate rollouts for) is outside the
   log; `DatasetBuffer` is not attested.
-- GPU runs are reproducible only when the inference engine is. No GPU
-  result exists yet; the GPU demo script reports which case it observes
-  when it is run.
+- GPU runs are reproducible only when the inference engine is. The HF
+  tier on a T4 happened to be (see above); the vLLM tier reports which
+  case it observes when it is run.

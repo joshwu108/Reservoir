@@ -268,7 +268,10 @@ class Rollout:
         Caller-defined extras (source dataset, sample index, ...). Stored
         as a read-only shallow copy: the mapping itself cannot be changed,
         but mutable values inside it still alias the caller's objects.
-        Ignored by equality and hashing.
+        Ignored by equality and hashing. One key is reserved: ``"rewards"``
+        (``rollout_manifest.REWARDS_KEY``), a mapping of reward function
+        name to finite number that a buffer with a manifest validates and
+        copies to the manifest line.
 
     Raises
     ------

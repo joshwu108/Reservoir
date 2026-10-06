@@ -254,9 +254,11 @@ def test_vllm_sampling_logprobs_are_refused_when_trl_would_use_them(kwargs):
     assert r.stats["dropped_sampling_logprobs"] == 0
 
 
-def test_multi_process_is_refused():
+def test_multi_process_without_a_process_group_fails_loudly():
+    # An accelerator that claims two processes but has no process group gathers only its own
+    # shard; the adapter must refuse rather than replay half a batch.
     trainer = FakeTrainer(replay(), [live_batch()], num_processes=2)
-    with pytest.raises(NotImplementedError, match="process"):
+    with pytest.raises(RuntimeError, match="process_index"):
         trainer.generate(step=0)
 
 

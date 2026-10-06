@@ -91,6 +91,7 @@ from reservoir.draw import draw_uniform_below
 from reservoir.priorities import AdvantagePriority, PriorityStrategy, validated_score
 from reservoir.rollout import Rollout, RolloutGroup, default_is_success
 from reservoir.rollout_attest import AttestTarget, DrawConfig, ManifestTarget, RolloutAttester
+from reservoir.rollout_quarantine import QuarantinePredicate, apply_quarantine, run_quarantine
 from reservoir.rollout_snapshot import buffer_fingerprint, buffer_state_dict, load_buffer_state
 from reservoir.rollout_telemetry import exact_telemetry
 from reservoir.sumtree import ExactMinTree
@@ -608,16 +609,35 @@ class RolloutBuffer:
         ``"explicit"`` is the caller's decision; ``"drift"`` is an adapter
         declining an entry whose behavior logprobs drifted too far from
         the current policy. ``"stale"`` and ``"capacity"`` are the buffer's
-        own reasons and cannot be given here.
+        own reasons and cannot be given here; ``"quarantine"`` is written
+        by ``quarantine``, which records why.
         """
         if reason not in ("explicit", "drift"):
-            raise ValueError(f"evict reason must be 'explicit' or 'drift', got {reason!r}")
+            raise ValueError(f"evict reason must be 'explicit' or 'drift' (quarantine() for 'quarantine'), got {reason!r}")
         pos = self._to_index(position)
         if pos not in self._tree.entries:
             raise ValueError(f"evict: slot {pos} holds no live entry")
         event = self._tree.evict(pos, reason)  # type: ignore[arg-type]
         self._release_slot(pos)
         self._attester.record_write(event, self._op_counter)
+
+    def quarantine(self, predicate: QuarantinePredicate, reason: str,
+                   predicate_text: Optional[str] = None) -> tuple[int, ...]:
+        """Evict every live entry ``predicate(rollout, group)`` selects; return their slots.
+
+        Incident response. The predicate runs over copies of every live
+        entry before anything changes; each match is then evicted with
+        reason ``"quarantine"`` and a record carrying ``predicate_text``
+        (derived from the predicate's source when not given) and
+        ``reason``, the operator's note. Nothing is written when nothing
+        matches; a buffer continuing a pre-format-3 log refuses. See
+        ``rollout_quarantine``.
+        """
+        return run_quarantine(self, predicate, reason, predicate_text)
+
+    def quarantine_positions(self, positions: Sequence[int], predicate_text: str, reason: str) -> None:
+        """Quarantine the given live slots with the given texts; what the durable command log replays."""
+        apply_quarantine(self, positions, predicate_text, reason)
 
     def record_telemetry(self, step: int, counts: dict, sample: Optional[RolloutBatch] = None,
                          reported: Optional[dict] = None) -> None:

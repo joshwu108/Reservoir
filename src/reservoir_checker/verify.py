@@ -65,7 +65,7 @@ from fractions import Fraction
 from math import gcd
 from typing import Optional
 
-from reservoir_checker.content import ContentState, load_manifest
+from reservoir_checker.content import ContentState, load_manifest, quarantine_fields
 from reservoir_checker.decay_replay import CheckerError, DecayState, has_decay_fields, parse_config
 from reservoir_checker.draw import draw_uniform_below
 from reservoir_checker.telemetry import verify_telemetry
@@ -278,6 +278,8 @@ def _verify_record(
 
     elif op in ("insert", "update", "evict"):
         _verify_mutation(record, idx, tree, priorities)
+        if quarantine_fields(record, idx) is not None:
+            _require_format(decay, idx, 3, "quarantine evictions")
         if has_decay_fields(record):
             _require_decay(decay, idx, op)
             _guard_pending(decay, record, idx)
@@ -297,16 +299,12 @@ def _verify_record(
         content.on_sample(idx, record)
 
     elif op == "batch":
-        _require_decay(decay, idx, op)
-        if decay.cfg.get("format") != "2":  # type: ignore[union-attr]
-            raise CheckerError(f"Record {idx}: batch witnesses need a format-2 log (decay_config format \"2\")")
+        _require_format(decay, idx, 2, "batch witnesses")
         decay.require_no_pending(idx, op)  # type: ignore[union-attr]
         content.on_batch(idx, record)
 
     elif op == "telemetry":
-        _require_decay(decay, idx, op)
-        if decay.cfg.get("format") != "2":  # type: ignore[union-attr]
-            raise CheckerError(f"Record {idx}: telemetry records need a format-2 log (decay_config format \"2\")")
+        _require_format(decay, idx, 2, "telemetry records")
         decay.require_no_pending(idx, op)  # type: ignore[union-attr]
         versions = {pos: version for pos, (_, version) in decay.entries.items()}  # type: ignore[union-attr]
         content.telemetry.append(verify_telemetry(record, idx, content, versions, decay.current_version))  # type: ignore[union-attr]
@@ -342,6 +340,15 @@ def _require_decay(decay: Optional[DecayState], idx: int, op: str) -> None:
     if decay is None:
         raise CheckerError(
             f"Record {idx}: {op} requires a decay_config record at the start of the log"
+        )
+
+
+def _require_format(decay: Optional[DecayState], idx: int, minimum: int, what: str) -> None:
+    """Records introduced by a later log format are forgeries in an older one."""
+    _require_decay(decay, idx, what)
+    if int(decay.cfg["format"]) < minimum:  # type: ignore[union-attr]
+        raise CheckerError(
+            f"Record {idx}: {what} need a format-{minimum} log or later (decay_config format \"{minimum}\")"
         )
 
 

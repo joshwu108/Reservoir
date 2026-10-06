@@ -32,7 +32,17 @@ Field mapping for one stored row ``r``::
     Rollout.logprobs  = logprobs[r][:n]            behavior logprobs, clamped (see below)
     Rollout.reward    = advantages[r]              TRL's advantage, the value the loss consumes
     Rollout.metadata  = {"prompt_ids": [...unpadded prompt...], "row": r,
-                         "global_step": step, "ref_logprobs": [...]}  # last key only if present
+                         "global_step": step, "ref_logprobs": [...],  # only if the batch has them
+                         "rewards": {name: value, ...}}             # only with reward provenance
+
+Reward provenance: ``rows_to_groups(..., reward_names=trainer.reward_func_names,
+rewards_per_func=<(B, F) tensor>)`` records each row's per-reward-function
+values under ``metadata["rewards"]`` (``rollout_manifest.REWARDS_KEY``), so
+the buffer's manifest carries them next to the example. A ``NaN`` is TRL's
+"this function abstained on this row" and is left out of that row's
+mapping (a row where every function abstained gets ``{}``, which is not
+the same as no provenance); an infinity is a data error and raises. The
+values are numeric only and outside the content digest.
 
 Metadata values are lists, not tuples, so the durable buffer's JSON
 round-trip check accepts them.
@@ -52,7 +62,7 @@ from typing import Final, NamedTuple, Optional, Sequence
 import torch
 import torch.nn.functional as F
 
-from reservoir.rollout import Rollout
+from reservoir.rollout import MAX_SOURCE_LENGTH, Rollout
 
 MAX_POSITIVE_LOGPROB: Final[float] = 1e-3
 """Largest positive logprob treated as rounding noise and clamped to 0."""
@@ -172,9 +182,53 @@ class _Columns(NamedTuple):
     advantages: list[float]
     logprobs: list[list[float]]
     refs: Optional[list[list[float]]]
+    reward_names: Optional[tuple[str, ...]] = None    # reward provenance, both or neither
+    rewards: Optional[list[list[float]]] = None
 
 
-def _columns(output: dict, logprobs: torch.Tensor) -> _Columns:
+def _reward_provenance(
+    names: Optional[Sequence[str]], values: Optional[torch.Tensor], batch: int
+) -> tuple[Optional[tuple[str, ...]], Optional[list[list[float]]]]:
+    """Validate the optional per-reward-function inputs of ``rows_to_groups``."""
+    if (names is None) != (values is None):
+        raise ValueError("reward_names and rewards_per_func must be given together")
+    if names is None or values is None:
+        return None, None
+    names_t = tuple(names)
+    if any(not isinstance(n, str) or not n or len(n) > MAX_SOURCE_LENGTH or not n.isprintable() or not n.strip()
+           for n in names_t):
+        raise ValueError(
+            f"reward_names must be non-empty printable strings of at most {MAX_SOURCE_LENGTH} characters, "
+            f"got {list(names_t)}"
+        )
+    if len(set(names_t)) != len(names_t):
+        raise ValueError(f"reward_names must be distinct, got {list(names_t)}")
+    if values.dim() != 2:
+        raise ValueError(f"rewards_per_func must have shape (rows, functions), got {tuple(values.shape)}")
+    if values.size(0) != batch:
+        raise ValueError(f"rewards_per_func has {values.size(0)} rows for a batch of {batch}")
+    if values.size(1) != len(names_t):
+        raise ValueError(f"rewards_per_func has {values.size(1)} columns for {len(names_t)} reward_names")
+    return names_t, values.tolist()
+
+
+def _row_rewards(names: tuple[str, ...], values: Sequence[float], row: int) -> dict[str, float]:
+    """``{name: value}`` for one row, leaving out the functions that abstained (NaN)."""
+    out: dict[str, float] = {}
+    for name, value in zip(names, values):
+        value = float(value)
+        if math.isnan(value):
+            continue
+        if not math.isfinite(value):
+            raise ValueError(f"row {row}: reward {name!r} is {value!r}, not a finite value")
+        out[name] = value
+    return out
+
+
+def _columns(
+    output: dict, logprobs: torch.Tensor,
+    reward_names: Optional[Sequence[str]] = None, rewards_per_func: Optional[torch.Tensor] = None,
+) -> _Columns:
     """Validate masks and shapes once and move the batch to Python lists."""
     if tuple(logprobs.shape) != tuple(output["completion_ids"].shape):
         raise ValueError(
@@ -189,6 +243,7 @@ def _columns(output: dict, logprobs: torch.Tensor) -> _Columns:
         if not math.isfinite(value):
             raise ValueError(f"row {r}: advantage {value!r} is not finite")
     ref = output.get("ref_per_token_logps")
+    names, rewards = _reward_provenance(reward_names, rewards_per_func, len(advantages))
     return _Columns(
         prompts=[row[width - n:] if n else [] for row, n in zip(prompt_rows, prompt_lengths)],
         completions=output["completion_ids"].tolist(),
@@ -196,6 +251,8 @@ def _columns(output: dict, logprobs: torch.Tensor) -> _Columns:
         advantages=advantages,
         logprobs=logprobs.tolist(),
         refs=ref.tolist() if ref is not None else None,
+        reward_names=names,
+        rewards=rewards,
     )
 
 
@@ -222,6 +279,8 @@ def _group_rollouts(
         metadata: dict = {"prompt_ids": list(prompt), "row": r, "global_step": step}
         if cols.refs is not None:
             metadata["ref_logprobs"] = _finite_floats(cols.refs[r][:n], r, "ref logprob")
+        if cols.reward_names is not None and cols.rewards is not None:
+            metadata["rewards"] = _row_rewards(cols.reward_names, cols.rewards[r], r)
         rollouts.append(
             Rollout(tokens=cols.completions[r][:n], logprobs=lp, reward=cols.advantages[r], metadata=metadata)
         )
@@ -230,7 +289,8 @@ def _group_rollouts(
 
 
 def rows_to_groups(
-    output: dict, *, num_generations: int, step: int, logprobs: torch.Tensor
+    output: dict, *, num_generations: int, step: int, logprobs: torch.Tensor,
+    reward_names: Optional[Sequence[str]] = None, rewards_per_func: Optional[torch.Tensor] = None,
 ) -> RowConversion:
     """Turn a TRL output dict into ``Rollout`` groups ready for ``add_group``.
 
@@ -238,22 +298,26 @@ def rows_to_groups(
     ``old_per_token_logps`` or ones computed by the caller), shape
     ``(B, Lc)``. Zero-variance groups and rows with an empty completion
     mask are left out and counted; the rows of zero-variance groups are
-    returned so the caller can replace them.
+    returned so the caller can replace them. ``reward_names`` and
+    ``rewards_per_func`` (``(B, F)``, given together or not at all) attach
+    each row's per-reward-function values to its metadata; see the module
+    docstring.
 
     Raises
     ------
     ValueError
         ``B`` not a multiple of ``num_generations``, ``logprobs`` of the
         wrong shape, a malformed mask, a non-finite advantage, rows of one
-        group with different prompts (a wrong ``num_generations``), or a
-        bad logprob. Every message names the row or group.
+        group with different prompts (a wrong ``num_generations``), a bad
+        logprob, or misaligned or non-finite reward provenance. Every
+        message names the row or group.
     """
     batch = output["advantages"].size(0)
     if num_generations < 1 or batch % num_generations:
         raise ValueError(
             f"batch of {batch} rows is not a multiple of num_generations={num_generations}"
         )
-    cols = _columns(output, logprobs)
+    cols = _columns(output, logprobs, reward_names, rewards_per_func)
     groups: list[GroupSpec] = []
     dead_rows: list[int] = []
     skipped = clamped = near_dead = 0

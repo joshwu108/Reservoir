@@ -74,7 +74,7 @@ _CONFIG_INT_FIELDS = (
 # score exponent, recorded so the sampling distribution is fully declared.
 _DRAW_FIELDS = ("seed", "buffer_id", "alpha", "beta")
 _DECAY_FIELDS = ("base_priority_int", "entry_version", "base_epoch")
-_EVICT_REASONS = ("stale", "capacity", "explicit", "drift")
+_EVICT_REASONS = ("stale", "capacity", "explicit", "drift", "quarantine")
 
 
 # ---------------------------------------------------------------------------
@@ -204,8 +204,8 @@ def parse_config(record: dict, idx: int) -> dict:
         raise CheckerError(f"Record {idx}: reset_age_on_update must be a bool, got {reset!r}")
     cfg["reset_age_on_update"] = reset
     fmt = record.get("format", "1")
-    if fmt not in ("1", "2"):
-        raise CheckerError(f"Record {idx}: unknown log format {fmt!r}; this checker reads formats 1 and 2")
+    if fmt not in ("1", "2", "3"):
+        raise CheckerError(f"Record {idx}: unknown log format {fmt!r}; this checker reads formats 1 to 3")
     cfg["format"] = fmt
     cfg.update(_parse_draw_fields(record, idx))
 

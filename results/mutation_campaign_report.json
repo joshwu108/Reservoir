@@ -1,7 +1,7 @@
 {
   "campaign": "T4_mutation",
-  "total_mutants": 183,
-  "rejected": 183,
+  "total_mutants": 205,
+  "rejected": 205,
   "survived": [],
   "categories": [
     {
@@ -68,6 +68,11 @@
       "name": "telemetry",
       "total": 18,
       "rejected": 18
+    },
+    {
+      "name": "provenance",
+      "total": 22,
+      "rejected": 22
     }
   ],
   "content_limit": {
@@ -94,6 +99,15 @@
       "is_weight_replaced"
     ],
     "statement": "a draw moved inside its leaf's range, or a reweighted sample, is invisible to a log that does not record seed, buffer_id and beta; a 0.5.0 log records them and both are rejected"
+  },
+  "provenance_limit": {
+    "survive": [
+      "quarantine_predicate_text_changed_chain_consistent",
+      "quarantine_note_changed_chain_consistent",
+      "manifest_rewards_value_changed",
+      "manifest_rewards_dropped"
+    ],
+    "statement": "the log does not commit to a quarantine record's predicate text or note, nor to the manifest's per-reward-function values; they are the operator's and the adapter's statements, recorded and checked for shape only"
   },
   "pass": true
 }

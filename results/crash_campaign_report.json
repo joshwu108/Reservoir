@@ -1,8 +1,8 @@
 {
-  "total": 220,
-  "passed": 220,
+  "total": 275,
+  "passed": 275,
   "torn": 0,
-  "cut_fired": 220,
+  "cut_fired": 275,
   "cut_never_fired": 0,
   "failed": 0,
   "results": [
@@ -1798,6 +1798,556 @@
     },
     {
       "op": "rollout_update",
+      "cut": "after_dir_fsync",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "mid_wal_write",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "mid_wal_write",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "mid_wal_write",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "mid_wal_write",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "mid_wal_write",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_wal_write",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_wal_write",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_wal_write",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_wal_write",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_wal_write",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_wal_fsync",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_wal_fsync",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_wal_fsync",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_wal_fsync",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_wal_fsync",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_intent_write",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_intent_write",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_intent_write",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_intent_write",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_intent_write",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_intent_fsync",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_intent_fsync",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_intent_fsync",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_intent_fsync",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_intent_fsync",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "mid_segment_write",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "mid_segment_write",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "mid_segment_write",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "mid_segment_write",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "mid_segment_write",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_segment_fsync",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_segment_fsync",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_segment_fsync",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_segment_fsync",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_segment_fsync",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "before_rename",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "before_rename",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "before_rename",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "before_rename",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "before_rename",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_rename_before_dir_fsync",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_snapshot_before_wal_reset",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_snapshot_before_wal_reset",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_snapshot_before_wal_reset",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_snapshot_before_wal_reset",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_snapshot_before_wal_reset",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_dir_fsync",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_dir_fsync",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_dir_fsync",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
+      "cut": "after_dir_fsync",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_quarantine",
       "cut": "after_dir_fsync",
       "seed": 4,
       "cut_fired": true,

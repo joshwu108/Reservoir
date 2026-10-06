@@ -11,6 +11,18 @@ every digest and confirms the log commits to exactly these examples;
 ``python -m checker.transcript`` then reports which of them were sampled,
 how often and from which source.
 
+A line may also carry ``rewards``, the per-reward-function values of the
+example (``{"verifier": 1.0, "judge": 0.25}``), copied from the rollout's
+metadata under ``REWARDS_KEY`` by the TRL adapter's row conversion. They
+are numeric only (finite numbers keyed by printable names; no text). A
+function missing from a row's ``rewards`` abstained on that row (TRL's
+``NaN``); ``{}`` means every function abstained; an absent field means no
+provenance was recorded. The union of names over the manifest is the set
+of functions the run used. They are
+outside the content digest: the log does not commit to them, so they are
+reported, not verified. They let an engineer ask "verifier high, judge
+low" of a transcript after the fact.
+
 The manifest is not hash-chained. The log already commits to every line
 through the digests, so a second chain would add nothing a verifier can
 use. A team may publish the log alone (commitments only) or the log with
@@ -32,16 +44,52 @@ is the source of truth and the file is rebuilt from it on every reopen.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import IO, Final, Iterable, Optional, Union
 
-from reservoir.rollout import content_digest_of
+from reservoir.rollout import MAX_SOURCE_LENGTH, _require_finite_float, content_digest_of
 
 MANIFEST_KEYS: Final[tuple[str, ...]] = (
     "op_counter", "index", "content_digest", "prompt_id", "source",
     "tokens", "reward_hex", "entry_version",
 )
 """Every manifest line has exactly these keys; ``source`` is ``null`` when unset."""
+
+REWARDS_KEY: Final[str] = "rewards"
+"""Reserved ``Rollout.metadata`` key: ``{reward function name: value}``, copied to the manifest line."""
+
+MANIFEST_OPTIONAL_KEYS: Final[tuple[str, ...]] = (REWARDS_KEY,)
+"""Keys a manifest line may carry in addition to ``MANIFEST_KEYS``."""
+
+
+def validate_rewards(rewards: object, where: str = "rewards") -> dict[str, float]:
+    """Per-reward-function values: a mapping of printable names to finite numbers.
+
+    Values are returned as Python floats; names are bounded like a
+    ``source`` tag. Anything that is not a number (text, bool, a list) is
+    a ``ValueError``: the field is numeric by design. An empty mapping is
+    allowed: it means provenance was recorded and every function
+    abstained on this row, which differs from the field being absent.
+    """
+    if not isinstance(rewards, Mapping):
+        raise ValueError(f"{where}: rewards must be a mapping of reward function name to value, got {rewards!r}")
+    out: dict[str, float] = {}
+    for name, value in rewards.items():
+        if (not isinstance(name, str) or not name or len(name) > MAX_SOURCE_LENGTH
+                or not name.isprintable() or not name.strip()):
+            raise ValueError(
+                f"{where}: rewards names must be printable strings of 1..{MAX_SOURCE_LENGTH} characters, got {name!r}"
+            )
+        out[name] = _require_finite_float(value, f"{where}: rewards[{name!r}]")
+    return out
+
+
+def reward_provenance(metadata: Mapping, where: str) -> Optional[dict[str, float]]:
+    """The validated ``rewards`` of a rollout's metadata, or None when it has none."""
+    if REWARDS_KEY not in metadata:
+        return None
+    return validate_rewards(metadata[REWARDS_KEY], where)
 
 
 def manifest_record(
@@ -53,10 +101,15 @@ def manifest_record(
     tokens: Iterable[int],
     reward: float,
     entry_version: int,
+    rewards: Optional[Mapping] = None,
 ) -> dict:
-    """Build one manifest line. The digest is computed here from the same inputs."""
+    """Build one manifest line. The digest is computed here from the same inputs.
+
+    ``rewards``, when given, is written as the optional ``rewards`` field
+    after ``validate_rewards``; it does not enter the digest.
+    """
     tokens = [int(t) for t in tokens]
-    return {
+    record = {
         "op_counter": int(op_counter),
         "index": int(index),
         "content_digest": content_digest_of(prompt_id, tokens, reward),
@@ -66,13 +119,17 @@ def manifest_record(
         "reward_hex": float(reward).hex(),
         "entry_version": int(entry_version),
     }
+    if rewards is not None:
+        record[REWARDS_KEY] = validate_rewards(rewards)
+    return record
 
 
 def validate_manifest_records(records: object) -> list[dict]:
     """Check recovered manifest records field by field and return copies.
 
-    Every record must have exactly ``MANIFEST_KEYS`` with well-typed
-    values, and its ``content_digest`` must equal the digest recomputed
+    Every record must have exactly ``MANIFEST_KEYS`` (plus, optionally,
+    ``rewards``) with well-typed values, and its ``content_digest`` must
+    equal the digest recomputed
     from its own ``prompt_id``, ``tokens`` and ``reward_hex``. A snapshot
     is a file on disk and may have been edited; this is the boundary
     where it is trusted again. Raises ``ValueError`` naming the record.
@@ -82,8 +139,10 @@ def validate_manifest_records(records: object) -> list[dict]:
     out: list[dict] = []
     for i, record in enumerate(records):
         where = f"manifest record {i}"
-        if not isinstance(record, dict) or set(record) != set(MANIFEST_KEYS):
+        if not isinstance(record, dict) or not _has_manifest_keys(record):
             raise ValueError(f"{where} does not have the manifest keys")
+        if REWARDS_KEY in record:
+            validate_rewards(record[REWARDS_KEY], where)
         for name in ("op_counter", "index", "entry_version"):
             value = record[name]
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -105,13 +164,21 @@ def validate_manifest_records(records: object) -> list[dict]:
     return out
 
 
+def _has_manifest_keys(record: dict) -> bool:
+    required, optional = set(MANIFEST_KEYS), set(MANIFEST_OPTIONAL_KEYS)
+    return required <= set(record) <= required | optional
+
+
 def _canonical_line(record: dict) -> str:
     return json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
 
 
 def _copy(record: dict) -> dict:
-    """A copy that shares nothing mutable with the caller (the token list is the only container)."""
-    return {**record, "tokens": list(record["tokens"])}
+    """A copy that shares nothing mutable with the caller (the token list and the rewards)."""
+    copied = {**record, "tokens": list(record["tokens"])}
+    if REWARDS_KEY in record:
+        copied[REWARDS_KEY] = dict(record[REWARDS_KEY])
+    return copied
 
 
 class ManifestWriter:

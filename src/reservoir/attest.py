@@ -10,7 +10,9 @@ Schema (canonical JSON — sorted keys, no spaces):
     digest, op, index, old_priority_int, new_priority_int, op_counter, prev_digest
     Optional, present together when the buffer uses age decay:
       base_priority_int, entry_version, base_epoch
-    Optional on "evict" only: reason ("stale" | "capacity" | "explicit" | "drift")
+    Optional on "evict" only: reason ("stale" | "capacity" | "explicit" | "drift" | "quarantine")
+    Only with reason "quarantine", both required: predicate (the text of the
+      predicate that selected the entry) and note (the operator's reason)
     Optional on "insert" only: content_digest (64 hex chars, BLAKE2b-256 of
       the stored example, see rollout.py) and, only together with it,
       source (the caller's tag for where the prompt came from)
@@ -51,10 +53,10 @@ _PERSON = b"attest\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"  # 16 bytes
 _GENESIS = "genesis"
 
 _MUTATION_OPS = ("insert", "update", "evict")
-_EVICT_REASONS = ("stale", "capacity", "explicit", "drift")
+_EVICT_REASONS = ("stale", "capacity", "explicit", "drift", "quarantine")
 _DECAY_FIELDS = ("base_priority_int", "entry_version", "base_epoch")
 _CONTENT_DIGEST_LENGTH = 64   # hex characters of a BLAKE2b-256 digest
-LOG_FORMAT = "2"              # schema version written into decay_config; "2" adds batch witnesses and telemetry
+LOG_FORMAT = "3"              # schema version written into decay_config; "2" added batch witnesses and telemetry, "3" quarantine evictions
 TELEMETRY_COUNTERS = ("batch_rows", "replaced_rows", "declined_rows", "dead_groups", "near_dead_groups")
 # Field names a telemetry record owns; a reported measurement may not reuse one. The checker
 # (reservoir_checker.telemetry) keeps the same list; the two must not drift apart.
@@ -63,6 +65,7 @@ TELEMETRY_RESERVED = frozenset(TELEMETRY_COUNTERS) | {
     "staleness_max", "staleness_sum", "reported",
 }
 _MAX_SOURCE_LENGTH = 256      # same bound as reservoir.rollout.MAX_SOURCE_LENGTH
+_MAX_PREDICATE_LENGTH = 1024  # same bound as reservoir.rollout_quarantine.MAX_PREDICATE_LENGTH
 
 
 def _require_int(value: object, name: str, minimum: int = 0) -> int:
@@ -128,6 +131,8 @@ class AttestationLog:
         reason: Optional[str] = None,
         content_digest: Optional[str] = None,
         source: Optional[str] = None,
+        predicate: Optional[str] = None,
+        note: Optional[str] = None,
     ) -> dict:
         """Append a MutationRecord and return it.
 
@@ -156,6 +161,10 @@ class AttestationLog:
         source : str, keyword-only
             The caller's provenance tag for the example; requires
             ``content_digest``.
+        predicate, note : str, keyword-only
+            The text of the predicate that selected an entry for
+            quarantine and the operator's reason; both required with, and
+            only valid with, ``reason="quarantine"``.
 
         Returns
         -------
@@ -176,6 +185,7 @@ class AttestationLog:
         record.update(
             _decay_fields(op, base_priority_int, entry_version, base_epoch, reason)
         )
+        record.update(_quarantine_fields(reason, predicate, note))
         record.update(_content_fields(op, content_digest, source))
         return self._commit(record)
 
@@ -508,6 +518,31 @@ def _decay_fields(
             raise ValueError(f"reason must be one of {_EVICT_REASONS}, got {reason!r}")
         fields["reason"] = reason
     return fields
+
+
+def _require_text(value: object, name: str, limit: int) -> str:
+    """A non-empty printable string of at most ``limit`` characters."""
+    if not isinstance(value, str) or not value or len(value) > limit:
+        raise ValueError(f"{name} must be a non-empty string of at most {limit} characters, got {value!r}")
+    if not value.isprintable() or not value.strip():
+        raise ValueError(f"{name} must be printable and not only whitespace, got {value!r}")
+    return value
+
+
+def _quarantine_fields(reason: Optional[str], predicate: Optional[str], note: Optional[str]) -> dict:
+    """The two texts of a quarantine evict; empty for every other record."""
+    if reason != "quarantine":
+        if predicate is not None or note is not None:
+            raise ValueError("predicate and note are only valid with reason 'quarantine'")
+        return {}
+    if predicate is None:
+        raise ValueError("a quarantine evict needs the predicate text")
+    if note is None:
+        raise ValueError("a quarantine evict needs a note (the reason for the quarantine)")
+    return {
+        "predicate": _require_text(predicate, "predicate", _MAX_PREDICATE_LENGTH),
+        "note": _require_text(note, "note", _MAX_SOURCE_LENGTH),
+    }
 
 
 def _draw_fields(

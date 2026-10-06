@@ -15,7 +15,12 @@ Every ``insert`` record carries ``content_digest``, the BLAKE2b-256 digest
 serialised with sorted keys, no spaces, ASCII escapes for non-ASCII
 characters, UTF-8. Optionally it also carries ``source``, the caller's tag
 for where the prompt came from. ``update`` and ``evict`` records carry
-neither: they refer to a slot whose example the replay already knows.
+neither: they refer to a slot whose example the replay already knows. An
+``evict`` with reason ``"quarantine"`` carries two texts, ``predicate`` and
+``note``; this module checks their shape (non-empty, printable, bounded)
+and resolves the evicted slot to its example (``quarantines``) so the
+transcript can report what a quarantined example reached. The texts
+themselves are the operator's statement; nothing in the log verifies them.
 
 A log either has digests on every insert or on none. Mixing is rejected,
 because a verifier could not then say what a sample of an undigested slot
@@ -33,7 +38,9 @@ The manifest
 A manifest (``rollout_manifest.py`` in the library) is one JSON line per
 insert with the opening of its digest: ``op_counter``, ``index``,
 ``content_digest``, ``prompt_id``, ``source``, ``tokens``, ``reward_hex``,
-``entry_version``. ``check_manifest`` requires that the lines, in order,
+``entry_version``, plus an optional ``rewards`` object (per-reward-function
+values, printable names to finite numbers; numeric only and outside the
+digest, so reported rather than verified). ``check_manifest`` requires that the lines, in order,
 are exactly the log's content-bearing inserts, that each line's digest
 recomputes from its own prompt, tokens and reward, and that it equals the
 digest the log committed to. Without a manifest the log is still fully
@@ -55,11 +62,13 @@ _PERSON = b"rollout-content\x00"
 _DIGEST_LENGTH = 64
 _HEX_DIGITS = frozenset("0123456789abcdef")
 _MAX_SOURCE_LENGTH = 256   # mirrors the library's documented bound; not imported
+_MAX_PREDICATE_LENGTH = 1024   # mirrors reservoir.rollout_quarantine.MAX_PREDICATE_LENGTH; not imported
 
 MANIFEST_KEYS = (
     "op_counter", "index", "content_digest", "prompt_id", "source",
     "tokens", "reward_hex", "entry_version",
 )
+MANIFEST_OPTIONAL_KEYS = ("rewards",)
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +149,50 @@ def _is_source(value: object) -> bool:
     )
 
 
+def _is_text(value: object, limit: int) -> bool:
+    return isinstance(value, str) and 0 < len(value) <= limit and value.isprintable() and bool(value.strip())
+
+
+def quarantine_fields(record: dict, idx: int) -> Optional[tuple[str, str]]:
+    """Validate and return ``(predicate, note)`` of a quarantine evict, or None for any other record.
+
+    Both texts are required with reason ``"quarantine"`` and forbidden
+    otherwise; each must be a non-empty printable string within its bound.
+    """
+    has_text = "predicate" in record or "note" in record
+    if record.get("reason") != "quarantine":
+        if has_text:
+            raise CheckerError(f"Record {idx}: predicate and note are only valid on an evict with reason 'quarantine'")
+        return None
+    predicate, note = record.get("predicate"), record.get("note")
+    if not _is_text(predicate, _MAX_PREDICATE_LENGTH):
+        raise CheckerError(
+            f"Record {idx}: a quarantine evict needs predicate, a printable string of 1..{_MAX_PREDICATE_LENGTH} "
+            f"characters, got {predicate!r}"
+        )
+    if not _is_text(note, _MAX_SOURCE_LENGTH):
+        raise CheckerError(
+            f"Record {idx}: a quarantine evict needs note, a printable string of 1..{_MAX_SOURCE_LENGTH} "
+            f"characters, got {note!r}"
+        )
+    return predicate, note  # type: ignore[return-value]
+
+
+def _require_rewards(value: object, where: str) -> None:
+    """The optional ``rewards`` of a manifest line: printable names to finite JSON numbers (may be empty)."""
+    if not isinstance(value, dict):
+        raise CheckerError(f"{where}: rewards must be an object of reward function name to number")
+    for name, number in value.items():
+        if not _is_text(name, _MAX_SOURCE_LENGTH):
+            raise CheckerError(f"{where}: rewards names must be printable strings of 1..{_MAX_SOURCE_LENGTH} characters")
+        try:
+            as_float = float(number) if not isinstance(number, bool) and isinstance(number, (int, float)) else None
+        except OverflowError:
+            as_float = None
+        if as_float is None or as_float != as_float or as_float in (float("inf"), float("-inf")):
+            raise CheckerError(f"{where}: rewards[{name!r}] must be a finite number, got {number!r}")
+
+
 def content_fields(record: dict, idx: int) -> tuple[Optional[str], Optional[str]]:
     """Validate and return ``(content_digest, source)`` of a mutation record, or ``(None, None)``."""
     digest = record.get("content_digest")
@@ -203,10 +256,24 @@ class WitnessedRow:
     content_digest: str
 
 
+@dataclass(frozen=True)
+class QuarantinedSlot:
+    """One quarantine evict, resolved to the example its slot held."""
+
+    record_index: int
+    op_counter: int
+    index: int
+    content_digest: Optional[str]   # None in a log without content digests
+    source: Optional[str]
+    predicate: str
+    note: str
+
+
 @dataclass
 class ContentState:
     """Which example each slot holds, the insert history, every resolved sample,
-    and the batch witnesses that bind draws to training-batch rows.
+    the batch witnesses that bind draws to training-batch rows, and the
+    quarantine evictions resolved to their examples.
 
     ``has_content`` is ``None`` until the first insert decides whether this
     log carries digests; after that every insert must agree.
@@ -220,6 +287,7 @@ class ContentState:
     witnesses: list[dict] = field(default_factory=list)          # one entry per batch record
     witnessed_rows: list[WitnessedRow] = field(default_factory=list)
     telemetry: list = field(default_factory=list)                 # TelemetryPoint per telemetry record
+    quarantines: list[QuarantinedSlot] = field(default_factory=list)
     _samples_by_op: dict[int, list[ResolvedSample]] = field(default_factory=dict)
     _witnessed_ops: set[int] = field(default_factory=set)
     last_sample_op: Optional[int] = None    # op_counter of the latest sample record; they must increase
@@ -227,6 +295,7 @@ class ContentState:
     def on_mutation(self, record: dict, idx: int) -> None:
         """Called after verify.py accepted the mutation's tree effect (so ``index`` is valid)."""
         digest, source = content_fields(record, idx)
+        texts = quarantine_fields(record, idx)
         op = record["op"]
         where = f"Record {idx}"
         if op == "insert":
@@ -239,6 +308,11 @@ class ContentState:
                     entry_version=_int_field(record, "entry_version", where) if has_version else None,
                 )
         elif op == "evict":
+            if texts is not None:
+                held = self.slots.get(record["index"], (None, None))
+                self.quarantines.append(QuarantinedSlot(
+                    idx, _int_field(record, "op_counter", where), record["index"], held[0], held[1], *texts,
+                ))
             self.on_evict(idx, pos=record["index"])
 
     def _note_insert_style(self, with_digest: bool, idx: int) -> None:
@@ -391,8 +465,14 @@ class ContentState:
 def _validated_line(line: object, i: int) -> dict:
     """Field-level checks of one manifest line, plus its own digest recomputation."""
     where = f"manifest line {i}"
-    if not isinstance(line, dict) or set(line) != set(MANIFEST_KEYS):
-        raise CheckerError(f"{where}: must be an object with exactly the manifest keys {MANIFEST_KEYS}")
+    required, optional = set(MANIFEST_KEYS), set(MANIFEST_OPTIONAL_KEYS)
+    if not isinstance(line, dict) or not required <= set(line) <= required | optional:
+        raise CheckerError(
+            f"{where}: must be an object with exactly the manifest keys {MANIFEST_KEYS} "
+            f"(optionally {MANIFEST_OPTIONAL_KEYS})"
+        )
+    if "rewards" in line:
+        _require_rewards(line["rewards"], where)
     for name in ("op_counter", "index", "entry_version"):
         value = line[name]
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:

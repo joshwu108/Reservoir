@@ -20,6 +20,8 @@ Record order the checker relies on
    trusting ``new_priority_int``. An ``insert`` also carries the
    ``content_digest`` of the stored example and its ``source`` tag when
    the group has one (``record_insert``).
+   An ``evict`` with reason ``"quarantine"`` also carries the predicate
+   text and the operator's note (``rollout_quarantine``).
 4. One ``sample`` record per batch, unchanged from the classic buffer.
 5. Optionally one ``batch`` record per sample, written by an adapter
    through ``record_batch`` once it has placed the sampled rollouts into
@@ -32,7 +34,9 @@ The buffer never emits a record out of this order; the tree's
 Manifest
 --------
 With ``manifest=`` every insert also writes the opening of its digest
-(prompt id, tokens, reward, source) to a manifest; see
+(prompt id, tokens, reward, source) to a manifest, plus the rollout's
+per-reward-function values when its metadata carries them under
+``rollout_manifest.REWARDS_KEY`` (outside the digest); see
 ``rollout_manifest.py``. The manifest requires attestation to be on,
 because without the log there is nothing for it to open. The buffer calls
 ``prepare_inserts`` before it mutates anything, so digest and manifest
@@ -51,11 +55,11 @@ from fractions import Fraction
 from pathlib import Path
 from typing import IO, NamedTuple, Optional, Union
 
-from reservoir.attest import AttestationLog, make_sample_entry
+from reservoir.attest import LOG_FORMAT, AttestationLog, make_sample_entry
 from reservoir.decay import DecayParams
 from reservoir.decayed_tree import AdvanceResult, WriteEvent
 from reservoir.rollout import RolloutGroup
-from reservoir.rollout_manifest import ManifestWriter, manifest_record, validate_manifest_records
+from reservoir.rollout_manifest import ManifestWriter, manifest_record, reward_provenance, validate_manifest_records
 
 AttestTarget = Union[AttestationLog, str, Path, None]
 ManifestTarget = Union[ManifestWriter, str, Path, None]
@@ -189,16 +193,35 @@ class RolloutAttester:
         return self._manifest is not None
 
     @property
+    def log_format(self) -> Optional[int]:
+        """The ``format`` of the log's ``decay_config`` (1 when the record has none), or None with attestation off.
+
+        An empty log (a probe buffer restored from a state without
+        attestation) has committed to nothing and reports the current format.
+        """
+        if self._log is None:
+            return None
+        records = self._log.records
+        if not records or records[0].get("op") != "decay_config":
+            return int(LOG_FORMAT)
+        return int(records[0].get("format", "1"))
+
+    @property
     def manifest_records(self) -> list[dict]:
         """Manifest lines written so far (a copy); empty without a manifest."""
         return self._manifest.records if self._manifest is not None else []
 
-    def record_write(self, event: WriteEvent, op_counter: int) -> None:
-        """One mutation record for an update or evict (or an insert without content)."""
+    def record_write(self, event: WriteEvent, op_counter: int,
+                     quarantine: Optional[tuple[str, str]] = None) -> None:
+        """One mutation record for an update or evict (or an insert without content).
+
+        ``quarantine`` is ``(predicate_text, note)`` for an evict with
+        reason ``"quarantine"`` and None otherwise.
+        """
         log = self._log
         if log is None:
             return
-        self._emit(self._mutation(log, event, op_counter))
+        self._emit(self._mutation(log, event, op_counter, quarantine=quarantine))
 
     def prepare_inserts(self, group: RolloutGroup, op_counter: int) -> tuple[PreparedInsert, ...]:
         """Digest and manifest line for every rollout of ``group``, computed up front.
@@ -212,12 +235,14 @@ class RolloutAttester:
         digests = group.content_digests
         lines: list[Optional[dict]] = [None] * group.size
         if self._manifest is not None:
+            rewards = [reward_provenance(r.metadata, f"rollout {k} of prompt {group.prompt_id!r}")
+                       for k, r in enumerate(group.rollouts)]
             lines = [
                 manifest_record(
                     op_counter=op_counter, index=0, prompt_id=group.prompt_id, source=group.source,
-                    tokens=r.tokens, reward=r.reward, entry_version=group.model_version,
+                    tokens=r.tokens, reward=r.reward, entry_version=group.model_version, rewards=rw,
                 )
-                for r in group.rollouts
+                for r, rw in zip(group.rollouts, rewards)
             ]
         return tuple(PreparedInsert(d, group.source, line) for d, line in zip(digests, lines))
 
@@ -239,7 +264,9 @@ class RolloutAttester:
         op_counter: int,
         content_digest: Optional[str] = None,
         source: Optional[str] = None,
+        quarantine: Optional[tuple[str, str]] = None,
     ) -> dict:
+        predicate, note = quarantine if quarantine is not None else (None, None)
         return log.append_mutation(
             op=event.op,
             index=event.position,
@@ -252,6 +279,8 @@ class RolloutAttester:
             reason=event.reason,
             content_digest=content_digest,
             source=source,
+            predicate=predicate,
+            note=note,
         )
 
     def record_advance(self, result: AdvanceResult, op_counter: int) -> None:

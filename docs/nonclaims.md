@@ -191,11 +191,16 @@ Content digests are over token ids and so depend on the tokenizer.
 
 Two runs produce identical transcripts only when everything upstream of
 the buffer (generation, rewards, dead groups) is identical. The CPU demo
-shows this with HF ``generate`` under a fixed seed on a tiny model. On a
-GPU, and with any engine that is not batch-invariant, the generated data
-may differ between runs; ``checker.diff`` then locates the first insert
-where it did and shows that Reservoir's draws were identical before it,
-but Reservoir does not make the engine deterministic.
+shows this with HF ``generate`` under a fixed seed on a tiny model, and
+one T4 run of the same demo was identical too, with and without
+PyTorch's deterministic kernels (`benchmarks/modal/results/repro_hf_t4_*`).
+That is an observation about a tiny model and twelve steps. On a GPU, and
+with any engine that is not batch-invariant, the generated data may
+differ between runs; ``checker.diff`` then locates the first insert where
+it did and shows that Reservoir's draws were identical before it, but
+Reservoir does not make the engine deterministic. vLLM's batch-invariant
+mode cannot share a process with the trainer (its kernels have no
+backward), so the vLLM tier uses TRL's server mode on a second GPU.
 
 ### 19. Attestation Overhead
 
@@ -212,3 +217,37 @@ recomputed by the checker; the log-ratio statistics are carried from the
 adapter and listed under `reported`, and nothing verifies them. No claim
 is made that any threshold on them improves training; the drift gate is
 off by default and, when on, only makes its declines visible.
+
+### 21. More Than One Process
+
+The multi-process path of the TRL adapter is tested with a fake
+accelerator of two and four ranks in one interpreter and by parity with
+the single-process adapter on the concatenated batch. It has not been run
+on a real `torch.distributed` process group or on more than one GPU; the
+`accelerate` collectives it wraps are called as documented and nothing
+more is claimed about them. Rank 0 owns the buffer and the log, and the
+log records the global batch in rank order; it does not record which rank
+generated or trained which row. The rank-0 ownership rule relies on the
+launcher setting `RANK` (or a non-zero `LOCAL_RANK`), or on the trainer
+attaching the accelerator before the buffer is first used; a log,
+manifest or directory is not opened before then, but a `.buffer` read on
+another rank before the attach opens it there, and the attach then refuses
+on every rank after the file was touched. Behavior logprobs come from each rank's own forward, so
+the dropout caveat of §14 applies on every rank. No claim is made about
+throughput: every rank receives every rank's slice in the all-gather and
+the whole rewritten batch in the broadcast, once per generation step.
+
+### 21. Quarantine and Reward Provenance
+
+A quarantine eviction records the predicate text and the operator's note;
+the checker verifies that the record is a well-formed eviction of a live
+slot, not that the text describes the predicate that ran or that the
+reason is true. The blast radius lists what the batch witnesses saw: rows
+replayed from the buffer. The step at which an example was generated and
+trained fresh is the `entry_version` of its insert (the trainer's step in
+the TRL adapter), which the transcript reports; the row it occupied then
+is not in the log. The manifest's per-reward-function values are the
+adapter's statement, numeric only and outside the content digest: the log
+does not commit to them, a changed or dropped value passes the checker
+(the mutation campaign measures this), and the adapter wiring that
+supplies them to the row conversion is not yet in `ReservoirReplay`.

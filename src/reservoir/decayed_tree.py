@@ -72,8 +72,9 @@ from reservoir.sumtree import ExactMinTree, ExactSumTree
 #   "capacity"  the buffer was full and this was the oldest entry
 #   "explicit"  the caller asked for it
 #   "drift"     an adapter declined the entry: its behavior logprobs had drifted too far from the current policy
-EvictReason = Literal["stale", "capacity", "explicit", "drift"]
-EVICT_REASONS: Final[frozenset[str]] = frozenset({"stale", "capacity", "explicit", "drift"})
+#   "quarantine" an operator's predicate selected the entry for removal (rollout_quarantine.py)
+EvictReason = Literal["stale", "capacity", "explicit", "drift", "quarantine"]
+EVICT_REASONS: Final[frozenset[str]] = frozenset({"stale", "capacity", "explicit", "drift", "quarantine"})
 
 WriteOp = Literal["insert", "update", "evict"]
 

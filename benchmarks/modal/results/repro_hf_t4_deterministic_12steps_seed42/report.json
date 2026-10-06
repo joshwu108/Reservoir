@@ -1,0 +1,197 @@
+{
+  "demo": "reproducible_grpo",
+  "variant": "deterministic",
+  "device": "cuda:0",
+  "model": "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+  "versions": {
+    "trl": "1.13.0",
+    "transformers": "5.17.0",
+    "torch": "2.14.0+cu130"
+  },
+  "runs": {
+    "a": {
+      "attest": "benchmarks/modal/results/repro_hf_t4_deterministic_12steps_seed42/a/attest.jsonl",
+      "manifest": "benchmarks/modal/results/repro_hf_t4_deterministic_12steps_seed42/a/manifest.jsonl",
+      "seed": 42,
+      "buffer_seed": 0,
+      "model": "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+      "head_digest": "4c5596403fa1c5d0a539879f216ac2ec758088e1b7f831c143e4eb329b4ee5dc",
+      "records": 116,
+      "examples_committed": 88,
+      "totals": {
+        "hook_calls": 12,
+        "ingested_rows": 88,
+        "ingested_groups": 22,
+        "dead_groups": 2,
+        "skipped_rows": 0,
+        "clamped_logprobs": 0,
+        "replaced_rows": 8,
+        "logprob_forwards": 12,
+        "dropped_sampling_logprobs": 0,
+        "near_dead_groups": 0,
+        "declined_rows": 0,
+        "telemetry_forwards": 2,
+        "rescored_rows": 0
+      },
+      "versions": {
+        "trl": "1.13.0",
+        "transformers": "5.17.0",
+        "torch": "2.14.0+cu130"
+      },
+      "device": "cuda:0",
+      "torch_deterministic": true,
+      "extra_config": {},
+      "wall_clock_seconds": 22.64
+    },
+    "b": {
+      "attest": "benchmarks/modal/results/repro_hf_t4_deterministic_12steps_seed42/b/attest.jsonl",
+      "manifest": "benchmarks/modal/results/repro_hf_t4_deterministic_12steps_seed42/b/manifest.jsonl",
+      "seed": 42,
+      "buffer_seed": 0,
+      "model": "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+      "head_digest": "4c5596403fa1c5d0a539879f216ac2ec758088e1b7f831c143e4eb329b4ee5dc",
+      "records": 116,
+      "examples_committed": 88,
+      "totals": {
+        "hook_calls": 12,
+        "ingested_rows": 88,
+        "ingested_groups": 22,
+        "dead_groups": 2,
+        "skipped_rows": 0,
+        "clamped_logprobs": 0,
+        "replaced_rows": 8,
+        "logprob_forwards": 12,
+        "dropped_sampling_logprobs": 0,
+        "near_dead_groups": 0,
+        "declined_rows": 0,
+        "telemetry_forwards": 2,
+        "rescored_rows": 0
+      },
+      "versions": {
+        "trl": "1.13.0",
+        "transformers": "5.17.0",
+        "torch": "2.14.0+cu130"
+      },
+      "device": "cuda:0",
+      "torch_deterministic": true,
+      "extra_config": {},
+      "wall_clock_seconds": 3.6
+    },
+    "c": {
+      "attest": "benchmarks/modal/results/repro_hf_t4_deterministic_12steps_seed42/c/attest.jsonl",
+      "manifest": "benchmarks/modal/results/repro_hf_t4_deterministic_12steps_seed42/c/manifest.jsonl",
+      "seed": 43,
+      "buffer_seed": 0,
+      "model": "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+      "head_digest": "a3fe5019954ec6ac8750b02d47ad3768699fe3507121e2f93d49625a05a9dce6",
+      "records": 114,
+      "examples_committed": 84,
+      "totals": {
+        "hook_calls": 12,
+        "ingested_rows": 84,
+        "ingested_groups": 21,
+        "dead_groups": 3,
+        "skipped_rows": 0,
+        "clamped_logprobs": 0,
+        "replaced_rows": 12,
+        "logprob_forwards": 12,
+        "dropped_sampling_logprobs": 0,
+        "near_dead_groups": 0,
+        "declined_rows": 0,
+        "telemetry_forwards": 3,
+        "rescored_rows": 0
+      },
+      "versions": {
+        "trl": "1.13.0",
+        "transformers": "5.17.0",
+        "torch": "2.14.0+cu130"
+      },
+      "device": "cuda:0",
+      "torch_deterministic": true,
+      "extra_config": {},
+      "wall_clock_seconds": 3.37
+    }
+  },
+  "same_seed_identical": true,
+  "different_data_seed_class": "data",
+  "diffs": {
+    "a_vs_b": {
+      "records_a": 116,
+      "records_b": 116,
+      "head_a": "4c5596403fa1c5d0a539879f216ac2ec758088e1b7f831c143e4eb329b4ee5dc",
+      "head_b": "4c5596403fa1c5d0a539879f216ac2ec758088e1b7f831c143e4eb329b4ee5dc",
+      "identical": true,
+      "first_difference": null,
+      "class": "identical",
+      "ops": null,
+      "differing_fields": [],
+      "record_a": null,
+      "record_b": null,
+      "detail": "the logs are identical"
+    },
+    "a_vs_c": {
+      "records_a": 116,
+      "records_b": 114,
+      "head_a": "4c5596403fa1c5d0a539879f216ac2ec758088e1b7f831c143e4eb329b4ee5dc",
+      "head_b": "a3fe5019954ec6ac8750b02d47ad3768699fe3507121e2f93d49625a05a9dce6",
+      "identical": false,
+      "first_difference": 1,
+      "class": "data",
+      "ops": [
+        "insert",
+        "insert"
+      ],
+      "differing_fields": [
+        "base_priority_int",
+        "content_digest",
+        "new_priority_int"
+      ],
+      "record_a": {
+        "base_epoch": "0",
+        "base_priority_int": "32761",
+        "content_digest": "832465beeb390bfcc37a3ce898adcbaef5ddae2c0c4d2e3ac545607b7258bb60",
+        "digest": "2f4d92a89c19905f58a6288a06c1b29d66b65b29827c83cd1c73ba6cef9edcbd",
+        "entry_version": "0",
+        "index": 0,
+        "new_priority_int": "32761",
+        "old_priority_int": "0",
+        "op": "insert",
+        "op_counter": 0,
+        "prev_digest": "bdf6a789e61fd0fbc2e9b5219a402a8c4eda8e2a9d09736f1c502876aa47c99e",
+        "source": "zen"
+      },
+      "record_b": {
+        "base_epoch": "0",
+        "base_priority_int": "56746",
+        "content_digest": "5138b607aa8c33ee548d89abb1765c064fe347f99880fcd9e8d2df27748bc062",
+        "digest": "a6cf1e82463742da8f7f4a29765b59222348a56f1a7168c4454f8c68fc9e7310",
+        "entry_version": "0",
+        "index": 0,
+        "new_priority_int": "56746",
+        "old_priority_int": "0",
+        "op": "insert",
+        "op_counter": 0,
+        "prev_digest": "bdf6a789e61fd0fbc2e9b5219a402a8c4eda8e2a9d09736f1c502876aa47c99e",
+        "source": "zen"
+      },
+      "detail": "the stored examples, their scores or the group sizes differed upstream of the buffer (generation, rewards, dead groups); every draw before this point was identical"
+    }
+  },
+  "transcript_a": {
+    "sampled_rows": 8,
+    "sources": {
+      "zen": {
+        "inserted": 88,
+        "sampled": 8,
+        "share": 1.0
+      }
+    },
+    "examples_committed": 88
+  },
+  "verdict": "IDENTICAL",
+  "verdict_means": {
+    "IDENTICAL": "a and b have byte-identical logs and manifests; a and c first differ on an insert record classified data",
+    "GENERATION_NONDETERMINISTIC": "a and b differ although seeds match; checker.diff locates the first insert where the generated data differed (class data); Reservoir's draws were identical up to it",
+    "UNEXPECTED": "a difference not attributable to the generated data; inspect diffs"
+  }
+}

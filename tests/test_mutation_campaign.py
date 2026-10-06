@@ -96,3 +96,20 @@ class TestTelemetryCampaign:
     def test_telemetry_category_fully_rejected(self, results):
         telemetry = next(d for d in results["details"] if d[0] == "telemetry")
         assert telemetry[1] >= 12 and telemetry[1] == telemetry[2]
+
+
+class TestProvenanceCampaign:
+    def test_provenance_category_fully_rejected(self, results):
+        prov = next(d for d in results["details"] if d[0] == "provenance")
+        assert prov[1] >= 15 and prov[1] == prov[2]
+
+    def test_limit_is_measured_and_stated(self, results):
+        # The log does not commit to the predicate text or to the manifest's
+        # per-reward-function values: chain-consistent changes to them survive.
+        limit = results["provenance_limit"]
+        assert set(limit["survive"]) == {"quarantine_predicate_text_changed_chain_consistent",
+                                         "quarantine_note_changed_chain_consistent",
+                                         "manifest_rewards_value_changed",
+                                         "manifest_rewards_dropped"}
+        assert limit["statement"]
+        assert results["survived"] == []

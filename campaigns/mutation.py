@@ -31,6 +31,12 @@ Categories (per spec):
  12. Telemetry forgeries (campaigns/mutation_telemetry.py): a changed
      effective sample size or staleness, counters that disagree with the
      draws, an unlisted or non-canonical reported value.
+ 13. Quarantine-record and reward-provenance forgeries
+     (campaigns/mutation_provenance.py): a quarantine evict missing or
+     malforming its predicate text or note, texts on another record, a
+     quarantine in an older log format, and a manifest whose rewards are
+     not numeric; the report states the limit (the texts and values are
+     recorded, not committed).
 
 Run with: python -m campaigns.mutation
 Prints a report with exact counts.
@@ -481,6 +487,12 @@ def run_mutation_campaign() -> dict:
     from campaigns.mutation_telemetry import run_telemetry_category
     run_telemetry_category(results)
 
+    # -----------------------------------------------------------------------
+    # Category 13: Quarantine-record and reward-provenance forgeries
+    # -----------------------------------------------------------------------
+    from campaigns.mutation_provenance import run_provenance_category
+    run_provenance_category(results)
+
     return results
 
 
@@ -662,6 +674,11 @@ def main() -> None:
               f"without the recorded draw configuration; {len(draw_limit['rejected_with_draw_config'])} of "
               f"{len(draw_limit['mutants'])} are rejected with it.")
         print(f"  {draw_limit['statement']}")
+    provenance_limit = results.get("provenance_limit")
+    if provenance_limit:
+        print(f"Documented limit: {len(provenance_limit['survive'])} provenance changes survive "
+              f"({', '.join(provenance_limit['survive'])}).")
+        print(f"  {provenance_limit['statement']}")
 
     print()
     if results["survived"]:
@@ -688,6 +705,7 @@ def main() -> None:
         ],
         "content_limit": results.get("content_limit"),
         "draw_limit": results.get("draw_limit"),
+        "provenance_limit": results.get("provenance_limit"),
         "pass": len(results["survived"]) == 0 and results["total_mutants"] >= 60,
     }
     Path("results/mutation_campaign_report.json").write_text(
