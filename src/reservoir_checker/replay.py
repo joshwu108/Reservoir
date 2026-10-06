@@ -226,6 +226,8 @@ def replay(records: list[dict], manifest: Optional[list[dict]]) -> list[dict]:
     Raises ``CheckerError`` for a log below ``MIN_FORMAT``, a missing
     manifest, or anything the checker rejects.
     """
+    if manifest is not None and not (isinstance(manifest, list) and all(isinstance(l, dict) for l in manifest)):
+        raise CheckerError("manifest must be a list of JSON objects (one per line) or None")
     fmt = require_replayable(records, manifest)
     verified = verify_chain(records, manifest=manifest)
     batches = replay_batches(verified, manifest)
@@ -283,7 +285,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         else:
             sys.stdout.write(text)
     except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, ArithmeticError,
-            RecursionError, CheckerError) as exc:
+            RecursionError, MemoryError, CheckerError) as exc:
         # Everything a malformed file can raise is reported as a failure, never a traceback.
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1

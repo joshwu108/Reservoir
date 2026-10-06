@@ -182,8 +182,29 @@ rollout it held at sample time (insert stamps and versions are recorded
 with the sample), so a replay can never bind a witness to a later
 occupant.
 
+A snapshot (compaction, the first write of a fresh directory, a restore)
+has no operation to apply, so it goes through `durably_snapshot`: the
+intent carries no pre-state (the committed `state.json` is the
+pre-state), the state is serialised once into the fsynced segment, and
+after the commit rename the segment becomes `state.json` by rename
+rather than a second write. The cut points are those of `durably_apply`
+plus two of its own around that rename (`after_snapshot_rename`,
+`after_snapshot_dir_fsync`), and the crash campaign arms all of them;
+recovery keeps the old `state.json` for an intent without a readable
+segment and installs the segment for an intent with one.
 `checkpoint(tag)` compacts and copies the snapshot under
-`checkpoints/<tag>/` with fsyncs of the file and its directory.
+`checkpoints/<tag>/` with fsyncs of the file and its directory, and
+writes an optional `binding.json` beside it the same way: the TRL and
+verl adapters record there the digest of the trainer's own checkpoint
+directory (`checkpoint-N`, `global_step_N`: every regular file's relative
+path, size and bytes under BLAKE2b-256), and `resume_from_checkpoint`
+refuses to rewind when the directory the model restarts from digests
+differently or cannot be found (`check_model_binding`; every rank is
+waited for before the owner digests, and `ReservoirReplay.model_checkpoint`
+names a relocated directory); a buffer checkpoint taken without a trainer
+directory records no digest and is not checked, and a re-taken tag drops
+its old binding before the new state lands, so a crash leaves it unbound
+rather than wrongly bound.
 `restore_checkpoint(tag)` writes the checkpoint state as a new snapshot
 with a fresh epoch, then resets the log; lines of the abandoned timeline
 left by a crash between the two are ignored on replay whatever their
@@ -1185,6 +1206,8 @@ and on resume sets `global_steps = n` from the directory name before the
 first new step (`n + 1`). `_save_checkpoint` snapshots a durable buffer as
 `step-<n>` and prunes buffer checkpoints to the `global_step_*` directories
 the trainer kept; `_load_checkpoint` at `n > 0` rewinds the buffer to
-`step-<n>` and refuses if that snapshot is missing. The hook-ran check
+`step-<n>` and refuses if that snapshot is missing or if
+`global_step_<n>` no longer digests as it did when the buffer checkpoint
+was taken (§3 above). The hook-ran check
 counts steps trained by this process (`global_steps - n`), so a resumed run
 is not failed for the steps the checkpoint already contained.

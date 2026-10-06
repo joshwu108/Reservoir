@@ -91,7 +91,7 @@ def require_verl() -> VerlSupport:
         from verl.trainer.ppo.ray_trainer import RayPPOTrainer
     except ModuleNotFoundError as exc:
         if exc.name == "verl" or (exc.name or "").startswith("verl."):
-            raise ImportError(f"reservoir.integrations.verl requires verl; " + _install_hint()) from exc
+            raise ImportError("reservoir.integrations.verl requires verl; " + _install_hint()) from exc
         raise ImportError(f"importing verl failed on a dependency: {exc}") from exc
     except ImportError as exc:
         raise ImportError(f"importing verl failed: {exc}") from exc

@@ -124,16 +124,25 @@ def content_digest(prompt_id: object, tokens: object, reward_hex: object, where:
 # ---------------------------------------------------------------------------
 
 def _int_field(record: dict, name: str, where: str) -> int:
-    """A JSON integer field (not bool) or a decimal string, as CheckerError on anything else."""
+    """A non-negative JSON integer field (not bool, not float) or a decimal digit string.
+
+    Anything else is a CheckerError. Floats are refused rather than
+    truncated: ``0.7`` and ``0`` must not verify as the same history.
+    """
     value = record.get(name)
-    if isinstance(value, bool) or value is None:
-        raise CheckerError(f"{where}: {name} must be an integer, got {value!r}")
+    if isinstance(value, bool) or value is None or isinstance(value, float):
+        raise CheckerError(f"{where}: {name} must be a non-negative integer, got {value!r}")
     if isinstance(value, str) and not (value.isascii() and value.isdigit()):
-        raise CheckerError(f"{where}: {name} must be an integer, got {value!r}")
+        raise CheckerError(f"{where}: {name} must be a non-negative integer, got {value!r}")
+    if not isinstance(value, (int, str)):
+        raise CheckerError(f"{where}: {name} must be a non-negative integer, got {value!r}")
     try:
-        return int(value)
+        parsed = int(value)
     except (TypeError, ValueError, OverflowError) as exc:
-        raise CheckerError(f"{where}: {name} must be an integer, got {value!r}") from exc
+        raise CheckerError(f"{where}: {name} must be a non-negative integer, got {value!r}") from exc
+    if parsed < 0:
+        raise CheckerError(f"{where}: {name} must be a non-negative integer, got {value!r}")
+    return parsed
 
 
 def _is_digest(value: object) -> bool:
@@ -399,6 +408,8 @@ class ContentState:
         if not isinstance(record.get("step"), str):
             raise CheckerError(f"{where}: step must be a decimal string")
         batch_rows = _strict_int(record, "batch_rows", where)
+        if batch_rows > MAX_BATCH_ROWS:
+            raise CheckerError(f"{where}: batch_rows {batch_rows} exceeds the checker's limit of {MAX_BATCH_ROWS}")
         replaced, declined = _witness_lists(record, where, len(draws), op)
         if not _is_digest(record.get("tensor_digest")):
             raise CheckerError(f"{where}: tensor_digest must be {_DIGEST_LENGTH} lowercase hex characters")
@@ -504,6 +515,10 @@ def _match_line(line: dict, insert: CommittedInsert, i: int) -> None:
         raise CheckerError(
             f"{where}: entry_version {line['entry_version']} disagrees with the log's {insert.entry_version}"
         )
+
+
+MAX_BATCH_ROWS = 1 << 20
+"""Largest training batch a witness may declare; bounds the memory ``replay`` and ``transcript`` spend on one record."""
 
 
 def _strict_int(record: dict, name: str, where: str) -> int:

@@ -103,7 +103,7 @@
       "draw_moved_within_leaf",
       "is_weight_replaced"
     ],
-    "statement": "a draw moved inside its leaf's range, or a reweighted sample, is invisible to a log that does not record seed, buffer_id and beta; a 0.5.0 log records them and both are rejected"
+    "statement": "a draw moved inside its leaf's range, or a reweighted sample, is invisible to a log that does not record seed, buffer_id and beta; a format-3 log records them and both are rejected"
   },
   "provenance_limit": {
     "survive": [

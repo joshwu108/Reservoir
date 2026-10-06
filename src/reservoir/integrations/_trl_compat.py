@@ -27,7 +27,7 @@ import warnings
 from typing import Final, NamedTuple
 
 PINNED_TRL_VERSION: Final[str] = "1.13.0"
-"""The version ``pip install "reservoir[trl]"`` installs."""
+"""The version ``pip install "reservoir-replay[trl]"`` installs."""
 
 TESTED_TRL_VERSIONS: Final[tuple[str, ...]] = ("1.13.0",)
 """Versions the test suite has been run against."""
@@ -36,6 +36,7 @@ REQUIRED_TRAINER_ATTRIBUTES: Final[tuple[str, ...]] = (
     "_generate_and_score_completions",
     "_prepare_inputs",
     "_get_per_token_logps_and_entropies",
+    "_calculate_rewards",   # wrapped to capture per-reward-function values for provenance
 )
 """Members of ``trl.GRPOTrainer`` the adapter overrides or calls."""
 
@@ -50,7 +51,7 @@ class TrlSupport(NamedTuple):
 
 def _install_hint() -> str:
     return (
-        f'install the supported version with: pip install "reservoir[trl]" '
+        f'install the supported version with: pip install "reservoir-replay[trl]" '
         f"(pins trl=={PINNED_TRL_VERSION})"
     )
 

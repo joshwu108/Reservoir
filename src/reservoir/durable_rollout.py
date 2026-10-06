@@ -11,7 +11,8 @@ deterministic function of state and inputs, so replaying the log onto the
 last snapshot reproduces the state, the attestation chain and the
 manifest exactly. Once ``compact_every`` commands (default 256) have
 accumulated, the next operation first writes a full snapshot through the
-intent/segment/rename protocol of ``durable.py`` and resets the log, so
+intent/segment/rename protocol of ``durable.py`` (``durably_snapshot``,
+which serialises the state once) and resets the log, so
 the per-operation cost does not grow with the run's history (the snapshot
 does, see below).
 
@@ -73,7 +74,7 @@ from typing import Any, Iterable, Optional, Sequence, Union
 
 from reservoir.attest import AttestationLog
 from reservoir.decayed_tree import AdvanceResult
-from reservoir.durable import CorruptStateError, _full_fsync, _kill_self, _should_cut, durably_apply, recover_state
+from reservoir.durable import CorruptStateError, _full_fsync, _kill_self, _should_cut, durably_snapshot, recover_state
 from reservoir.rollout import Rollout
 from reservoir.rollout_buffer import RolloutBatch, RolloutBuffer
 from reservoir.rollout_manifest import ManifestWriter
@@ -86,7 +87,16 @@ from reservoir.rollout_wal import CommandLog, _fsync_directory, apply_command, e
 
 _LOAD_ERRORS = (KeyError, TypeError, ValueError, IndexError)
 DEFAULT_COMPACT_EVERY = 256
+BINDING_FILE = "binding.json"
+"""Optional caller data beside a checkpoint's state (see ``DurableRolloutBuffer.checkpoint``)."""
 CHECKPOINT_DIR = "checkpoints"
+
+
+def _strict_position(value: object) -> int:
+    """A slot number given as a plain int; bools and floats are refused rather than coerced."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"slot positions must be plain ints, got {value!r}")
+    return value
 
 
 class DurableRolloutBuffer:
@@ -147,6 +157,7 @@ class DurableRolloutBuffer:
         self._manifest = Path(manifest) if manifest is not None else None
         self.compact_every = compact_every
         self._epoch = 0
+        self._restored_tag: Optional[str] = None   # kept by prune_checkpoints
         self._wal = CommandLog(self.directory)
         self._seq = 0                  # seq of the last durable command
         self._snapshot_seq = 0         # seq the snapshot on disk includes
@@ -166,7 +177,7 @@ class DurableRolloutBuffer:
             # Persist the empty state (and the decay_config record) so the
             # log and state agree even if the process dies before the first
             # operation.
-            durably_apply(self.directory, "open", lambda: self._snapshot_of(buf, 0), lambda: None)
+            durably_snapshot(self.directory, "open", self._snapshot_of(buf, 0))
             return buf
         state, self._snapshot_seq, self._epoch = self._unwrap(snapshot)
         probe = self._validate_state(state)
@@ -303,13 +314,15 @@ class DurableRolloutBuffer:
     def compact(self) -> None:
         """Write a snapshot of the current state and reset the command log.
 
-        The snapshot goes through the intent/segment/rename protocol, so a
-        crash leaves either the old snapshot (plus the full log) or the new
-        one; the log is reset only after the new snapshot is committed, and
-        commands the snapshot already includes are skipped on replay.
+        The snapshot goes through the intent/segment/rename protocol
+        (``durably_snapshot``: the state is serialised once and the fsynced
+        segment becomes ``state.json`` by rename), so a crash leaves either
+        the old snapshot (plus the full log) or the new one; the log is reset
+        only after the new snapshot is committed, and commands the snapshot
+        already includes are skipped on replay.
         """
         seq = self._seq
-        durably_apply(self.directory, "compact", lambda: self._snapshot_of(self._buf, seq), lambda: None)
+        durably_snapshot(self.directory, "compact", self._snapshot_of(self._buf, seq))
         if _should_cut("after_snapshot_before_wal_reset"):
             _kill_self()
         self._wal.reset()
@@ -333,23 +346,69 @@ class DurableRolloutBuffer:
             raise ValueError(f"checkpoint tag must be a plain name, got {tag!r}")
         return tag
 
-    def checkpoint(self, tag: str) -> Path:
+    def checkpoint(self, tag: str, binding: Optional[dict] = None) -> Path:
         """Compact, then copy the snapshot to ``checkpoints/<tag>/``; returns that directory.
 
         The copy is fsynced and renamed into place and its directory is
         fsynced, so a checkpoint that exists after a power loss is whole.
+        ``binding`` is a JSON object the caller ties to this checkpoint (an
+        adapter records the digest of the model checkpoint it was taken
+        with); it is written as ``binding.json`` beside the state, the same
+        way, and read back by ``checkpoint_binding``. A checkpoint taken
+        without one has no ``binding.json``. When a tag is re-taken, its
+        old binding is removed before the new state is installed, so a
+        crash inside this call can leave the checkpoint unbound (resume
+        then runs unchecked) but never bound to the wrong digest.
         """
+        if binding is not None and not isinstance(binding, dict):
+            raise TypeError(f"binding must be a dict or None, got {type(binding).__name__}")
         target = self.directory / CHECKPOINT_DIR / self._check_tag(tag)
         self.compact()
         target.mkdir(parents=True, exist_ok=True)
+        if (target / BINDING_FILE).exists():
+            self._write_binding(target, None)
+            _fsync_directory(target)
         tmp = target / "state.json.tmp"
         with open(self.directory / "state.json", "rb") as src, open(tmp, "wb") as dst:
             shutil.copyfileobj(src, dst)
             dst.flush()
             _full_fsync(dst.fileno())
         tmp.replace(target / "state.json")
+        self._write_binding(target, binding)
         _fsync_directory(target)
         return target
+
+    @staticmethod
+    def _write_binding(target: Path, binding: Optional[dict]) -> None:
+        """Install or remove ``binding.json`` (fsynced, renamed into place); the caller fsyncs the directory."""
+        path = target / BINDING_FILE
+        if binding is None:
+            if path.exists():
+                path.unlink()
+            return
+        data = json.dumps(binding, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        tmp = target / f"{BINDING_FILE}.tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            _full_fsync(f.fileno())
+        tmp.replace(path)
+
+    def checkpoint_binding(self, tag: str) -> Optional[dict]:
+        """The ``binding`` recorded with ``checkpoints/<tag>``, or None when it has none."""
+        target = self.directory / CHECKPOINT_DIR / self._check_tag(tag)
+        if not (target / "state.json").exists():
+            raise FileNotFoundError(f"no checkpoint {tag!r} under {self.directory / CHECKPOINT_DIR}")
+        path = target / BINDING_FILE
+        if not path.exists():
+            return None
+        try:
+            binding = json.loads(path.read_bytes())
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"checkpoint {tag!r} has an unreadable {BINDING_FILE}: {exc}") from exc
+        if not isinstance(binding, dict):
+            raise ValueError(f"checkpoint {tag!r}: {BINDING_FILE} must hold a JSON object")
+        return binding
 
     def restore_checkpoint(self, tag: str) -> None:
         """Rewind to ``checkpoints/<tag>``: later commands are discarded, the chain resumes there.
@@ -364,19 +423,26 @@ class DurableRolloutBuffer:
         state, seq, saved_epoch = self._unwrap(json.loads(source.read_bytes()))
         self._validate_state(state)
         epoch = max(self._epoch, saved_epoch) + 1
-        durably_apply(self.directory, "restore", lambda: {"buffer": state, "wal_seq": seq, "wal_epoch": epoch},
-                      lambda: None)
+        durably_snapshot(self.directory, "restore", {"buffer": state, "wal_seq": seq, "wal_epoch": epoch})
         if _should_cut("after_restore_before_wal_reset"):
             _kill_self()
         self._buf.close()
         self._wal.reset()
         self._snapshot_seq = self._seq = seq
         self._epoch = epoch
+        self._restored_tag = tag
         self._buf = self._buffer_from_state(state)
 
     def prune_checkpoints(self, keep: Iterable[str]) -> list[str]:
-        """Delete every checkpoint whose tag is not in ``keep``; returns the deleted tags."""
+        """Delete every checkpoint whose tag is not in ``keep``; returns the deleted tags.
+
+        The checkpoint this buffer last restored from is always kept: it is
+        the one a resumed run would need again if it crashes before its next
+        save, whatever the trainer's directory says.
+        """
         keep_set = {self._check_tag(t) for t in keep}
+        if self._restored_tag is not None:
+            keep_set.add(self._restored_tag)
         deleted = [tag for tag in self.checkpoints() if tag not in keep_set]
         for tag in deleted:
             shutil.rmtree(self.directory / CHECKPOINT_DIR / tag)
@@ -457,7 +523,7 @@ class DurableRolloutBuffer:
         validate_text(predicate_text, "predicate text", MAX_PREDICATE_LENGTH)
         validate_text(reason, "quarantine reason", MAX_NOTE_LENGTH)
         require_quarantine_format(self._buf)
-        slots = [int(p) for p in positions]
+        slots = [_strict_position(p) for p in positions]
         if not slots:
             return
         self._commit("quarantine", {"positions": slots, "predicate": predicate_text, "note": reason},

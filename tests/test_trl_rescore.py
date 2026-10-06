@@ -202,3 +202,28 @@ def test_validated_rescore_type_checks():
         validated_rescore(strategy, rollout, group, (0.5, 1.0, None, 0, 0))  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         validated_rescore(Broken(), rollout, group, signal)
+
+
+def test_shipped_drift_aware_priority_writes_updates_the_checker_verifies():
+    """The reference strategy, end to end: a replayed row is rescored from its measured log-ratio."""
+    from reservoir.priorities import DriftAwarePriority
+    from reservoir.integrations.trl import StoredAdvantagePriority
+
+    strategy = DriftAwarePriority(base=StoredAdvantagePriority(), scale=1.0)
+    log = AttestationLog()
+    r = replay(attest=log, priority=strategy)
+    trainer = MetricTrainer(r, [live_batch(), mixed_batch()])
+    trainer.generate(step=1)
+    before = len(updates(log.records))
+    trainer.current_logp = LOGP - 0.5
+    trainer.generate(step=2)
+    batch = r.last_replay
+    written = updates(log.records)[before:]
+    assert written, "the replayed rows were not rescored"
+    placed = {}
+    for k, slot in enumerate(batch.indices):
+        placed.setdefault(slot, k)
+    assert len(written) == len(placed) and {rec["index"] for rec in written} == set(placed)
+    for record in written:
+        assert int(record["new_priority_int"]) < int(record["old_priority_int"]), "drift must lower the priority"
+    verify_chain(log.records)

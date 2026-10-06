@@ -56,6 +56,7 @@ from reservoir.rollout import Rollout
 def _worker_insert(directory: str, seed: int, cut_point: str, cut_byte: int) -> None:
     """Child process: insert a transition, cut at cut_point."""
     env_vars = {
+        "RESERVOIR_CRASH_TEST": "1",
         "RESERVOIR_CUT_POINT": cut_point,
         "RESERVOIR_CUT_BYTE_OFFSET": str(cut_byte),
     }
@@ -73,6 +74,7 @@ def _worker_insert(directory: str, seed: int, cut_point: str, cut_byte: int) -> 
 
 def _worker_update(directory: str, seed: int, cut_point: str, position: int, cut_byte: int) -> None:
     """Child process: update a priority, cut at cut_point."""
+    os.environ["RESERVOIR_CRASH_TEST"] = "1"
     os.environ["RESERVOIR_CUT_POINT"] = cut_point
     os.environ["RESERVOIR_CUT_BYTE_OFFSET"] = str(cut_byte)  # the mid-segment cut needs it
     buf = DurableBuffer(directory, capacity=4, seed=seed)
@@ -222,13 +224,15 @@ _ROLLOUT_KW = dict(capacity=8, half_life=1, max_policy_age=2, compact_every=1)
 ROLLOUT_CUT_POINTS = [
     "mid_wal_write", "after_wal_write", "after_wal_fsync",
     "after_intent_write", "after_intent_fsync", "mid_segment_write", "after_segment_fsync",
-    "before_rename", "after_rename_before_dir_fsync", "after_snapshot_before_wal_reset", "after_dir_fsync",
+    "before_rename", "after_rename_before_dir_fsync", "after_dir_fsync",
+    "after_snapshot_rename", "after_snapshot_dir_fsync", "after_snapshot_before_wal_reset",
 ]
 # Restoring a checkpoint writes a snapshot (the protocol's cuts) and then
 # resets the log; no command is appended, so the WAL cuts cannot fire there.
 RESTORE_CUT_POINTS = [
     "after_intent_write", "after_intent_fsync", "mid_segment_write", "after_segment_fsync",
-    "before_rename", "after_rename_before_dir_fsync", "after_dir_fsync", "after_restore_before_wal_reset",
+    "before_rename", "after_rename_before_dir_fsync", "after_dir_fsync",
+    "after_snapshot_rename", "after_snapshot_dir_fsync", "after_restore_before_wal_reset",
 ]
 
 
@@ -269,6 +273,7 @@ def _rollout_apply(directory: str, seed: int, op_type: str) -> None:
 
 def _rollout_worker(directory: str, seed: int, op_type: str, cut_point: str, cut_byte: int) -> None:
     """Child process body: arm the cut point, then run the operation until SIGKILL."""
+    os.environ["RESERVOIR_CRASH_TEST"] = "1"
     os.environ["RESERVOIR_CUT_POINT"] = cut_point
     os.environ["RESERVOIR_CUT_BYTE_OFFSET"] = str(cut_byte)
     _rollout_apply(directory, seed, op_type)

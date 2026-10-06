@@ -201,7 +201,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             with open(args.json, "w", encoding="utf-8") as f:
                 json.dump(result, f, indent=2)
     except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError,
-            RecursionError, CheckerError) as exc:
+            RecursionError, MemoryError, CheckerError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
     print(render_text(result))

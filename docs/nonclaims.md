@@ -20,8 +20,11 @@ a separate empirical question not addressed here.
 
 ### 3. Distributed Buffers
 
-This is a single-process, single-machine buffer. No claims about distributed
-experience replay, multi-actor systems, or network-replicated buffers are made.
+The buffer itself is single-owner: one process holds it and writes its log.
+The TRL adapter lets several training processes share that one buffer by
+gathering their groups to rank 0 (§21), under DDP only; sharded strategies
+(DeepSpeed, FSDP, Megatron) are refused. No claims about network-replicated
+buffers, multi-actor replay or more than one writer are made.
 
 ### 4. Security Boundary
 
@@ -61,7 +64,7 @@ mismatch rather than accept it. The declared value is the producer's.
 ### 8. TLA+ Model Scope
 
 The TLA+ model (`spec/ReplayLifecycle.tla`) uses a finite scope (capacity 2,
-2-value priority set, ≤3 operations). It establishes the safety properties
+three-value priority set {0, 1, 2}, ≤3 operations). It establishes the safety properties
 within that finite scope only. It does not constitute a proof for all possible
 buffer sizes, priority values, or operation sequences. It is a falsification tool:
 if the model checker finds a counterexample in the small scope, the protocol is wrong.
@@ -103,10 +106,24 @@ which has been measured. The attestation and manifest files are written as
 each operation runs, before its command is fsynced, so a reader of those
 files during a crash window can see a record that recovery then retracts;
 only after reopen are the files and the buffer guaranteed to agree.
-Checkpoint binding rewinds the buffer to the trainer's step; it does not
-verify that the model checkpoint is the one the buffer was bound to, and
-it requires a durable buffer (an in-memory `ReservoirReplay` refuses to
-resume at a non-zero step rather than continue from an empty buffer). A
+Checkpoint binding rewinds the buffer to the trainer's step. When the
+trainer's checkpoint directory exists at save time, the buffer checkpoint
+records its digest (every regular file's relative path, size and bytes)
+and a resume is refused if the directory the model restarts from digests
+differently or cannot be found (a relocated checkpoint is named through
+`ReservoirReplay.model_checkpoint`); this checks that the bytes on disk
+are the ones the buffer was bound to, not that the trainer loaded them,
+and it costs one read of the checkpoint, optimizer state included, on the
+owner rank at every save and resume, which has not been measured on a
+large model. Under more than one process every rank is waited for before
+the owner reads the directory; that the HF Trainer writes nothing into
+`checkpoint-N` after `on_save` is read from its code, not tested on a
+real multi-GPU save and resume. A buffer checkpoint taken while the
+trainer's directory did not yet exist records no digest (a warning says
+so) and resumes unchecked, as does one whose binding a crash inside the
+checkpoint call removed. Binding requires a durable buffer (an in-memory
+`ReservoirReplay` refuses to resume at a non-zero step rather than
+continue from an empty buffer). A
 trainer checkpoint written in the window before the buffer's `on_save`
 ran has no buffer checkpoint and resume fails closed. With
 `steps_per_generation > 1` a checkpoint taken inside a generation window
@@ -126,7 +143,7 @@ not interpreted, and TRL's reward statistics (`reward`, `reward_std`,
 `frac_reward_zero_std`) are computed before the hook replaces dead rows, so
 they describe the generated batch rather than the batch trained on.
 
-The batch witness (version 0.5.0) closes the gap between the sampled batch
+The batch witness (version 0.6.0) closes the gap between the sampled batch
 and the batch the adapter hands back up to the adapter boundary. The
 adapter checks the written rows against the sampled rollouts and refuses
 otherwise; the checker proves the adapter's declared row-to-draw mapping
@@ -154,8 +171,11 @@ replay is not promised to be bit-identical to a plain `GRPOTrainer` step.
 Priorities are fixed at insertion unless the priority strategy implements
 `rescore`, which the adapter calls at placement time with the weighted
 advantage, importance weight, log-ratio and age; the training loss itself
-is not available to it. No rescoring strategy is shipped, and no claim is
-made that any rescoring improves training.
+is not available to it. `DriftAwarePriority` is shipped as a reference
+implementation of that hook (a base priority divided by one plus the
+scaled absolute log-ratio), so the path from replay to `update` record
+can be seen end to end; it is an example, and no claim is made that it or
+any other rescoring improves training.
 
 ### 15. Relation to Verifiable Fine-Tuning
 
@@ -229,7 +249,8 @@ accelerator of two and four ranks in one interpreter, by parity with the
 single-process adapter on the concatenated batch, and on real
 `torch.distributed` process groups of two ranks through
 `benchmarks/modal/trl_replay_distributed.py`: two CPU processes on the
-gloo backend (`torchrun`, 40 steps, run locally) and two A10G GPUs on
+gloo backend (`torchrun`, 40 steps, run locally; that run left no
+committed artifact) and two A10G GPUs on
 NCCL (`accelerate launch --num_processes 2 --multi_gpu`, 40 steps, on
 Modal); the committed record of the GPU run is re-verified by
 `tests/test_trl_results.py`. What those runs establish: every rank made
@@ -247,7 +268,10 @@ in `docs/reproducible-training.md`); resumption of a distributed run
 from a checkpoint; that each rank trained on exactly the rows the
 broadcast handed it (the log commits to the global batch rank 0
 assembled, not to what each rank's loss consumed; the `batch` witness
-is rank 0's). The log records the global batch in rank order; it does
+is rank 0's). The test that the owner's hook runs on its own device and
+every rank's slice returns on its device runs under CUDA only: the
+fake ranks are threads of one process, which MPS does not support, so
+on a Mac that check is skipped. The log records the global batch in rank order; it does
 not record which rank generated or trained which row. The rank-0
 ownership rule relies on the launcher setting `RANK` (or a non-zero
 `LOCAL_RANK`), or on the trainer attaching the accelerator before the
@@ -272,9 +296,14 @@ trained fresh is the `entry_version` of its insert (the trainer's step in
 the TRL adapter), which the transcript reports; the row it occupied then
 is not in the log. The manifest's per-reward-function values are the
 adapter's statement, numeric only and outside the content digest: the log
-does not commit to them, a changed or dropped value passes the checker
-(the mutation campaign measures this), and the adapter wiring that
-supplies them to the row conversion is not yet in `ReservoirReplay`.
+does not commit to them, and a changed or dropped value passes the checker
+(the mutation campaign measures this). The TRL adapter supplies them from
+the trainer's `_calculate_rewards`; the verl adapter records the summed
+score only. The values are written as JSON floats whose bytes are
+canonical only by CPython's shortest-repr rule, not by the format, so a
+manifest written by another runtime may differ byte for byte while
+carrying the same values. A quarantine on a buffer with no attestation log
+keeps no record of the predicate or reason (the buffer warns).
 
 ### 23. Offline Replay
 
