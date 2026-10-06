@@ -171,9 +171,17 @@ def run_grpo(
 
     from reservoir.integrations.trl import ReservoirGRPOTrainer, ReservoirReplay
 
-    Path(attest_path).unlink(missing_ok=True)
-    if manifest_path is not None:
-        Path(manifest_path).unlink(missing_ok=True)
+    # Under a launcher (RANK set) only rank 0 owns the log and manifest; the
+    # other ranks must not unlink files rank 0 is about to open. The buffer
+    # itself is not built until the trainer attaches the accelerator.
+    replay = ReservoirReplay(
+        capacity=capacity, half_life=half_life, max_policy_age=max_policy_age,
+        seed=buffer_seed, attest=attest_path, manifest=manifest_path, source=source,
+    )
+    if replay.is_owner:
+        Path(attest_path).unlink(missing_ok=True)
+        if manifest_path is not None:
+            Path(manifest_path).unlink(missing_ok=True)
     dataset = load_dataset(DATASET_ID, DATASET_CONFIG, split="train")
     args = GRPOConfig(
         output_dir=output_dir,
@@ -193,17 +201,15 @@ def run_grpo(
         fp16=False,
         **(extra_config or {}),
     )
-    replay = ReservoirReplay(
-        capacity=capacity, half_life=half_life, max_policy_age=max_policy_age,
-        seed=buffer_seed, attest=attest_path, manifest=manifest_path, source=source,
-    )
 
     steps: list[dict] = []
 
     class StepRecorder(TrainerCallback):
-        """Snapshot the adapter's counters after every optimizer step."""
+        """Snapshot the adapter's counters after every optimizer step (owner rank only)."""
 
         def on_step_end(self, args, state, control, **kwargs):
+            if not replay.is_owner:
+                return control
             steps.append({
                 "global_step": state.global_step,
                 "buffer_size": replay.buffer.size,
@@ -228,10 +234,18 @@ def run_grpo(
     import transformers
     import trl
 
+    if not replay.is_owner:
+        # A non-owner rank holds no buffer and wrote no file; it reports only
+        # what it did itself. The driver merges this into rank 0's record.
+        return {
+            "rank": replay.rank, "is_owner": False, "device": str(trainer.model.device),
+            "wall_clock_seconds": wall_clock, "totals": dict(replay.stats),
+        }
     log_text = Path(attest_path).read_text()
     manifest_text = Path(manifest_path).read_text() if manifest_path is not None else None
     log = replay.buffer.attestation_log
     return {
+        "rank": replay.rank if replay.rank is not None else 0, "is_owner": True,
         "model": model_id,
         "dataset": f"{DATASET_ID}/{DATASET_CONFIG}",
         "config": {

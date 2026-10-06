@@ -493,6 +493,12 @@ def run_mutation_campaign() -> dict:
     from campaigns.mutation_provenance import run_provenance_category
     run_provenance_category(results)
 
+    # -----------------------------------------------------------------------
+    # Category 14: Manifest tamperings against the offline replay
+    # -----------------------------------------------------------------------
+    from campaigns.mutation_replay import run_replay_category
+    run_replay_category(results)
+
     return results
 
 
@@ -679,6 +685,12 @@ def main() -> None:
         print(f"Documented limit: {len(provenance_limit['survive'])} provenance changes survive "
               f"({', '.join(provenance_limit['survive'])}).")
         print(f"  {provenance_limit['statement']}")
+    replay_split = results.get("replay_manifest")
+    if replay_split:
+        print(f"Offline replay: {len(replay_split['broke'])} manifest tamperings break it (counted above); "
+              f"{len(replay_split['changed'])} change only its reward-provenance fields, measured and not counted "
+              f"({', '.join(replay_split['changed'])}).")
+        print(f"  {replay_split['statement']}")
 
     print()
     if results["survived"]:
@@ -706,6 +718,7 @@ def main() -> None:
         "content_limit": results.get("content_limit"),
         "draw_limit": results.get("draw_limit"),
         "provenance_limit": results.get("provenance_limit"),
+        "replay_manifest": results.get("replay_manifest"),
         "pass": len(results["survived"]) == 0 and results["total_mutants"] >= 60,
     }
     Path("results/mutation_campaign_report.json").write_text(

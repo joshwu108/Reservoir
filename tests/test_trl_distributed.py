@@ -525,3 +525,54 @@ def test_single_process_accelerator_without_distributed_attributes_still_works()
     trainer.generate(1)
     out = trainer.generate(2)
     assert r.stats["replaced_rows"] == 2 and out["advantages"].size(0) == 4
+
+
+# ---------------------------------------------------------------------------
+# The owner's hook runs on its own device, not on the gathered CPU shards
+# ---------------------------------------------------------------------------
+
+def _second_device() -> torch.device | None:
+    if torch.cuda.is_available():
+        return torch.device("cuda", 0)
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return None
+
+
+class DeviceTrainer(FakeTrainer):
+    """The fake trainer with a forward that lives on one device, like a real model."""
+
+    def __init__(self, *args, device: torch.device, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.device = device
+        self.forward_devices: list[torch.device] = []
+
+    def _get_per_token_logps_and_entropies(self, model, input_ids, attention_mask, logits_to_keep,
+                                           batch_size=None, **kwargs):
+        self.forward_devices.append(input_ids.device)
+        if input_ids.device.type != self.device.type:
+            raise RuntimeError(f"forward got {input_ids.device} tensors for a model on {self.device}")
+        return torch.full((input_ids.size(0), logits_to_keep), -0.5, device=self.device), None, None
+
+
+@pytest.mark.skipif(_second_device() is None, reason="needs a CUDA or MPS device besides the CPU")
+def test_the_owner_runs_the_hook_on_its_own_device_not_on_the_gathered_cpu_shards():
+    """A real two-GPU run failed here (2026-10-06): the gathered shards are CPU tensors, and rank 0's
+    telemetry forward fed them to a CUDA model. Every rank's slice must also come back on its device."""
+    device = _second_device()
+    world = World(2)
+    batches = [global_batch(), global_batch(20)]
+    replays = [replay_on_rank(r) for r in range(2)]
+    shards = [[dist.to_device(shard(b, r, 2), device) for b in batches] for r in range(2)]
+    trainers = [DeviceTrainer(replays[r], list(shards[r]), num_processes=2, device=device) for r in range(2)]
+    for t, a in zip(trainers, world.accelerators()):
+        t.accelerator = a
+
+    outputs = [run_ranks([lambda t=t, s=step: t.generate(s) for t in trainers]) for step in (0, 1)]
+
+    assert replays[0].stats["replaced_rows"] > 0, "the dead group must have been replayed on the owner"
+    for trainer in trainers:
+        assert trainer.forward_devices and all(d.type == device.type for d in trainer.forward_devices)
+    for step_outputs in outputs:
+        for out in step_outputs:
+            assert {v.device.type for v in out.values() if isinstance(v, torch.Tensor)} == {device.type}

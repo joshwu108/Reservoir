@@ -297,12 +297,17 @@ behavior logprobs, so the loss applies a real off-policy ratio, and their
 advantages are multiplied by the importance-sampling weight. Versions,
 half-life and `max_policy_age` are counted in optimizer steps. Every insertion
 (with its content digest and the `source` tag), draw and eviction goes to the
-attestation log; `python -m checker.verify` checks it and
-`python -m checker.transcript` reports on it. A step with nothing to replay returns the batch TRL produced
+attestation log; `python -m checker.verify` checks it,
+`python -m checker.transcript` reports on it, and `reservoir-replay-offline`
+rebuilds every witnessed batch as content (tokens, rewards, weights, sources)
+from the log and manifest alone, for a data-side audit or rerun with no generation. A step with nothing to replay returns the batch TRL produced
 unchanged (see [`docs/nonclaims.md`](docs/nonclaims.md) §14 for the one
 RNG caveat).
 
-Scope: text-only, single process, TRL 1.13.0. The adapter refuses batches
+Scope: text-only, TRL 1.13.0, one or more training processes (rank 0 owns
+the buffer and the single log writer; run on two GPUs through
+`accelerate launch`, see [`docs/nonclaims.md`](docs/nonclaims.md) §21).
+The adapter refuses batches
 with tool masks, vLLM importance-sampling ratios or vision inputs, and fails
 with a clear message if the installed TRL lacks the trainer members it relies
 on. It does not target TRL's experimental `GRPOWithReplayBufferTrainer`: TRL
@@ -404,7 +409,8 @@ report.to_html("forgetting_report.html")
 |-------|----------|
 | Sampling is deterministic and reproducible under a keyed draw | Property tests against a brute-force reference; the log records seed, buffer id and `beta`, and the checker recomputes every draw and importance weight from them |
 | The durable buffers are failure-atomic under SIGKILL | 275/275 crash tests across both buffers: every child was killed at its armed cut point (the campaign fails a row otherwise), 210 recovered the pre-state and 65 the post-state (an unsynced write that SIGKILL leaves in the page cache recovers to the post-state; a power loss there would give the pre-state, which is also legal), zero torn; the rollout cases cross the command log and the snapshot protocol in one operation, crash mid-rebase, crash inside a quarantine of a whole group, and crash inside a checkpoint restore |
-| The independent checker rejects forged logs | 205/205 mutants rejected: 38 age-decay protocol forgeries, 29 content-commitment forgeries (3 of them chain-consistent, invisible without the manifest), 21 draw and weight forgeries (2 of them invisible to a log that does not record its seed and `beta`), 14 batch-witness forgeries, 18 telemetry forgeries and 22 quarantine and reward-provenance forgeries (the campaign also records that a quarantine record's texts and the manifest's reward values are not committed: 4 such changes pass, by design) |
+| The independent checker rejects forged logs | 221/221 mutants rejected: 38 age-decay protocol forgeries, 29 content-commitment forgeries (3 of them chain-consistent, invisible without the manifest), 21 draw and weight forgeries (2 of them invisible to a log that does not record its seed and `beta`), 14 batch-witness forgeries, 18 telemetry forgeries, 22 quarantine and reward-provenance forgeries (the campaign also records that a quarantine record's texts and the manifest's reward values are not committed: 4 such changes pass, by design) and 16 manifest tamperings against the offline replay (the campaign also measures that 3 tamperings of the reward-provenance values, which the log does not commit to, run and change only those fields of the output) |
+| A witnessed batch can be rebuilt as content from the log and manifest alone | `reservoir-replay-offline` emits every witnessed batch as JSON lines (rows, draws, exact importance weights, tokens, rewards, sources) importing nothing from the library; on the committed CPU and T4 reproducibility runs, runs a and b replay byte-identically and run c differs; fresh rows are listed by index only (`docs/nonclaims.md` §23) |
 | Two runs with the same inputs give one transcript | CPU demo: runs a and b byte-identical (102 records), run c differs at record 1, classified `data` |
 | Attestation is cheap relative to generation | about 3× the no-attestation insert cost in memory, 6× with a manifest file; the checker verifies 10k records in 0.3 s |
 | The lifecycle protocol is safe within a finite scope | TLA+ model, 44,611 states. A no-parent-fsync variant (`spec/NoParentFsync.tla`) is written to show why the directory fsync exists; `bash spec/check.sh --with-counterexample` runs it in CI and fails unless TLC reports the violation. It has not been run on a developer machine yet |
@@ -433,11 +439,11 @@ pip install "reservoir-replay[prefcheck]"    # preference noise detector
 pip install "reservoir-replay[anchor]"       # forgetting monitor
 pip install "reservoir-replay[atari]"        # Atari benchmark suite
 
-reservoir-verify run-01/attest.jsonl --manifest run-01/manifest.jsonl   # also: reservoir-transcript, reservoir-diff
+reservoir-verify run-01/attest.jsonl --manifest run-01/manifest.jsonl   # also: reservoir-transcript, reservoir-diff, reservoir-replay-offline
 python -c "import reservoir; print(reservoir.backend)"                 # "c" or "python" (needs [classic])
 ```
 
-The checker ships in the wheel as `reservoir_checker` with the three
+The checker ships in the wheel as `reservoir_checker` with the four
 console scripts above; `python -m checker.verify` and friends keep working
 from a checkout. A C compiler is needed for the C extension; without one,
 the classic buffer falls back to the numpy implementation.

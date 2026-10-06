@@ -137,9 +137,10 @@ and the optimizer are outside.
 
 ### 14. TRL Integration Scope
 
-The adapter is tested against TRL 1.13.0 only, text-only, single process.
-It does not handle tool masks, vLLM importance-sampling ratios, vision
-inputs or multi-process training, and refuses them rather than guessing.
+The adapter is tested against TRL 1.13.0 only, text-only. It does not
+handle tool masks, vLLM importance-sampling ratios or vision inputs, and
+refuses them rather than guessing. More than one training process is
+handled within the limits of §21.
 With vLLM generation it accepts a batch only when the importance-sampling
 correction and off-policy masking are off, in which case it drops vLLM's
 unused sampling logprobs from the batch; replayed rows carry no vLLM
@@ -224,23 +225,43 @@ off by default and, when on, only makes its declines visible.
 ### 21. More Than One Process
 
 The multi-process path of the TRL adapter is tested with a fake
-accelerator of two and four ranks in one interpreter and by parity with
-the single-process adapter on the concatenated batch. It has not been run
-on a real `torch.distributed` process group or on more than one GPU; the
-`accelerate` collectives it wraps are called as documented and nothing
-more is claimed about them. Rank 0 owns the buffer and the log, and the
-log records the global batch in rank order; it does not record which rank
-generated or trained which row. The rank-0 ownership rule relies on the
-launcher setting `RANK` (or a non-zero `LOCAL_RANK`), or on the trainer
-attaching the accelerator before the buffer is first used; a log,
-manifest or directory is not opened before then, but a `.buffer` read on
-another rank before the attach opens it there, and the attach then refuses
-on every rank after the file was touched. Behavior logprobs come from each rank's own forward, so
-the dropout caveat of §14 applies on every rank. No claim is made about
+accelerator of two and four ranks in one interpreter, by parity with the
+single-process adapter on the concatenated batch, and on real
+`torch.distributed` process groups of two ranks through
+`benchmarks/modal/trl_replay_distributed.py`: two CPU processes on the
+gloo backend (`torchrun`, 40 steps, run locally) and two A10G GPUs on
+NCCL (`accelerate launch --num_processes 2 --multi_gpu`, 40 steps, on
+Modal); the committed record of the GPU run is re-verified by
+`tests/test_trl_results.py`. What those runs establish: every rank made
+one hook call per step, only rank 0 built a buffer and wrote the log and
+manifest, the log records the global batch (sixteen rows per step from
+two ranks of eight), dead groups were replayed across ranks and the
+resulting log verifies with its manifest. The first GPU run failed where
+the fake-world tests could not: rank 0 ran the hook on the gathered CPU
+shards and its telemetry forward fed them to the CUDA model; the batch
+is now moved to rank 0's device first, with a regression test that needs
+a second device and is skipped without one. Not verified: more than two
+ranks or more than one machine; a run with vLLM generation or TRL's
+server mode (the latter is parked on an NCCL weight-sync hang recorded
+in `docs/reproducible-training.md`); resumption of a distributed run
+from a checkpoint; that each rank trained on exactly the rows the
+broadcast handed it (the log commits to the global batch rank 0
+assembled, not to what each rank's loss consumed; the `batch` witness
+is rank 0's). The log records the global batch in rank order; it does
+not record which rank generated or trained which row. The rank-0
+ownership rule relies on the launcher setting `RANK` (or a non-zero
+`LOCAL_RANK`), or on the trainer attaching the accelerator before the
+buffer is first used; a log, manifest or directory is not opened before
+then, but a `.buffer` read on another rank before the attach opens it
+there, and the attach then refuses on every rank after the file was
+touched. Behavior logprobs come from each rank's own forward, so the
+dropout caveat of §14 applies on every rank. No claim is made about
 throughput: every rank receives every rank's slice in the all-gather and
-the whole rewritten batch in the broadcast, once per generation step.
+the whole rewritten batch in the broadcast, once per generation step,
+and the two-GPU run's wall clock is one observation for a test-size
+model.
 
-### 21. Quarantine and Reward Provenance
+### 22. Quarantine and Reward Provenance
 
 A quarantine eviction records the predicate text and the operator's note;
 the checker verifies that the record is a well-formed eviction of a live
@@ -254,3 +275,30 @@ adapter's statement, numeric only and outside the content digest: the log
 does not commit to them, a changed or dropped value passes the checker
 (the mutation campaign measures this), and the adapter wiring that
 supplies them to the row conversion is not yet in `ReservoirReplay`.
+
+### 23. Offline Replay
+
+`reservoir-replay-offline` reconstructs, from the log and the manifest
+alone, what the buffer put into each training batch: for every batch
+witness, the replaced rows with their draws, slots, exact importance
+weights and probabilities, and the example (prompt id, tokens, reward,
+source, per-reward-function values when the manifest has them) the
+manifest opens for the draw. That is the whole of what the log binds to a
+row. It does not reconstruct the fresh rows: the witness names only the
+rows the adapter replaced, so a fresh row's example is not in the log and
+the output lists such rows by index only. What it does list, under
+`generated`, is every example inserted before the witness at an entry
+version equal to the step. Reading those as the step's own generation
+assumes the adapter stamps the entry version with the trainer step, as
+the TRL adapter does; the log does not verify that mapping. Their order
+relative to the rows is not recorded, and the rows of dead groups that
+were not replaced are not in the manifest at all. A step with nothing replayed has no witness and
+no batch line. Nothing about logprobs, advantages or the loss is
+reconstructed: the output is the data the batch held, not the gradient
+the trainer took. The replay refuses a log below format 2 (no witnesses
+could exist in it) and a log without a manifest; it refuses a tampered
+manifest when the tampering touches what the digest or the log commits
+to, and otherwise reports what the manifest states (the per-reward-function
+values, see §22), which the mutation campaign measures beside the
+`replay_manifest` category: those tamperings run and move only the
+`rewards` fields of the output.

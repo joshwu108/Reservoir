@@ -44,6 +44,8 @@ class TestMutationCampaign:
             "draw",
             "batch",
             "telemetry",
+            "provenance",
+            "replay_manifest",
         }
         assert required.issubset(category_names), (
             f"Missing categories: {required - category_names}"
@@ -112,4 +114,22 @@ class TestProvenanceCampaign:
                                          "manifest_rewards_value_changed",
                                          "manifest_rewards_dropped"}
         assert limit["statement"]
+        assert results["survived"] == []
+
+
+class TestReplayCampaign:
+    def test_replay_manifest_category_fully_rejected(self, results):
+        cat = next(d for d in results["details"] if d[0] == "replay_manifest")
+        assert cat == ("replay_manifest", 16, 16)
+
+    def test_reward_provenance_changes_are_measured_not_counted(self, results):
+        # The log does not commit to the per-reward-function values: a tampered value is not
+        # refused, the replay reports it, and nothing else in the output moves. That is a
+        # measurement beside the category, not a rejection.
+        split = results["replay_manifest"]
+        assert set(split["changed"]) == {"manifest_rewards_changed_on_replayed_row",
+                                         "manifest_rewards_dropped_on_replayed_row",
+                                         "manifest_rewards_changed_on_generated_example"}
+        assert len(split["broke"]) == 16 and not set(split["broke"]) & set(split["changed"])
+        assert split["statement"]
         assert results["survived"] == []

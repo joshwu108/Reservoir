@@ -19,6 +19,7 @@ dependencies = []
 reservoir-verify = "reservoir_checker.verify:main"
 reservoir-transcript = "reservoir_checker.transcript:main"
 reservoir-diff = "reservoir_checker.diff:main"
+reservoir-replay-offline = "reservoir_checker.replay:main"
 
 [project.optional-dependencies]
 classic = [

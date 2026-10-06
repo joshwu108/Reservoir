@@ -736,8 +736,12 @@ transport around it:
 is wrapped over `accelerate.utils.gather_object` / `broadcast_object_list`;
 the tests drive the same code with a fake accelerator of two and four ranks
 on threads that rendezvous on a barrier, with a parity check against the
-single-process adapter on the concatenated batch. The adapter has not been
-run on a real multi-GPU process group (nonclaims §21).
+single-process adapter on the concatenated batch. On a real process group
+(two A10Gs under `accelerate launch`, `benchmarks/modal/trl_replay_distributed.py`)
+the gathered shards arrive as CPU tensors and rank 0 moves the assembled
+global batch to its own device before the hook, because the telemetry
+forward feeds it to the model; the fake-world tests had not caught that
+(nonclaims §21).
 
 ## 10. Content Commitment, Transcript and Diff
 
@@ -999,3 +1003,58 @@ changed reward value and a dropped `rewards` field all pass the checker;
 the campaign measures these four (`provenance_limit`) and fails if the
 measurement changes. They are the operator's and the adapter's statements,
 recorded so an auditor can read them, checked for shape only.
+
+## 11. Offline Replay
+
+`reservoir_checker.replay` (console script `reservoir-replay-offline`)
+is the first consumer of the witness and the manifest together. Its
+input is a verified log and the manifest that opens it; its output is
+JSON lines a third party can train on or audit without the trainer, the
+model or the library: one header, then one line per batch witness.
+
+Resolution goes witness → draw → slot → insert → manifest line. The
+witness binds a row to a draw position of the latest sample record; the
+sample record binds that draw to a slot and carries the exact
+probability and importance weight; the slot resolves to the insert that
+was live at the sample record (the latest insert into that slot before
+it, found by bisection over the insert history by slot); and the insert
+is the manifest line at the same position in the history, which
+`check_manifest` has already proved to be its opening. A reused slot
+therefore resolves to the example the draw saw, not to the slot's later
+occupant. The checker has already proved that the witnessed digest equals
+the draw's; the replay checks once more that the manifest line it
+reached carries that digest, so a lookup bug cannot emit a wrong example
+silently.
+
+Each row carries the opened example (prompt id, tokens, reward as a
+float and as the canonical `float.hex()` the digest was computed over,
+source, entry version, and `rewards` when the manifest line has it), the
+draw's weight and probability as floats and as exact
+numerator/denominator strings, and the slot. The batch line carries the
+step, the sample it was built from, the batch size, the tensor digest,
+the declined draws, the rows the witness does not bind (`fresh_rows`),
+and `generated`: every example inserted before the witness at an entry
+version equal to the step, unordered, which is what the adapter stored
+from that step's own generation when it stamps the entry version with
+the trainer step, as the TRL adapter does; the log does not verify that
+mapping. The header names the format, the record and example counts,
+the head digest, the witnessed steps and the telemetry steps that have
+no witness. Output lines are canonical JSON (sorted keys, no spaces), so
+two replays of one run are byte-identical and `diff` is meaningful.
+
+What it refuses: a log below format 2 (batch witnesses arrived with
+format 2, so an older log has nothing to reconstruct), a log without a
+manifest, and anything `verify_chain` rejects. The mutation campaign
+category `replay_manifest` tampers the manifest with the log untouched:
+16 tamperings (a changed token, reward, prompt, source, version, slot,
+operation counter, order or count, a recomputed digest, a non-canonical
+reward spelling) must break the replay, because the manifest no longer
+opens the log's commitments, and are counted as rejected. Beside the
+category, as a measurement and not as rejections, 3 tamperings of the
+per-reward-function values (changed or dropped on a replayed row,
+changed on a generated example) must run, differ from the untampered
+replay, and differ only in `rewards` fields: the log does not commit to
+those values (§10.12), so a single manifest cannot be told from a
+tampered one, and the replay reports what it states. The campaign fails
+if a tampering lands on the other side of that line. The limits are in
+`docs/nonclaims.md` §23.

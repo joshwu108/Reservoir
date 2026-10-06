@@ -16,7 +16,9 @@ The arrangement here:
   for them.
 - **Every rank computes behavior logprobs for its own rows** (one no-grad
   forward, balanced across devices), then the slices are gathered to rank 0.
-- **Rank 0 runs the ordinary single-process hook on the global batch**: store
+- **Rank 0 runs the ordinary single-process hook on the global batch**, after
+  moving the gathered CPU shards to its own device (the hook's telemetry
+  forward feeds the batch to the model): store
   live groups, advance, replay dead rows, gate, witness, measure. Nothing in
   that path knows it is distributed.
 - **The result is broadcast and sliced back**: each rank receives the rows it
@@ -183,13 +185,19 @@ class _OwnerFailure(Exception):
     """Carried from rank 0 to the other ranks through the broadcast."""
 
 
-def _owner_mix(replay: Any, shards: list[dict], steps: list[int], trainer: Any, step: int):
-    """Rank 0's half: assemble, run the single-process hook, return the CPU payload (or None)."""
+def _owner_mix(replay: Any, shards: list[dict], steps: list[int], trainer: Any, step: int,
+               device: torch.device):
+    """Rank 0's half: assemble, run the single-process hook, return the CPU payload (or None).
+
+    The gathered shards are CPU tensors; the hook runs on ``device`` (rank
+    0's own batch device) because its telemetry forward and the drift gate
+    feed the batch to the model, which lives there.
+    """
     if any(s != step for s in steps):
         raise RuntimeError(
             f"ranks disagree on global_step: {steps}; the trainer state is not in sync across processes"
         )
-    global_batch = concat_shards(shards, trainer._tokenizer.pad_token_id)
+    global_batch = to_device(concat_shards(shards, trainer._tokenizer.pad_token_id), device)
     new = replay.mix_local(global_batch, trainer)
     # A step that sampled returns a rewritten dict even if every draw was declined (the one
     # process path does too, and the witness digest is over it); only a step with nothing
@@ -211,7 +219,8 @@ def _local_shard(replay: Any, output: dict, trainer: Any, step: int) -> tuple[di
     return prepared, shard, None
 
 
-def _owner_payload(replay: Any, shards: list[dict], trainer: Any, step: int, comm: Communicator) -> Any:
+def _owner_payload(replay: Any, shards: list[dict], trainer: Any, step: int, comm: Communicator,
+                   device: torch.device) -> Any:
     """Rank 0's work between the gather and the broadcast; never returns without a broadcastable value."""
     errors = [s["error"] for s in shards if "error" in s]
     if errors:
@@ -221,7 +230,7 @@ def _owner_payload(replay: Any, shards: list[dict], trainer: Any, step: int, com
             f"gathered {len(shards)} shards from a world of {comm.num_processes} processes; "
             "the process group is not initialised or the accelerator is not the launcher's"
         )
-    return _owner_mix(replay, [s["batch"] for s in shards], [s["step"] for s in shards], trainer, step)
+    return _owner_mix(replay, [s["batch"] for s in shards], [s["step"] for s in shards], trainer, step, device)
 
 
 def mix_distributed(replay: Any, output: dict, trainer: Any, comm: Communicator) -> dict:
@@ -242,7 +251,7 @@ def mix_distributed(replay: Any, output: dict, trainer: Any, comm: Communicator)
     payload: Any = None
     if comm.process_index == OWNER_RANK:
         try:
-            payload = _owner_payload(replay, shards, trainer, step, comm)
+            payload = _owner_payload(replay, shards, trainer, step, comm, output["completion_ids"].device)
         except BaseException as exc:  # noqa: BLE001 - every rank must leave the collective
             comm.broadcast_object({"error": f"{type(exc).__name__}: {exc}"})
             raise (local_error if local_error is not None else exc)

@@ -26,6 +26,7 @@ from reservoir import Rollout, RolloutBuffer, DurableRolloutBuffer, ExactPERBuff
 from reservoir.attest import AttestationLog
 from reservoir_checker.verify import verify_chain
 from reservoir_checker.transcript import build_transcript
+from reservoir_checker.replay import replay
 buf = RolloutBuffer(capacity=4, attest=AttestationLog())
 buf.add_group("p", 0, [Rollout([1, 2], [-0.1, -0.2], 1.0)], source="s")
 buf.sample(2)
@@ -87,7 +88,7 @@ def test_genuine_import_errors_are_not_disguised(monkeypatch):
 
 def test_console_scripts_resolve():
     scripts = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["scripts"]
-    assert set(scripts) == {"reservoir-verify", "reservoir-transcript", "reservoir-diff"}
+    assert set(scripts) == {"reservoir-verify", "reservoir-transcript", "reservoir-diff", "reservoir-replay-offline"}
     for target in scripts.values():
         module, func = target.split(":")
         assert callable(getattr(importlib.import_module(module), func))
