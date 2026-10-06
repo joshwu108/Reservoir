@@ -327,3 +327,98 @@ def test_builtins_return_finite_scores_at_least_epsilon(
         assert math.isfinite(score)
         assert score >= epsilon
         assert score <= 1.0 + epsilon
+
+
+# ---------------------------------------------------------------------------
+# DriftAwarePriority: the reference use of the rescore hook
+# ---------------------------------------------------------------------------
+
+from reservoir.priorities import DEFAULT_EPSILON, DriftAwarePriority, ReplaySignal, validated_rescore  # noqa: E402
+
+
+def _signal(log_ratio, **kw) -> ReplaySignal:
+    defaults = dict(advantage=0.5, is_weight=1.0, log_ratio=log_ratio, age=1, step=3)
+    defaults.update(kw)
+    return ReplaySignal(**defaults)
+
+
+class TestDriftAwarePriority:
+    def _group(self):
+        from reservoir.rollout import Rollout, RolloutGroup
+        return RolloutGroup("p", 0, [Rollout([1], [-0.1], 1.0), Rollout([2], [-0.1], 0.0)])
+
+    def test_scores_with_the_base_strategy(self) -> None:
+        group = self._group()
+        strategy = DriftAwarePriority(base=AdvantagePriority(epsilon=0.0), scale=2.0)
+        assert strategy.score(group.rollouts[0], group) == AdvantagePriority(epsilon=0.0).score(group.rollouts[0], group) == 0.5
+
+    def test_keeps_the_priority_without_a_measured_log_ratio(self) -> None:
+        group = self._group()
+        strategy = DriftAwarePriority()
+        assert strategy.rescore(group.rollouts[0], group, _signal(None)) is None
+        assert validated_rescore(strategy, group.rollouts[0], group, _signal(None)) is None
+
+    @pytest.mark.parametrize("log_ratio", [0.0, 0.5, -0.5, 3.0, -3.0])
+    def test_rescore_is_the_base_score_shrunk_by_the_absolute_log_ratio(self, log_ratio: float) -> None:
+        group = self._group()
+        strategy = DriftAwarePriority(base=AdvantagePriority(epsilon=0.0), scale=2.0)
+        rollout = group.rollouts[0]
+        expected = 0.5 / (1.0 + 2.0 * abs(log_ratio))
+        assert strategy.rescore(rollout, group, _signal(log_ratio)) == pytest.approx(expected)
+        assert validated_rescore(strategy, rollout, group, _signal(log_ratio)) == pytest.approx(expected)
+        assert strategy.rescore(rollout, group, _signal(log_ratio)) == strategy.rescore(rollout, group, _signal(-log_ratio))
+
+    def test_zero_log_ratio_leaves_the_base_score(self) -> None:
+        group = self._group()
+        strategy = DriftAwarePriority(base=AdvantagePriority(epsilon=0.0))
+        assert strategy.rescore(group.rollouts[0], group, _signal(0.0)) == 0.5
+
+    def test_ignores_the_base_strategys_own_rescore(self) -> None:
+        group = self._group()
+
+        class Loud(AdvantagePriority):
+            def rescore(self, rollout, group, signal):
+                return 99.0
+
+        strategy = DriftAwarePriority(base=Loud(epsilon=0.0))
+        assert strategy.rescore(group.rollouts[0], group, _signal(1.0)) == 0.25
+
+    @pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf"), "1"])
+    def test_scale_must_be_a_positive_finite_number(self, bad: object) -> None:
+        with pytest.raises((ValueError, TypeError)):
+            DriftAwarePriority(scale=bad)
+
+    def test_base_must_be_a_priority_strategy(self) -> None:
+        with pytest.raises(TypeError, match="PriorityStrategy"):
+            DriftAwarePriority(base=object())
+
+    def test_is_frozen_equal_by_parameters_and_fingerprints_as_nested_data(self) -> None:
+        import dataclasses
+        a, b = DriftAwarePriority(scale=1.5), DriftAwarePriority(scale=1.5)
+        assert a == b and hash(a) == hash(b) and a != DriftAwarePriority(scale=2.0)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            a.scale = 3.0
+        assert dataclasses.asdict(a) == {"base": {"epsilon": DEFAULT_EPSILON}, "scale": 1.5}
+
+    def test_rescore_keeps_the_priority_for_a_non_finite_log_ratio(self) -> None:
+        group = self._group()
+        strategy = DriftAwarePriority()
+        assert strategy.rescore(group.rollouts[0], group, _signal(float("nan"))) is None
+        assert strategy.rescore(group.rollouts[0], group, _signal(float("inf"))) is None
+
+    def test_snapshot_fingerprint_keeps_the_base_strategys_type(self) -> None:
+        from reservoir.priorities import PassRateVariance
+        from reservoir.rollout_snapshot import _strategy_fingerprint
+
+        a = _strategy_fingerprint(DriftAwarePriority(base=AdvantagePriority(epsilon=1e-3)))
+        b = _strategy_fingerprint(DriftAwarePriority(base=PassRateVariance(epsilon=1e-3)))
+        assert a != b
+        assert a == {"type": "DriftAwarePriority", "base": {"type": "AdvantagePriority", "epsilon": 1e-3}, "scale": 1.0}
+        assert _strategy_fingerprint(AdvantagePriority(epsilon=1e-3)) == {"type": "AdvantagePriority", "epsilon": 1e-3}
+
+        class Plain(PriorityStrategy):
+            def score(self, rollout, group):
+                return 1.0
+
+        assert _strategy_fingerprint(Plain()) == {"type": "Plain"}
+        assert _strategy_fingerprint(DriftAwarePriority(base=Plain()))["base"] is not None

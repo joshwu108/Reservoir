@@ -34,16 +34,18 @@ _DEPS = [
     "accelerate==0.30.1",
 ]
 
-try:
-    _repo_src = str(Path(__file__).parents[2] / "src")
-except IndexError:
-    _repo_src = "."  # running inside container; image is already built
+# ``modal run`` puts the checkout on sys.path and the container has /root
+# there; a plain ``python benchmarks/modal/...py`` has only this directory,
+# so add the checkout root for the ``benchmarks`` import.
+_HERE = Path(__file__).resolve()
+if len(_HERE.parents) > 2 and str(_HERE.parents[2]) not in sys.path:
+    sys.path.insert(0, str(_HERE.parents[2]))
 
-image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install(*_DEPS)
-    .add_local_dir(_repo_src, remote_path="/reservoir_src")
-)
+from benchmarks.modal.trl_replay_real import repo_root, with_sources  # noqa: E402
+
+# Sources and the ``benchmarks`` package are mounted by ``with_sources`` so
+# the entrypoint copy at /root can import ``benchmarks.modal.trl_replay_real``.
+image = with_sources(modal.Image.debian_slim(python_version="3.11").pip_install(*_DEPS))
 
 app = modal.App("reservoir-forgetting-real")
 

@@ -222,13 +222,15 @@ _ROLLOUT_KW = dict(capacity=8, half_life=1, max_policy_age=2, compact_every=1)
 ROLLOUT_CUT_POINTS = [
     "mid_wal_write", "after_wal_write", "after_wal_fsync",
     "after_intent_write", "after_intent_fsync", "mid_segment_write", "after_segment_fsync",
-    "before_rename", "after_rename_before_dir_fsync", "after_snapshot_before_wal_reset", "after_dir_fsync",
+    "before_rename", "after_rename_before_dir_fsync", "after_dir_fsync",
+    "after_snapshot_rename", "after_snapshot_dir_fsync", "after_snapshot_before_wal_reset",
 ]
 # Restoring a checkpoint writes a snapshot (the protocol's cuts) and then
 # resets the log; no command is appended, so the WAL cuts cannot fire there.
 RESTORE_CUT_POINTS = [
     "after_intent_write", "after_intent_fsync", "mid_segment_write", "after_segment_fsync",
-    "before_rename", "after_rename_before_dir_fsync", "after_dir_fsync", "after_restore_before_wal_reset",
+    "before_rename", "after_rename_before_dir_fsync", "after_dir_fsync",
+    "after_snapshot_rename", "after_snapshot_dir_fsync", "after_restore_before_wal_reset",
 ]
 
 

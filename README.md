@@ -114,8 +114,11 @@ class RewardGap(PriorityStrategy):
         return None if signal.log_ratio is None else abs(rollout.reward) / (1 + abs(signal.log_ratio))
 ```
 
-Rescoring is a hook, not a recommendation: the library ships no rescoring
-strategy of its own, and every rescoring is an `update` record in the log.
+Rescoring is a hook, not a recommendation: `DriftAwarePriority` ships as a
+reference implementation of it (the base score divided by `1 + scale *
+|log_ratio|` when the adapter measured a log-ratio), documented as an example
+and not as something that improves training, and every rescoring is an
+`update` record in the log.
 
 **Age decay** is exact. Priorities decay by half-life in model versions, and
 the decayed distribution is the declared distribution the checker verifies.
@@ -247,8 +250,10 @@ reopening replayed in 5.3 s.
 buffer to a training checkpoint; the TRL adapter does this on every save
 (pruning buffer checkpoints to the ones the trainer kept) and rewinds on
 resume, so a restarted run continues the chain from the checkpoint rather
-than from wherever the crash happened. Resume at a non-zero step without a
-matching buffer checkpoint is an error, not a fresh buffer.
+than from wherever the crash happened. Each buffer checkpoint records the
+digest of the trainer's checkpoint directory it was saved with, and a resume
+against a directory that digests differently is refused. Resume at a non-zero
+step without a matching buffer checkpoint is an error, not a fresh buffer.
 
 ---
 
@@ -448,7 +453,7 @@ report.to_html("forgetting_report.html")
 | Claim | Evidence |
 |-------|----------|
 | Sampling is deterministic and reproducible under a keyed draw | Property tests against a brute-force reference; the log records seed, buffer id and `beta`, and the checker recomputes every draw and importance weight from them |
-| The durable buffers are failure-atomic under SIGKILL | 275/275 crash tests across both buffers: every child was killed at its armed cut point (the campaign fails a row otherwise), 210 recovered the pre-state and 65 the post-state (an unsynced write that SIGKILL leaves in the page cache recovers to the post-state; a power loss there would give the pre-state, which is also legal), zero torn; the rollout cases cross the command log and the snapshot protocol in one operation, crash mid-rebase, crash inside a quarantine of a whole group, and crash inside a checkpoint restore |
+| The durable buffers are failure-atomic under SIGKILL | 315/315 crash tests across both buffers: every child was killed at its armed cut point (the campaign fails a row otherwise), 240 recovered the pre-state and 75 the post-state (an unsynced write that SIGKILL leaves in the page cache recovers to the post-state; a power loss there would give the pre-state, which is also legal), zero torn; the rollout cases cross the command log and the snapshot protocol in one operation, crash mid-rebase, crash inside a quarantine of a whole group, crash inside a checkpoint restore, and crash in the two windows of the single-write snapshot install |
 | The independent checker rejects forged logs | 221/221 mutants rejected: 63 chain, draw-arithmetic and record-order forgeries (bit flips, off-by-one draws, swapped indices, non-reduced fractions, deleted, reordered and stale-suffix records), 38 age-decay protocol forgeries, 29 content-commitment forgeries (3 of them chain-consistent, invisible without the manifest), 21 draw and weight forgeries (2 of them invisible to a log that does not record its seed and `beta`), 14 batch-witness forgeries, 18 telemetry forgeries, 22 quarantine and reward-provenance forgeries (the campaign also records that a quarantine record's texts and the manifest's reward values are not committed: 4 such changes pass, by design) and 16 manifest tamperings against the offline replay (the campaign also measures that 3 tamperings of the reward-provenance values, which the log does not commit to, run and change only those fields of the output) |
 | A witnessed batch can be rebuilt as content from the log and manifest alone | `reservoir-replay-offline` emits every witnessed batch as JSON lines (rows, draws, exact importance weights, tokens, rewards, sources) importing nothing from the library; on the committed CPU and T4 reproducibility runs, runs a and b replay byte-identically and run c differs; fresh rows are listed by index only (`docs/nonclaims.md` §23) |
 | Two runs with the same inputs give one transcript | CPU demo: runs a and b byte-identical (116 records, one head digest), run c differs at record 1, classified `data`; the same triplet on a T4 with HF generation, with and without deterministic kernels, is `IDENTICAL` in both variants (`benchmarks/modal/results/repro_hf_t4_*`) |

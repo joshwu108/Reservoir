@@ -49,7 +49,15 @@ Built-ins
   Bernoulli outcome. DAPO's dynamic sampling (arXiv 2503.14476) drops
   all-pass and all-fail prompts; this is the soft version.
 
-All three are frozen dataclasses: parameters are validated once at
+- ``DriftAwarePriority``: a reference use of the ``rescore`` hook, shipped
+  as an example and not as a recommendation. It scores with a base
+  strategy and, when a rollout is replayed and the adapter measured its
+  log-ratio to the current policy, rescores it to
+  ``base / (1 + scale * |log_ratio|)``: the further the policy has
+  drifted from the rollout, the less it is replayed again. No claim is
+  made that this improves training (docs/nonclaims.md §14).
+
+All four are frozen dataclasses: parameters are validated once at
 construction, cannot be changed afterwards, and two instances with the
 same parameters compare equal. Each adds a small ``epsilon`` so a zero
 score stays sampleable, mirroring the ``|TD error| + epsilon`` convention
@@ -181,8 +189,8 @@ class PriorityStrategy(ABC):
         then quantisation) and becomes an ``update`` record; a value that
         is not a finite non-negative number raises, after the step's
         witness and telemetry have already been written. Which signal makes
-        a good priority is an open research question; the library ships no
-        rescoring strategy of its own.
+        a good priority is an open research question; ``DriftAwarePriority``
+        is a reference implementation of this hook, not a recommendation.
         """
         return None
 
@@ -349,13 +357,70 @@ class PassRateVariance(PriorityStrategy, PromptPriority):
         return self.score_prompt(group)
 
 
+DEFAULT_DRIFT_SCALE: Final[float] = 1.0
+
+
+@dataclass(frozen=True)
+class DriftAwarePriority(PriorityStrategy):
+    """Reference rescoring strategy: a base priority shrunk by the rollout's drift. An example.
+
+    ``score`` is ``base.score``. ``rescore`` returns
+    ``base.score(rollout, group) / (1 + scale * |signal.log_ratio|)`` when
+    the adapter measured a finite log-ratio between the stored behavior
+    logprobs and the current policy, and ``None`` (keep the priority) when
+    it did not or the value is not finite: with telemetry and the drift
+    gate both off there is no measurement to act on. The base strategy's own ``rescore`` is not
+    consulted. The quotient is at most the base score and at least 0, so
+    it needs no validation beyond the base's.
+
+    This exists to show the hook end to end (a replayed rollout becomes an
+    ``update`` record the checker verifies). Which signal makes a good
+    priority is an open question; see docs/nonclaims.md §14.
+
+    Parameters
+    ----------
+    base : PriorityStrategy
+        Scores at insertion and the numerator at replay. A frozen dataclass
+        fingerprints fully in a durable snapshot; a plain class contributes
+        only its name, and a mutable one can change under the wrapper.
+    scale : float > 0
+        How fast the priority falls with the log-ratio; 1.0 halves it at a
+        log-ratio of 1.
+    """
+
+    base: PriorityStrategy = AdvantagePriority()
+    scale: float = DEFAULT_DRIFT_SCALE
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.base, PriorityStrategy):
+            raise TypeError(f"base must be a PriorityStrategy, got {type(self.base).__name__}")
+        scale = _require_finite_float(self.scale, "scale")
+        if scale <= 0.0:
+            raise ValueError(f"scale must be > 0, got {scale!r}")
+        object.__setattr__(self, "scale", scale)
+
+    def score(self, rollout: Rollout, group: RolloutGroup) -> float:
+        """The base strategy's score."""
+        return self.base.score(rollout, group)
+
+    def rescore(self, rollout: Rollout, group: RolloutGroup, signal: ReplaySignal) -> Optional[float]:
+        """The base score divided by ``1 + scale * |log_ratio|``; ``None`` without a measured log-ratio."""
+        if signal.log_ratio is None or not math.isfinite(signal.log_ratio):
+            return None
+        return self.base.score(rollout, group) / (1.0 + self.scale * abs(signal.log_ratio))
+
+
 __all__ = [
     "AdvantagePriority",
+    "DEFAULT_DRIFT_SCALE",
     "DEFAULT_EPSILON",
+    "DriftAwarePriority",
     "PassRateTargeting",
     "PassRateVariance",
     "PriorityStrategy",
     "PromptPriority",
+    "ReplaySignal",
     "validated_prompt_score",
+    "validated_rescore",
     "validated_score",
 ]

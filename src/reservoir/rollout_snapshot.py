@@ -25,13 +25,23 @@ from reservoir.priorities import PriorityStrategy
 from reservoir.rollout import Rollout, RolloutGroup, default_is_success
 
 
+def _fingerprint_value(value: object) -> object:
+    """A dataclass value as ``{"type": ..., fields...}``, recursively; anything else as is."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {"type": type(value).__name__,
+                **{f.name: _fingerprint_value(getattr(value, f.name)) for f in dataclasses.fields(value)}}
+    return value
+
+
 def _strategy_fingerprint(strategy: PriorityStrategy) -> dict:
-    """Class name plus parameters (for dataclass strategies), so a snapshot
-    saved with ``AdvantagePriority(epsilon=0.1)`` is not loaded with 0.5."""
-    fingerprint: dict = {"type": type(strategy).__name__}
-    if dataclasses.is_dataclass(strategy):
-        fingerprint.update(dataclasses.asdict(strategy))
-    return fingerprint
+    """The strategy's class name and, for a dataclass, its fields; nested strategies keep their type.
+
+    Two strategies of different classes or parameters (at any depth) must
+    fingerprint differently, or a snapshot would load under a strategy that
+    scores differently. A strategy that is not a dataclass contributes only
+    its class name.
+    """
+    return _fingerprint_value(strategy) if dataclasses.is_dataclass(strategy) else {"type": type(strategy).__name__}
 
 
 def _snapshot_int(container: dict, name: str, minimum: int = 0) -> int:

@@ -383,20 +383,36 @@ def test_checkpoint_binding_is_a_no_op_off_the_owner_and_works_on_it(tmp_path):
     world = World(2)
     replays = [replay(directory=tmp_path / "buf", attest=tmp_path / "attest.jsonl") for _ in range(2)]
     attach_all(replays, world)
-    other = replays[1]
-    bind_checkpoint(other, 3, tmp_path)
+    owner, other = replays
+    # bind_checkpoint is a collective (every rank waits before the owner digests), so all ranks call it.
+    run_ranks([lambda r=r: bind_checkpoint(r, 3, tmp_path) for r in replays])
     resume_from_checkpoint(other, 3)
     assert other._buffer is None and not other.is_owner
-    assert replays[0].buffer.checkpoints() == []            # rank 0's buffer saw nothing from rank 1
-    replays[0].close()
-
-    replays, _, _, _, _ = distributed_run(
-        2, [live_batch(), global_batch()], [1, 2], directory=tmp_path / "owner-buf", attest=tmp_path / "owner.jsonl",
-    )
-    owner = replays[0]
-    bind_checkpoint(owner, 2)
-    assert owner.buffer.checkpoints() == ["step-2"]
+    assert owner.buffer.checkpoints() == ["step-3"]         # only the owner's buffer took the checkpoint
+    assert owner.buffer.checkpoint_binding("step-3") is None  # no checkpoint-3 directory existed
     owner.close()
+
+
+def test_the_owner_digests_the_model_checkpoint_only_after_every_rank_wrote_into_it(tmp_path):
+    """Each rank writes its own files into checkpoint-N before on_save; the digest must see all of them."""
+    from reservoir.integrations._trl_lifecycle import directory_digest
+
+    world = World(2)
+    replays = [replay(directory=tmp_path / "buf", attest=tmp_path / "attest.jsonl") for _ in range(2)]
+    attach_all(replays, world)
+    model_dir = tmp_path / "out" / "checkpoint-5"
+    model_dir.mkdir(parents=True)
+    (model_dir / "rng_state_0.pth").write_bytes(b"rank0")
+
+    def rank_1_saves_then_binds():
+        (model_dir / "rng_state_1.pth").write_bytes(b"rank1")
+        bind_checkpoint(replays[1], 5, tmp_path / "out")
+
+    run_ranks([lambda: bind_checkpoint(replays[0], 5, tmp_path / "out"), rank_1_saves_then_binds])
+    recorded = replays[0].buffer.checkpoint_binding("step-5")["model_checkpoint"]
+    assert recorded["files"] == 2 and recorded["digest"] == directory_digest(model_dir)["digest"]
+    assert world.collectives == 2       # attach's own collective, then the barrier before the digest
+    replays[0].close()
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ Named cut points (environment variable CUT_POINT):
   - before_rename
   - after_rename_before_dir_fsync
   - after_dir_fsync
+  - after_snapshot_rename, after_snapshot_dir_fsync (``durably_snapshot`` only)
 """
 
 from __future__ import annotations
@@ -295,7 +296,9 @@ def recover_state(directory: Path, strict: bool = False) -> Optional[dict]:
     - ``intent.json`` plus a complete ``seg_0``: the operation committed;
       return the post-state.
     - ``intent.json`` without a readable segment: the operation did not
-      commit; return the pre-state the intent carried.
+      commit; return the pre-state the intent carried, or, for a
+      snapshot-only intent (``durably_snapshot``, which carries none), the
+      committed ``state.json``.
 
     In every case the intent and segment files are removed and the chosen
     state is written back to ``state.json`` so a second recovery is a
@@ -307,13 +310,16 @@ def recover_state(directory: Path, strict: bool = False) -> Optional[dict]:
     if not intent_file.exists():
         if intent_tmp.exists():
             intent_tmp.unlink()
+        stray = _segment_path(directory, 0)   # a segment written before its intent was committed
+        if stray.exists():
+            stray.unlink()
         return _read_state_file(directory, strict)
 
     try:
         intent = json.loads(intent_file.read_bytes())
     except (json.JSONDecodeError, OSError):
         _clear_intent(directory)  # corrupt intent: nothing committed
-        return recover_state(directory)
+        return recover_state(directory, strict)
 
     post_state = _read_segment(directory, 0)
     state = post_state if post_state is not None else intent.get("pre_state")
@@ -326,6 +332,10 @@ def recover_state(directory: Path, strict: bool = False) -> Optional[dict]:
     seg_path = _segment_path(directory, 0)
     if seg_path.exists():
         seg_path.unlink()
+    if state is None:
+        # A snapshot-only intent (``durably_snapshot``) carries no pre-state:
+        # the committed state.json, if any, is the pre-state.
+        return _read_state_file(directory, strict)
     return state
 
 
@@ -374,6 +384,52 @@ def durably_apply(
     if seg_path.exists():
         seg_path.unlink()
     return result
+
+
+def durably_snapshot(directory: Path, operation_name: str, state: dict) -> None:
+    """Commit ``state`` as the new ``state.json``, serialising it once.
+
+    For a snapshot there is no operation to apply, so the pre-state is the
+    ``state.json`` already committed and the post-state is ``state``.
+    Compared with ``durably_apply`` the intent carries no pre-state and the
+    fsynced segment becomes ``state.json`` by rename instead of a second
+    write; the cut points are the same (``_write_intent``, ``_write_segment``,
+    ``_commit_intent``). Protocol:
+
+      1. write the intent (operation name, no state) to intent.json.tmp, fsync
+      2. write ``state`` to seg_0, fsync
+      3. rename intent.json.tmp -> intent.json  (the atomic commit point)
+      4. fsync the directory
+      5. rename seg_0 -> state.json, fsync the directory, remove the intent
+
+    Recovery (``recover_state``): an intent without a readable segment keeps
+    the committed ``state.json``; an intent with a complete segment installs
+    it; an intent left after step 5 finds no segment and keeps the
+    ``state.json`` the rename installed. If writing the segment raises, the
+    intent and the segment are removed and the error propagates. Two cut
+    points of its own, ``after_snapshot_rename`` and
+    ``after_snapshot_dir_fsync``, arm the windows of step 5; the crash
+    campaign kills at every cut with SIGKILL, which keeps written but
+    unsynced bytes, so power-loss behaviour is argued from the fsync order
+    and not tested (docs/nonclaims.md §6).
+    """
+    _write_intent(directory, {"op": operation_name, "snapshot": True})
+    seg_path = _segment_path(directory, 0)
+    try:
+        _write_segment(directory, 0, state)
+        _commit_intent(directory)
+    except BaseException:
+        _clear_intent(directory)
+        if seg_path.exists():
+            seg_path.unlink()
+        raise
+    os.rename(str(seg_path), str(directory / _STATE_FILE))
+    if _should_cut("after_snapshot_rename"):
+        _kill_self()
+    _fsync_dir(directory)
+    if _should_cut("after_snapshot_dir_fsync"):
+        _kill_self()
+    _clear_intent(directory)
 
 
 # ---------------------------------------------------------------------------

@@ -149,6 +149,8 @@ from reservoir.integrations._trl_lifecycle import (
     RANK_ENV_VARS,
     bind_checkpoint,
     checkpoint_tag,
+    resume_model_checkpoint,
+    trainer_checkpoint_dir,
     env_rank,
     resume_from_checkpoint,
     trainer_checkpoint_steps,
@@ -310,6 +312,9 @@ class ReservoirReplay:
         self._buffer: Union[RolloutBuffer, DurableRolloutBuffer, None] = None
         self._owner: Optional[bool] = None
         self._comm: Optional[Communicator] = None
+        self.model_checkpoint: Union[str, Path, None] = None
+        """Set before ``train(resume_from_checkpoint=...)`` to the directory the model restarts from when it
+        is not ``output_dir/checkpoint-N``; the buffer checkpoint's recorded digest is checked against it."""
         self._env_rank = env_rank()
         self.rank: Optional[int] = self._env_rank
         # In-memory state is harmless to build now and discard later; a log, manifest or
@@ -706,11 +711,14 @@ def build_trainer_class() -> type:
             return control
 
         def on_train_begin(self, args, state, control, **kwargs):
-            resume_from_checkpoint(self.replay, state.global_step)
+            model_checkpoint = resume_model_checkpoint(self.replay, args, state.global_step)
+            resume_from_checkpoint(self.replay, state.global_step, model_checkpoint)
             return control
 
     class ReservoirGRPOTrainer(ReservoirReplayMixin, support.grpo_trainer):  # type: ignore[misc,valid-type]
         """``GRPOTrainer`` with Reservoir replay of dead groups. See the module docstring."""
+
+        replay_callback_class = ReservoirReplayCallback
 
         def __init__(self, *args: Any, replay_buffer: ReservoirReplay, **kwargs: Any) -> None:
             if not isinstance(replay_buffer, ReservoirReplay):
@@ -757,6 +765,7 @@ __all__ = [
     "UNSUPPORTED_OUTPUT_KEYS",
     "assert_hook_ran",
     "bind_checkpoint",
+    "trainer_checkpoint_dir",
     "build_trainer_class",
     "checkpoint_tag",
     "env_rank",

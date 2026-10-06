@@ -195,7 +195,7 @@ class TestFailures:
         assert buf.pending_commands == 5
         before = buf.state_dict()
         import reservoir.durable_rollout as durable_module
-        monkeypatch.setattr(durable_module, "durably_apply", lambda *a, **k: (_ for _ in ()).throw(OSError("no space")))
+        monkeypatch.setattr(durable_module, "durably_snapshot", lambda *a, **k: (_ for _ in ()).throw(OSError("no space")))
         with pytest.raises(OSError, match="no space"):
             buf.add_group("x", 1, rollouts([1.0]), source="s")
         monkeypatch.undo()
@@ -332,3 +332,60 @@ class TestWitnessReplayBinding:
                                                    "sample_op": batch.op_counter, "reported": {}}}
         with pytest.raises(ValueError, match="gone"):
             apply_command(buf, gone)
+
+
+class TestCheckpointBinding:
+    def test_binding_is_stored_beside_the_checkpoint_and_pruned_with_it(self, tmp_path):
+        buf = open_buf(tmp_path, compact_every=1000)
+        drive(buf, range(1))
+        buf.checkpoint("plain")
+        buf.checkpoint("bound", binding={"model_checkpoint": {"name": "checkpoint-1", "digest": "ab" * 32}})
+        assert buf.checkpoint_binding("plain") is None
+        assert buf.checkpoint_binding("bound") == {"model_checkpoint": {"name": "checkpoint-1", "digest": "ab" * 32}}
+        assert (tmp_path / "buf" / "checkpoints" / "bound" / "binding.json").exists()
+        buf.checkpoint("bound")                                        # re-taken without a binding: it is dropped
+        assert buf.checkpoint_binding("bound") is None
+        with pytest.raises(TypeError):
+            buf.checkpoint("x", binding=["not", "a", "dict"])
+        with pytest.raises(FileNotFoundError):
+            buf.checkpoint_binding("missing")
+        assert buf.prune_checkpoints({"plain"}) == ["bound"]
+        buf.close()
+
+    def test_an_unreadable_binding_is_an_error_not_none(self, tmp_path):
+        buf = open_buf(tmp_path, compact_every=1000)
+        drive(buf, range(1))
+        buf.checkpoint("a", binding={"k": 1})
+        (tmp_path / "buf" / "checkpoints" / "a" / "binding.json").write_bytes(b"[1]")
+        with pytest.raises(ValueError, match="JSON object"):
+            buf.checkpoint_binding("a")
+        (tmp_path / "buf" / "checkpoints" / "a" / "binding.json").write_bytes(b"{nope")
+        with pytest.raises(ValueError, match="unreadable"):
+            buf.checkpoint_binding("a")
+        buf.close()
+
+    def test_a_retaken_tag_never_keeps_the_old_binding(self, tmp_path, monkeypatch):
+        buf = open_buf(tmp_path, compact_every=1000)
+        drive(buf, range(1))
+        buf.checkpoint("a", binding={"v": 1})
+        target = tmp_path / "buf" / "checkpoints" / "a"
+        order = []
+        real_copy = buf._write_binding
+
+        def record(target_dir, binding):
+            order.append(("binding", binding, (target_dir / "state.json.tmp").exists()))
+            real_copy(target_dir, binding)
+
+        monkeypatch.setattr(buf, "_write_binding", record)
+        buf.checkpoint("a", binding={"v": 2})
+        # The stale binding is removed before the new state is staged; the new one is written after it.
+        assert order == [("binding", None, False), ("binding", {"v": 2}, False)]
+        assert buf.checkpoint_binding("a") == {"v": 2}
+        monkeypatch.undo()
+        # A crash after the state was replaced but before the new binding: the checkpoint is unbound.
+        monkeypatch.setattr(buf, "_write_binding",
+                            lambda t, b: real_copy(t, b) if b is None else (_ for _ in ()).throw(OSError("crash")))
+        with pytest.raises(OSError):
+            buf.checkpoint("a", binding={"v": 3})
+        assert buf.checkpoint_binding("a") is None and (target / "state.json").exists()
+        buf.close()

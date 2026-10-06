@@ -750,3 +750,26 @@ def test_bind_checkpoint_prunes_to_the_trainers_surviving_directories(tmp_path):
     assert trainer_checkpoint_steps(None) is None and trainer_checkpoint_steps(tmp_path / "missing") is None
     bind_checkpoint(replay(), 9)  # in-memory buffer: nothing to bind
     r.close()
+
+
+def test_resume_against_a_changed_global_step_directory_is_refused(tmp_path):
+    """The buffer checkpoint records the digest of ``global_step_<n>``; a different model is refused."""
+    kwargs = dict(directory=tmp_path / "buf", attest=tmp_path / "attest.jsonl")
+    r = replay(**kwargs)
+    ckpt = tmp_path / "ckpt"
+    FakeTrainer(r, [live_batch(), mixed_batch()], ckpt_dir=ckpt).fit(save_freq=2)   # saves global_step_2
+    recorded = r.buffer.checkpoint_binding("step-2")["model_checkpoint"]
+    assert recorded["name"] == "global_step_2" and recorded["files"] == 0
+    r.close()
+
+    (ckpt / "global_step_2" / "actor.pt").write_bytes(b"other weights")
+    again = replay(**kwargs)
+    with pytest.raises(RuntimeError, match="not the one the buffer checkpoint was bound to"):
+        FakeTrainer(again, [mixed_batch()], ckpt_dir=ckpt).fit()
+    again.close()
+
+    (ckpt / "global_step_2" / "actor.pt").unlink()
+    third = replay(**kwargs)
+    FakeTrainer(third, [mixed_batch()], ckpt_dir=ckpt).fit()          # the directory as saved resumes
+    assert third.buffer.current_version == 3
+    third.close()

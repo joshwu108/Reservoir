@@ -123,7 +123,7 @@ from typing import Any, Final, Optional, Union
 import numpy as np
 
 from reservoir.durable_rollout import DurableRolloutBuffer
-from reservoir.integrations._trl_lifecycle import checkpoint_tag, resume_from_checkpoint
+from reservoir.integrations._trl_lifecycle import checkpoint_tag, model_binding, resume_from_checkpoint
 from reservoir.integrations._trl_telemetry import StepTelemetry, choose_declines, summarize
 from reservoir.integrations._verl_compat import require_verl
 from reservoir.integrations._verl_rows import (
@@ -569,17 +569,27 @@ def trainer_checkpoint_steps(local_dir) -> Optional[set[int]]:
     return steps
 
 
+def verl_checkpoint_dir(local_dir, global_steps: int) -> Optional[Path]:
+    """``<local_dir>/global_step_<n>`` when ``local_dir`` is known, else None (it need not exist)."""
+    if local_dir is None:
+        return None
+    return Path(local_dir) / f"{CHECKPOINT_DIR_PREFIX}{int(global_steps)}"
+
+
 def bind_checkpoint(replay: ReservoirReplay, global_steps: int, local_dir=None) -> None:
     """When the trainer saves ``global_step_<n>``, snapshot a durable buffer as ``step-<n>``.
 
-    With ``local_dir`` the buffer's checkpoints are pruned to the steps the
-    trainer still has (it removes old ones under ``max_actor_ckpt_to_keep``
-    before this is called). A buffer without a directory has nothing to
-    bind; the call is a no-op.
+    With ``local_dir`` the digest of ``global_step_<n>`` is recorded in the
+    buffer checkpoint (a resume refuses a different model checkpoint) and
+    the buffer's checkpoints are pruned to the steps the trainer still has
+    (it removes old ones under ``max_actor_ckpt_to_keep`` before this is
+    called). A buffer without a directory has nothing to bind; the call is
+    a no-op.
     """
     if not isinstance(replay.buffer, DurableRolloutBuffer):
         return
-    replay.buffer.checkpoint(checkpoint_tag(global_steps))
+    binding = model_binding(verl_checkpoint_dir(local_dir, global_steps))
+    replay.buffer.checkpoint(checkpoint_tag(global_steps), binding=binding)
     steps = trainer_checkpoint_steps(local_dir)
     if steps is not None:
         replay.buffer.prune_checkpoints({checkpoint_tag(n) for n in steps | {int(global_steps)}})
@@ -624,7 +634,9 @@ class ReservoirReplayMixin:
     def _load_checkpoint(self, *args: Any, **kwargs: Any):  # type: ignore[override]
         result = super()._load_checkpoint(*args, **kwargs)  # type: ignore[misc]
         self._reservoir_resumed_from = int(self.global_steps)  # type: ignore[attr-defined]
-        resume_from_checkpoint(self.replay_buffer, self._reservoir_resumed_from)
+        local_dir = config_value(self.config, "trainer.default_local_dir")  # type: ignore[attr-defined]
+        resume_from_checkpoint(self.replay_buffer, self._reservoir_resumed_from,
+                               verl_checkpoint_dir(local_dir, self._reservoir_resumed_from))
         return result
 
     def fit(self, *args: Any, **kwargs: Any):  # type: ignore[override]
@@ -678,6 +690,7 @@ __all__ = [
     "append_metrics",
     "assert_hook_ran",
     "bind_checkpoint",
+    "verl_checkpoint_dir",
     "build_trainer_class",
     "config_setting",
     "config_value",

@@ -103,10 +103,24 @@ which has been measured. The attestation and manifest files are written as
 each operation runs, before its command is fsynced, so a reader of those
 files during a crash window can see a record that recovery then retracts;
 only after reopen are the files and the buffer guaranteed to agree.
-Checkpoint binding rewinds the buffer to the trainer's step; it does not
-verify that the model checkpoint is the one the buffer was bound to, and
-it requires a durable buffer (an in-memory `ReservoirReplay` refuses to
-resume at a non-zero step rather than continue from an empty buffer). A
+Checkpoint binding rewinds the buffer to the trainer's step. When the
+trainer's checkpoint directory exists at save time, the buffer checkpoint
+records its digest (every regular file's relative path, size and bytes)
+and a resume is refused if the directory the model restarts from digests
+differently or cannot be found (a relocated checkpoint is named through
+`ReservoirReplay.model_checkpoint`); this checks that the bytes on disk
+are the ones the buffer was bound to, not that the trainer loaded them,
+and it costs one read of the checkpoint, optimizer state included, on the
+owner rank at every save and resume, which has not been measured on a
+large model. Under more than one process every rank is waited for before
+the owner reads the directory; that the HF Trainer writes nothing into
+`checkpoint-N` after `on_save` is read from its code, not tested on a
+real multi-GPU save and resume. A buffer checkpoint taken while the
+trainer's directory did not yet exist records no digest (a warning says
+so) and resumes unchecked, as does one whose binding a crash inside the
+checkpoint call removed. Binding requires a durable buffer (an in-memory
+`ReservoirReplay` refuses to resume at a non-zero step rather than
+continue from an empty buffer). A
 trainer checkpoint written in the window before the buffer's `on_save`
 ran has no buffer checkpoint and resume fails closed. With
 `steps_per_generation > 1` a checkpoint taken inside a generation window
@@ -154,8 +168,11 @@ replay is not promised to be bit-identical to a plain `GRPOTrainer` step.
 Priorities are fixed at insertion unless the priority strategy implements
 `rescore`, which the adapter calls at placement time with the weighted
 advantage, importance weight, log-ratio and age; the training loss itself
-is not available to it. No rescoring strategy is shipped, and no claim is
-made that any rescoring improves training.
+is not available to it. `DriftAwarePriority` is shipped as a reference
+implementation of that hook (a base priority divided by one plus the
+scaled absolute log-ratio), so the path from replay to `update` record
+can be seen end to end; it is an example, and no claim is made that it or
+any other rescoring improves training.
 
 ### 15. Relation to Verifiable Fine-Tuning
 
