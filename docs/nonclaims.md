@@ -198,9 +198,12 @@ That is an observation about a tiny model and twelve steps. On a GPU, and
 with any engine that is not batch-invariant, the generated data may
 differ between runs; ``checker.diff`` then locates the first insert where
 it did and shows that Reservoir's draws were identical before it, but
-Reservoir does not make the engine deterministic. vLLM's batch-invariant
-mode cannot share a process with the trainer (its kernels have no
-backward), so the vLLM tier uses TRL's server mode on a second GPU.
+Reservoir does not make the engine deterministic. There is no vLLM
+result: batch-invariant mode cannot share a process with the trainer (its
+kernels have no backward), and TRL's server mode on a second GPU hangs in
+NCCL weight-sync setup in the Modal container (details and probe results
+in `docs/reproducible-training.md`). The batch-invariant claim is
+therefore untested here.
 
 ### 19. Attestation Overhead
 

@@ -87,11 +87,27 @@ is one observation for a tiny model and twelve steps, not a guarantee that
 HF generation on a GPU is reproducible.
 
 The vLLM tier (`benchmarks/modal/reproducible_grpo_vllm.py`, batch-invariant
-mode on a 0.5B model) has not produced a result yet. Its first attempt used
-TRL's colocate mode and failed at the first backward pass: vLLM's
-batch-invariant mode replaces PyTorch's CUDA matmul kernels process-wide
-with inference-only ones (`aten::linear_backward` is then missing). The
-script now runs vLLM in TRL's server mode on a second GPU.
+mode on a 0.5B model) has no result and is parked as blocked (2026-10-06).
+Two findings from the attempts, both reproducible from the scripts:
+
+- TRL's colocate mode cannot be used with `VLLM_BATCH_INVARIANT=1`: vLLM
+  replaces PyTorch's CUDA matmul kernels process-wide with inference-only
+  ones, and the trainer's first backward pass fails
+  (`aten::linear_backward` has no CUDA implementation under the override).
+- TRL's server mode on two A10Gs in one Modal container reaches NCCL
+  weight-sync setup and hangs there. `benchmarks/modal/nccl_probe.py` with
+  per-process NCCL debug files (`benchmarks/modal/results/nccl_probe_*.json`)
+  shows the trainer completing `ncclCommInitRank` over shared memory while
+  the vLLM worker receives a truncated bootstrap message during transport
+  setup (`received 1024 bytes instead of 512`), fails, and retries against a
+  bootstrap port the trainer has already closed. A bare two-process NCCL
+  all-reduce in the same layout, same image and same GPU pair completes in
+  five seconds, and transport, host-id, interface and cuMem settings change
+  nothing, so the fault sits in the vLLM-worker-plus-TRL-client pairing,
+  not the hardware. Not yet checked: whether both processes load the same
+  NCCL build (`ncclGetVersion` on each side), and whether TRL's HTTP retry
+  can issue `/init_weight_transfer_engine` twice and so enrol a duplicate
+  rank. Either would be the next five-minute probe if this tier is resumed.
 
 ## Reading a diff
 

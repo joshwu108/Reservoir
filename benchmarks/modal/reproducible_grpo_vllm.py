@@ -43,7 +43,16 @@ What is different from the HF tier
   with ``transformers==5.17.0`` (confirmed by the colocate attempt, which
   built the image and reached training).
 
-Results land under
+Status (2026-10-06): BLOCKED. Server mode reaches the NCCL weight-sync
+handshake and hangs: the trainer completes ``ncclCommInitRank`` while the
+vLLM worker gets a truncated bootstrap message during transport setup and
+retries against a closed port. ``benchmarks/modal/nccl_probe.py`` isolates
+it and shows a bare NCCL all-reduce in the same layout working; see
+``docs/reproducible-training.md`` for the evidence and the next probes.
+The run watchdog below makes a repeat attempt fail in fifteen minutes
+rather than hang for the function timeout.
+
+Results would land under
 ``benchmarks/modal/results/repro_vllm_a10g-x2_<steps>steps_seed<seed>/``.
 
 Usage
