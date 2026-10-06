@@ -45,7 +45,7 @@ See ``rollout_buffer.py`` ("Call structure"), ``decayed_tree.py`` and
 this layout, one file per module.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 # Importing the package needs numpy only. The rollout replay surface is
 # eager; the classic transition buffers, their wrappers and the
