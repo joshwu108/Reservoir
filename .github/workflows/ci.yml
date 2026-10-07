@@ -24,7 +24,7 @@ jobs:
         # The atari extra (ROM download) is not needed by any test; CPU torch keeps the install small.
         env:
           UV_TORCH_BACKEND: cpu
-        run: uv sync --extra classic --extra trl --extra prefcheck --extra anchor
+        run: uv sync --extra classic --extra trl
       - name: Import isolation of the checker
         run: make check-imports
       - name: Tests

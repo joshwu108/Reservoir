@@ -2,6 +2,17 @@
 
 **Exact, reproducible, auditable replay for LLM reinforcement learning.**
 
+```diff
+-from trl import GRPOTrainer
++from reservoir.integrations.trl import ReservoirGRPOTrainer, ReservoirReplay
+-trainer = GRPOTrainer(model=model, args=args, train_dataset=dataset, reward_funcs=reward_funcs)
++trainer = ReservoirGRPOTrainer(model=model, args=args, train_dataset=dataset, reward_funcs=reward_funcs, replay_buffer=ReservoirReplay())
+```
+
+Install with `pip install "reservoir-replay[trl]"`. The trainer writes an
+attestation log and manifest to `args.output_dir/reservoir/`; after training,
+run the `reservoir-verify` command printed in its summary.
+
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 
@@ -29,7 +40,8 @@ It is built around three properties:
    lose its rollout history.
 
 ```bash
-pip install reservoir-replay          # import name: reservoir
+pip install "reservoir-replay[trl]"
+reservoir doctor
 ```
 
 The distribution is `reservoir-replay` (the name `reservoir` on PyPI belongs
@@ -40,6 +52,30 @@ dependencies; numpy and torch are pulled in by the extras that use them.
 ---
 
 ## Quick start — replay for GRPO
+
+The two changed lines above are enough for a stock TRL script. For a
+schedule-based starting point, choose a preset and inspect its choices:
+
+```python
+replay, choices = ReservoirReplay.for_grpo(
+    num_generations=args.num_generations,
+    max_steps=args.max_steps,
+    per_device_train_batch_size=args.per_device_train_batch_size,
+)
+print(choices)
+trainer = ReservoirGRPOTrainer(
+    model=model, args=args, train_dataset=dataset, reward_funcs=reward_funcs,
+    replay_buffer=replay,
+)
+trainer.train()
+```
+
+`profile="conservative"` applies a strict drift gate, `"async"` allows a
+wider drift window, and `"off"` disables the gate. The preset returns the
+replay object and a dictionary explaining capacity, half-life, age and gate
+choices. The raw constructor remains available for exact control.
+
+For a custom generation loop, use the underlying buffer directly:
 
 ```python
 from reservoir import RolloutBuffer, Rollout
@@ -385,72 +421,6 @@ buf.update_priorities(batch.indices, td_errors)
 
 ---
 
-## Fine-tuning tools
-
-### Preference noise detection
-
-Finds likely mislabeled pairs in RLHF preference data from their loss
-trajectories during reward-model training.
-
-```bash
-pip install "reservoir-replay[prefcheck]"
-```
-
-```python
-from reservoir import PreferenceNoiseDetector
-
-detector = PreferenceNoiseDetector(
-    model=model,
-    tokenizer=tokenizer,
-    train_dataset=dataset,   # "chosen" / "rejected" fields
-)
-detector.train()
-
-report = detector.get_report()
-for r in report.flipped[:10]:
-    print(r.example_idx, r.confidence)
-report.to_html("noise_report.html")
-```
-
-| Label | Meaning |
-|-------|---------|
-| `FLIPPED` | Label is probably wrong — re-annotate or remove |
-| `AMBIGUOUS` | Genuine annotator disagreement — get a second opinion |
-| `CLEAN` | Fine |
-
-### Forgetting monitor
-
-Measures forgetting during fine-tuning on a held set of anchor examples, and
-can replay the most-forgotten anchors back into training.
-
-```bash
-pip install "reservoir-replay[anchor]"
-```
-
-```python
-from reservoir import AnchorSet, ForgettingMonitor
-
-anchors = AnchorSet.from_dataset(prior_knowledge_dataset, n=500, tags="legal-QA")
-
-monitor = ForgettingMonitor(
-    anchor_sets=[anchors],
-    metrics=["loss", "kl_to_base"],
-    eval_every_n_steps=500,
-    alert_threshold=0.5,
-    auto_replay=True,
-    replay_ratio=0.1,
-)
-
-trainer = Trainer(model=model, args=args, train_dataset=data, callbacks=[monitor])
-trainer.train()
-
-report = monitor.get_report()
-report.transitions   # per-example correct→wrong and wrong→correct counts
-report.to_html("forgetting_report.html")
-```
-
----
-
 ## Guarantees
 
 | Claim | Evidence |
@@ -461,6 +431,7 @@ report.to_html("forgetting_report.html")
 | A witnessed batch can be rebuilt as content from the log and manifest alone | `reservoir-replay-offline` emits every witnessed batch as JSON lines (rows, draws, exact importance weights, tokens, rewards, sources) importing nothing from the library; on the committed CPU and T4 reproducibility runs, runs a and b replay byte-identically and run c differs; fresh rows are listed by index only (`docs/nonclaims.md` §23) |
 | Two runs with the same inputs give one transcript | CPU demo: runs a and b byte-identical (116 records, one head digest), run c differs at record 1, classified `data`; the same triplet on a T4 with HF generation, with and without deterministic kernels, is `IDENTICAL` in both variants (`benchmarks/modal/results/repro_hf_t4_*`) |
 | The adapters survive a real trainer's call path | TRL 1.13.0 on two A10G GPUs (the driver reports them as NVIDIA A10) under `accelerate launch` (40 steps, 14 dead groups replaced with 56 rows, 1019 records, manifest opens all 584 examples) and verl 0.9.1 on one T4 (12 steps, 14 dead groups replaced with 56 rows, 445 records, manifest opens all 328 examples, buffer snapshots at every trainer checkpoint); both records are re-verified by the test suite (`tests/test_trl_results.py`, `tests/test_verl_results.py`); no training-quality claim (`docs/nonclaims.md` §13) |
+| The staleness sweep harness runs end to end and its logs verify | CPU smoke only (2026-10-06, tiny Qwen2 test model, HF generation, coin-flip reward): all 7 arms (plain GRPO; Reservoir at `max_policy_age` 8, 32, 128 with the drift gate off and on) train for 3 steps and 6 of 6 Reservoir logs verify with their manifests; a 12-step run replaces 8 and 4 rows (seeds 42, 43) at an exact ESS fraction of 0.98 to 0.99, and with the gate at 1e-9 declines 7 of 8 draws with the log still verifying. The GPU sweep (Qwen2.5-0.5B-Instruct, GSM8K, 300 steps × 7 arms × 3 seeds on one A10G with colocated vLLM) has not been run; no training-quality claim (`docs/staleness.md`) |
 | Attestation is cheap relative to generation | about 3× the no-attestation insert cost in memory, 6× with a manifest file; the checker verifies 10k records in 0.3 s |
 | The lifecycle protocol is safe within a finite scope | TLA+ model checked by TLC in CI (the state count is not recorded in the repository). A no-parent-fsync variant (`spec/NoParentFsync.tla`) is written to show why the directory fsync exists; `bash spec/check.sh --with-counterexample` runs it in CI and fails unless TLC reports the violation; the CI workflow passed on `release/0.6.0` at af4f4c6 (2026-10-06); the last pre-release run on `main` failed its macOS test job and is re-run on the next push. It has not been run on a developer machine |
 
@@ -481,17 +452,14 @@ What Reservoir does not claim is listed in
 ## Install
 
 ```bash
-pip install reservoir-replay                 # rollout buffer, attestation, checker (no dependencies)
-pip install "reservoir-replay[classic]"      # transition buffers, C extension, wrappers (numpy, torch)
-pip install "reservoir-replay[trl]"          # TRL integration
-pip install "reservoir-replay[verl]"         # verl integration (Python < 3.13)
-pip install "reservoir-replay[prefcheck]"    # preference noise detector
-pip install "reservoir-replay[anchor]"       # forgetting monitor
-pip install "reservoir-replay[atari]"        # Atari benchmark suite
-
-reservoir-verify run-01/attest.jsonl --manifest run-01/manifest.jsonl   # also: reservoir-transcript, reservoir-diff, reservoir-replay-offline
-python -c "import reservoir; print(reservoir.backend)"                 # "c" or "python" (needs [classic])
+pip install "reservoir-replay[trl]"
+reservoir doctor
 ```
+
+For verl use `pip install "reservoir-replay[verl]"` (Python < 3.13). The
+dependency-free rollout buffer and checker use `pip install reservoir-replay`.
+For classic transition replay use `[classic]`; the Atari benchmark uses
+`[atari]`.
 
 The checker ships in the wheel as `reservoir_checker` with the four
 console scripts above; `python -m checker.verify` and friends keep working

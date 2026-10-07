@@ -1,5 +1,5 @@
 """
-reservoir.integrations._trl_telemetry — Replay health per generation step, and the drift gate.
+reservoir.integrations._trl_telemetry — Replay health per generation step.
 
 What an engineer watching a replayed GRPO run wants to see, every step:
 
@@ -12,31 +12,28 @@ What an engineer watching a replayed GRPO run wants to see, every step:
 - how far the stored behavior logprobs have drifted from the current
   policy on the replayed tokens (``reservoir/log_ratio_mean_abs`` and
   ``_max_abs``, per-sequence sums of ``current - behavior``). This needs
-  one no-grad forward over the replayed rows only.
+  one no-grad forward over the replayed rows only;
+- what the staleness policy did (``reservoir/declined_age``,
+  ``declined_ess``, ``declined_drift``, ``rescaled_rows`` and the smallest
+  ``mass_scale`` applied), when one is on.
 
 The numbers go to TRL's metrics (so wandb and TensorBoard show them) and
 into a ``telemetry`` record of the attestation log, where the checker
-recomputes the ESS and the staleness and carries the log-ratios as
-reported values.
-
-The drift gate is off by default. With ``max_log_ratio`` set, a replayed
-row whose absolute sequence log-ratio exceeds it (or is not finite) is
-declined: the dead row it would have filled stays dead, the buffer entry is
-evicted with reason ``"drift"`` unless another draw of the same slot was
-kept, and the batch witness lists the declined draw. Nothing about a
-decline is silent, and more than ``max_declines_per_step`` declines in one
-step raise instead of continuing, because a gate that quietly drops the
-only informative rows would hide a collapsed reward signal.
+recomputes the ESS and the staleness, recomputes the log-ratio statistics
+from the per-draw log-ratios the record carries as hex floats, and replays
+every policy decision (``_trl_staleness``).
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Any, Optional
 
 import torch
 
+from reservoir.integrations._trl_staleness import DECLINE_REASONS, RowDecision, StalenessPolicy, decide
 from reservoir.rollout_buffer import RolloutBatch
 
 METRIC_PREFIX = "reservoir/"
@@ -56,6 +53,9 @@ class StepTelemetry:
     staleness_max: Optional[int] = None
     log_ratio_mean_abs: Optional[float] = None
     log_ratio_max_abs: Optional[float] = None
+    log_ratios: tuple[float, ...] = ()                 # one per draw of the sampled batch
+    decisions: tuple[RowDecision, ...] = ()            # one per draw when a policy is active
+    policy: Optional[StalenessPolicy] = None           # the active policy, None when off
 
     def counts(self) -> dict:
         return {
@@ -65,13 +65,16 @@ class StepTelemetry:
         }
 
     def reported(self) -> dict:
-        """The float measurements the checker can only carry."""
+        """The log-ratio statistics, which the checker recomputes from ``log_ratios`` when the record carries them."""
         out = {}
         if self.log_ratio_mean_abs is not None:
             out["log_ratio_mean_abs"] = self.log_ratio_mean_abs
         if self.log_ratio_max_abs is not None:
             out["log_ratio_max_abs"] = self.log_ratio_max_abs
         return out
+
+    def declined_by_reason(self) -> dict[str, int]:
+        return {reason: sum(1 for d in self.decisions if d.reason == reason) for reason in DECLINE_REASONS}
 
     def metrics(self) -> dict[str, float]:
         """Flat ``reservoir/*`` metrics for the trainer's logger."""
@@ -88,6 +91,12 @@ class StepTelemetry:
                 out[name] = float(value)
         if self.ess is not None and self.replaced_rows:
             out["ess_fraction"] = self.ess / self.replaced_rows
+        if self.decisions:
+            for reason, count in self.declined_by_reason().items():
+                out[f"declined_{reason}"] = float(count)
+            scales = [d.scale for d in self.decisions if d.kept]
+            out["rescaled_rows"] = float(sum(1 for s in scales if s != 1))
+            out["mass_scale_min"] = float(min(scales)) if scales else 1.0
         return {METRIC_PREFIX + k: v for k, v in out.items()}
 
 
@@ -113,28 +122,24 @@ def sequence_log_ratios(output: dict, rows: list[int], trainer: Any) -> list[flo
 
 
 def choose_declines(ratios: list[float], max_log_ratio: Optional[float], max_declines: Optional[int]) -> list[int]:
-    """Draw positions whose |log-ratio| exceeds the gate; raises if too many would be declined."""
-    if max_log_ratio is None:
-        return []
-    # A non-finite ratio (NaN or inf from a degenerate forward) is the worst
-    # case and is declined; it must never slip through a comparison with NaN.
-    declined = [k for k, r in enumerate(ratios) if not math.isfinite(r) or abs(r) > max_log_ratio]
-    if max_declines is not None and len(declined) > max_declines:
-        raise RuntimeError(
-            f"the drift gate would decline {len(declined)} of {len(ratios)} replayed rows this step, above "
-            f"max_declines_per_step={max_declines}; the buffer may have gone stale or the policy moved far"
-        )
-    return declined
+    """Draw positions the legacy gate alone would decline; the 0.6.0 rule, now stage 4 of ``StalenessPolicy``."""
+    policy = StalenessPolicy(max_log_ratio=max_log_ratio, max_declines_per_step=max_declines)
+    n = len(ratios)
+    decisions = decide(policy, ratios=ratios, is_weights=[Fraction(1)] * n, ages=[0] * n,
+                       rows=list(range(n)), groups=[0] * n)
+    return [d.draw for d in decisions if not d.kept]
 
 
 def summarize(batch: Optional[RolloutBatch], current_version: int, ratios: list[float], kept: list[int],
-              batch_rows: int, dead_groups: int, near_dead_groups: int, declined: int) -> StepTelemetry:
+              batch_rows: int, dead_groups: int, near_dead_groups: int, declined: int,
+              decisions: tuple[RowDecision, ...] = (), policy: Optional[StalenessPolicy] = None) -> StepTelemetry:
     """Fold a step's measurements into a ``StepTelemetry``.
 
     The effective sample size, the staleness and the log-ratio statistics
     describe the whole sampled batch, declined draws included: that is
     what the sampler produced and what the checker recomputes from the
     sample record. ``replaced_rows`` counts the draws that were placed.
+    ``decisions`` are the policy's, one per draw, when a policy is active.
     """
     if batch is None:
         return StepTelemetry(batch_rows, 0, declined, dead_groups, near_dead_groups)
@@ -142,7 +147,7 @@ def summarize(batch: Optional[RolloutBatch], current_version: int, ratios: list[
     ess = sum(weights) ** 2 / sum(w * w for w in weights)
     ages = [current_version - v for v in batch.model_versions]
     # Statistics over the finite ratios only; a non-finite one is declined by
-    # the gate (when on) and would make the record unrepresentable.
+    # the policy (when on) and would make the record unrepresentable.
     magnitudes = [abs(r) for r in ratios if math.isfinite(r)]
     return StepTelemetry(
         batch_rows=batch_rows, replaced_rows=len(kept), declined_rows=declined,
@@ -150,6 +155,7 @@ def summarize(batch: Optional[RolloutBatch], current_version: int, ratios: list[
         ess=ess, staleness_mean=sum(ages) / len(ages), staleness_max=max(ages),
         log_ratio_mean_abs=(sum(magnitudes) / len(magnitudes)) if magnitudes else None,
         log_ratio_max_abs=max(magnitudes) if magnitudes else None,
+        log_ratios=tuple(ratios), decisions=tuple(decisions), policy=policy if decisions else None,
     )
 
 

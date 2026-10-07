@@ -124,7 +124,8 @@ import numpy as np
 
 from reservoir.durable_rollout import DurableRolloutBuffer
 from reservoir.integrations._trl_lifecycle import checkpoint_tag, model_binding, resume_from_checkpoint
-from reservoir.integrations._trl_telemetry import StepTelemetry, choose_declines, summarize
+from reservoir.integrations._trl_staleness import RowDecision, StalenessPolicy, decide, evictions_for, place, resolve_policy
+from reservoir.integrations._trl_telemetry import StepTelemetry, summarize
 from reservoir.integrations._verl_compat import require_verl
 from reservoir.integrations._verl_rows import (
     global_token_num,
@@ -159,7 +160,7 @@ NON_HOMOGENEOUS_LOSS_MODES: Final[tuple[str, ...]] = ("clip_cov", "kl_cov")
 
 STAT_NAMES: Final[tuple[str, ...]] = (
     "hook_calls", "ingested_rows", "ingested_groups", "dead_groups", "skipped_rows", "clamped_logprobs",
-    "replaced_rows", "near_dead_groups", "declined_rows", "telemetry_forwards", "rescored_rows",
+    "replaced_rows", "near_dead_groups", "declined_rows", "telemetry_forwards", "rescored_rows", "rescaled_rows",
     "dropped_rollout_logprobs",
 )
 
@@ -223,7 +224,9 @@ class ReservoirReplay:
     (provenance tag on every insert), ``manifest`` (requires ``attest``),
     ``telemetry`` (replay health every step; the log-ratios cost one
     ``_compute_old_log_prob`` call over the replayed rows),
-    ``max_log_ratio`` and ``max_declines_per_step`` (the drift gate, off
+    ``staleness_policy`` (a ``StalenessPolicy`` or preset name; its
+    decisions go to the telemetry record), ``max_log_ratio`` and
+    ``max_declines_per_step`` (the legacy drift gate, off
     by default).
 
     Attributes
@@ -255,6 +258,7 @@ class ReservoirReplay:
         source: Optional[str] = None,
         manifest: Union[str, Path, None] = None,
         telemetry: bool = True,
+        staleness_policy: Union[StalenessPolicy, str, None] = None,
         max_log_ratio: Optional[float] = None,
         max_declines_per_step: Optional[int] = None,
         **rollout_buffer_kwargs: Any,
@@ -272,8 +276,10 @@ class ReservoirReplay:
         self.source = source
         self.beta = float(beta)
         self.telemetry = bool(telemetry)
-        self.max_log_ratio = _validated_gate(max_log_ratio)
-        self.max_declines_per_step = max_declines_per_step
+        self.policy: StalenessPolicy = resolve_policy(staleness_policy, _validated_gate(max_log_ratio),
+                                                      max_declines_per_step, self.telemetry)
+        self.max_log_ratio = self.policy.max_log_ratio
+        self.max_declines_per_step = self.policy.max_declines_per_step
         self.last_telemetry: Optional[StepTelemetry] = None
         self.last_replay: Optional[RolloutBatch] = None
         self.stats: dict[str, int] = {name: 0 for name in STAT_NAMES}
@@ -366,32 +372,38 @@ class ReservoirReplay:
         """Sample one rollout per dead row, write them in, gate, verify, witness, measure."""
         dead_rows = list(conversion.dead_rows)
         batch = self.buffer.sample(len(dead_rows), current_version=step)
-        weighted = [r.reward * float(w) for r, w in zip(batch.rollouts, batch.is_weights)]
+        rewards = [r.reward for r in batch.rollouts]
+        unit = place(rewards, batch.is_weights, ()).weighted           # importance-weighted, before the policy
         pad = _pad_token_id(trainer)
-        provisional = write_rows(tensors, dead_rows, batch.rollouts, weighted, pad)
+        provisional = write_rows(tensors, dead_rows, batch.rollouts, unit, pad)
         ratios = self._log_ratios(data, provisional, dead_rows, trainer)
-        declined = choose_declines(ratios, self.max_log_ratio, self.max_declines_per_step)
-        declined_set = set(declined)
-        kept = [k for k in range(len(dead_rows)) if k not in declined_set]
-        if declined:
-            # With every draw declined the dead rows stay dead; the witness digest is over what is returned.
+        # verl rows of one prompt share a uid and may be reordered (balance_batch), so the policy's groups are
+        # declared per decision (uids in order of first appearance among the dead rows) and the record's
+        # group_size is None.
+        labels = {uid: g for g, uid in enumerate(dict.fromkeys(uids[r] for r in dead_rows))}
+        decisions = self._decide(batch, ratios, dead_rows, [labels[uids[r]] for r in dead_rows])
+        kept, declined, weighted, rescaled = place(rewards, batch.is_weights, decisions)
+        if declined or rescaled:
+            # Declined draws leave their dead rows dead; rescaled draws carry the capped advantage; the witness
+            # digest is over what is returned.
             new = (write_rows(tensors, [dead_rows[k] for k in kept], [batch.rollouts[k] for k in kept],
-                              [weighted[k] for k in kept], pad) if kept else dict(tensors))
+                              weighted, pad) if kept else dict(tensors))
         else:
             new = provisional
         rows = [dead_rows[k] for k in kept]
-        verify_written_rows(new, rows, [batch.rollouts[k] for k in kept], [weighted[k] for k in kept])
+        verify_written_rows(new, rows, [batch.rollouts[k] for k in kept], weighted)
         self.buffer.witness_batch(batch, step=step, batch_rows=len(uids), rows=rows,
                                   tensor_digest=tensor_digest(new), declined=declined)
         # Telemetry describes the sampled batch and is recomputed by the checker from the live
         # slots, so it is written before any declined entry is evicted.
-        self._telemetry(step, batch, ratios, kept, len(uids), conversion, len(declined))
-        for slot in sorted({batch.indices[k] for k in declined} - {batch.indices[k] for k in kept}):
-            self.buffer.evict(slot, "drift")
+        self._telemetry(step, batch, ratios, kept, len(uids), conversion, len(declined), decisions)
+        for slot, reason in evictions_for(batch.indices, decisions):
+            self.buffer.evict(slot, reason)
         self._rescore(batch, kept, weighted, ratios, step)
         self.last_replay = batch
         self.stats["replaced_rows"] += len(kept)
         self.stats["declined_rows"] += len(declined)
+        self.stats["rescaled_rows"] += rescaled
         if ROLLOUT_LOGPROBS_KEY in data.batch.keys():
             self.stats["dropped_rollout_logprobs"] += 1
         new_uids = list(uids)
@@ -403,9 +415,16 @@ class ReservoirReplay:
             tensors=new, non_tensors={"uid": np.array(new_uids, dtype=object)}, meta_info=meta_info,
         )
 
+    def _decide(self, batch: RolloutBatch, ratios: list[float], rows: list[int], groups: list[int]) -> tuple[RowDecision, ...]:
+        """The staleness policy's decision for every draw; ``()`` when the policy is off."""
+        if not self.policy.active:
+            return ()
+        ages = [self.buffer.current_version - v for v in batch.model_versions]
+        return decide(self.policy, ratios=ratios, is_weights=batch.is_weights, ages=ages, rows=rows, groups=groups)
+
     def _log_ratios(self, data: Any, tensors: dict, rows: list[int], trainer: Any) -> list[float]:
         """Sequence log-ratios ``sum(current - behavior)`` of the replayed rows, via ``_compute_old_log_prob``."""
-        if not rows or (not self.telemetry and self.max_log_ratio is None):
+        if not rows or (not self.telemetry and not self.policy.active):
             return []
         import torch
 
@@ -442,14 +461,14 @@ class ReservoirReplay:
         indices: list[int] = []
         scores: list[float] = []
         seen: set[int] = set()
-        for k in kept:
+        for position, k in enumerate(kept):
             slot = batch.indices[k]
             if slot in seen:
                 continue
             seen.add(slot)
             ratio = ratios[k] if ratios else None
             signal = ReplaySignal(
-                advantage=weighted[k], is_weight=float(batch.is_weights[k]),
+                advantage=weighted[position], is_weight=float(batch.is_weights[k]),
                 log_ratio=ratio if ratio is not None and math.isfinite(ratio) else None,
                 age=self.buffer.current_version - batch.model_versions[k], step=step,
             )
@@ -462,14 +481,19 @@ class ReservoirReplay:
             self.stats["rescored_rows"] += len(indices)
 
     def _telemetry(self, step: int, batch: Optional[RolloutBatch], ratios: list[float], kept: list[int],
-                   batch_rows: int, conversion, declined: int) -> None:
+                   batch_rows: int, conversion, declined: int, decisions: tuple[RowDecision, ...] = ()) -> None:
         if not self.telemetry:
             self.last_telemetry = None
             return
         point = summarize(batch, self.buffer.current_version, ratios, kept, batch_rows,
-                          conversion.dead_groups, conversion.near_dead_groups, declined)
+                          conversion.dead_groups, conversion.near_dead_groups, declined, decisions, self.policy)
         self.last_telemetry = point
-        self.buffer.record_telemetry(step, point.counts(), batch, point.reported())
+        self.buffer.record_telemetry(
+            step, point.counts(), batch, point.reported(),
+            log_ratios=list(ratios) if batch is not None else None,
+            policy=self.policy.to_record(None) if decisions else None,
+            decisions=[d.to_record() for d in decisions] if decisions else None,
+        )
 
     def close(self) -> None:
         """Close the attestation file, if one was opened."""

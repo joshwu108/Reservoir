@@ -205,7 +205,10 @@ def apply_command(buf, command: dict) -> None:
                           args["tensor_digest"], args.get("declined", ()))
     elif op == "record_telemetry":
         sample = _sampled_batch(buf, args) if args["with_sample"] else None
-        buf.record_telemetry(args["step"], args["counts"], sample, args.get("reported") or {})
+        ratios = args.get("log_ratios")
+        buf.record_telemetry(args["step"], args["counts"], sample, args.get("reported") or {},
+                             log_ratios=[float.fromhex(r) for r in ratios] if ratios is not None else None,
+                             policy=args.get("policy"), decisions=args.get("decisions"))
     else:
         raise ValueError(f"unknown command {op!r} in the write-ahead log")
 
