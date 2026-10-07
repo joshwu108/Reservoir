@@ -89,11 +89,20 @@ def _check_reported_statistics(ratios: tuple[float, ...], reported: dict, where:
 
 
 def _check_staleness(record: dict, where: str, draws: list, ages: list[int], counts: dict, witness: Optional[dict],
-                     reported: dict) -> tuple[tuple[float, ...], Optional[Policy], tuple[Decision, ...]]:
-    """Verify the optional ``log_ratios``, ``policy`` and ``decisions`` of a replayed step."""
+                     reported: dict, content: ContentState) -> tuple[tuple[float, ...], Optional[Policy], tuple[Decision, ...]]:
+    """Verify the optional ``log_ratios``, ``policy`` and ``decisions`` of a replayed step.
+
+    The fields are optional per log, not per record: once one replayed
+    step has carried them, every later replayed step must, with the same
+    policy, so a tamperer cannot drop them from one record to escape the
+    checks. A log may still begin without them (the 0.6.0 shape).
+    """
     present = [name for name in STALENESS_FIELDS if name in record]
     if not present:
+        if content.staleness_log_ratios_seen:
+            raise CheckerError(f"{where}: an earlier replayed step carried log_ratios; a later one cannot leave them out")
         return (), None, ()
+    content.staleness_log_ratios_seen = True
     if "log_ratios" not in present:
         raise CheckerError(f"{where}: policy and decisions require log_ratios")
     ratios = _log_ratios(record, len(draws), where)
@@ -101,10 +110,17 @@ def _check_staleness(record: dict, where: str, draws: list, ages: list[int], cou
     if ("policy" in present) != ("decisions" in present):
         raise CheckerError(f"{where}: policy and decisions are recorded together or not at all")
     if "policy" not in present:
+        if content.staleness_policy is not None:
+            raise CheckerError(f"{where}: an earlier replayed step carried a staleness policy; a later one cannot leave it out")
         if counts["declined_rows"]:
             raise CheckerError(f"{where}: {counts['declined_rows']} rows declined but no policy is recorded")
         return ratios, None, ()
     policy = parse_policy(record["policy"], where)
+    if content.staleness_policy is None:
+        content.staleness_policy = dict(record["policy"])
+    elif content.staleness_policy != record["policy"]:
+        raise CheckerError(f"{where}: the staleness policy differs from the one recorded earlier in this log; "
+                           "a policy is fixed for a run")
     decisions = parse_decisions(record["decisions"], len(draws), where)
     if any(d.row >= counts["batch_rows"] for d in decisions):
         raise CheckerError(f"{where}: a decision names a row outside the batch of {counts['batch_rows']} rows")
@@ -181,7 +197,8 @@ def verify_telemetry(record: dict, idx: int, content: ContentState, versions: di
     if _int_field(record, "staleness_max", where) != max(ages) or _int_field(record, "staleness_sum", where) != sum(ages):
         raise CheckerError(f"{where}: staleness max/sum {record['staleness_max']}/{record['staleness_sum']} but "
                            f"the replayed rows give {max(ages)}/{sum(ages)}")
-    ratios, policy, decisions = _check_staleness(record, where, draws, ages, counts, _witness_rows(content, op), reported)
+    ratios, policy, decisions = _check_staleness(record, where, draws, ages, counts, _witness_rows(content, op), reported,
+                                                 content)
     return TelemetryPoint(idx, step, counts, op, ess, max(ages), Fraction(sum(ages), len(ages)), reported,
                           ratios, policy, decisions)
 

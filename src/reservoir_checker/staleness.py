@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import decimal
 import math
+import re
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Optional, Sequence
@@ -29,6 +30,10 @@ from reservoir_checker.decay_replay import CheckerError
 
 EXP_DIGITS = 30
 LOG_RATIO_CLAMP = 700.0
+_EXP_CONTEXT = decimal.Context(prec=EXP_DIGITS, Emax=1000, Emin=-1000, rounding=decimal.ROUND_HALF_EVEN,
+                               traps=[decimal.InvalidOperation, decimal.Overflow, decimal.DivisionByZero])
+MAX_INTEGER_DIGITS = 4000
+_CANONICAL_INTEGER = re.compile(r"0|[1-9][0-9]{0,%d}" % (MAX_INTEGER_DIGITS - 1))
 DECLINE_REASONS = ("drift", "age", "ess")
 POLICY_FIELDS = ("max_age", "ess_floor", "mass_cap", "max_log_ratio", "max_declines_per_step", "group_size")
 DECISION_FIELDS = ("draw", "row", "group", "reason", "scale_num", "scale_den")
@@ -56,12 +61,18 @@ class Decision:
 
 
 def exact_exp(r: float) -> Fraction:
-    """Same arithmetic as the adapter: clamp, correctly rounded decimal ``exp``, exact fraction."""
+    """Same arithmetic as the adapter: clamp, correctly rounded decimal ``exp`` in a fixed context, exact fraction."""
+    if not math.isfinite(r):
+        raise CheckerError(f"exact_exp needs a finite log-ratio, got {r!r}")
     r = min(max(float(r), -LOG_RATIO_CLAMP), LOG_RATIO_CLAMP)
-    with decimal.localcontext() as ctx:
-        ctx.prec = EXP_DIGITS
-        ctx.Emax, ctx.Emin = 1000, -1000
-        return Fraction(decimal.Decimal(r).exp())
+    return Fraction(_EXP_CONTEXT.exp(decimal.Decimal(r)))
+
+
+def canonical_int(value: object, where: str) -> int:
+    """A decimal integer string with no sign, no leading zero and at most ``MAX_INTEGER_DIGITS`` digits."""
+    if not isinstance(value, str) or _CANONICAL_INTEGER.fullmatch(value) is None:
+        raise CheckerError(f"{where} must be a canonical decimal integer string of at most {MAX_INTEGER_DIGITS} digits")
+    return int(value)
 
 
 def hex_float(value: object, where: str, allow_non_finite: bool = False) -> float:
@@ -134,11 +145,9 @@ def parse_decisions(value: object, n_draws: int, where: str) -> list[Decision]:
         reason = entry["reason"]
         if reason is not None and reason not in DECLINE_REASONS:
             raise CheckerError(f"{w}: reason must be null or one of {DECLINE_REASONS}, got {reason!r}")
-        num, den = entry["scale_num"], entry["scale_den"]
-        if not (isinstance(num, str) and isinstance(den, str) and num.isdigit() and den.isdigit()):
-            raise CheckerError(f"{w}: scale_num and scale_den must be decimal integer strings")
-        scale = Fraction(int(num), int(den)) if int(den) else None
-        if scale is None or scale <= 0 or scale > 1 or (scale.numerator, scale.denominator) != (int(num), int(den)):
+        num, den = canonical_int(entry["scale_num"], f"{w}: scale_num"), canonical_int(entry["scale_den"], f"{w}: scale_den")
+        scale = Fraction(num, den) if den else None
+        if scale is None or scale <= 0 or scale > 1 or (scale.numerator, scale.denominator) != (num, den):
             raise CheckerError(f"{w}: scale must be a reduced fraction in (0, 1], got {num}/{den}")
         if reason is not None and scale != 1:
             raise CheckerError(f"{w}: a declined draw carries scale 1")
@@ -153,24 +162,36 @@ def replay_decisions(
     policy: Policy, *, ratios: Sequence[float], is_weights: Sequence[Fraction], ages: Sequence[int],
     rows: Sequence[int], groups: Sequence[int],
 ) -> list[tuple[int, int, int, Optional[str], Fraction]]:
-    """The adapter's four stages, from the declared inputs; ``(draw, row, group, reason, scale)`` per draw."""
+    """The adapter's four stages, from the declared inputs; ``(draw, row, group, reason, scale)`` per draw.
+
+    Raises ``CheckerError`` as soon as the declines exceed the policy's
+    ``max_declines_per_step`` (the adapter would have raised), so a hostile
+    record cannot make the exact ESS loop run long.
+    """
     n = len(ratios)
+    cap = policy.max_declines_per_step
     reasons: list[Optional[str]] = [None if math.isfinite(r) else "drift" for r in ratios]
     if policy.max_age is not None:
         for k in range(n):
             if reasons[k] is None and ages[k] > policy.max_age:
                 reasons[k] = "age"
+    declined = sum(1 for r in reasons if r is not None)
+    if cap is not None and declined > cap:
+        raise CheckerError(f"{declined} declines exceed the policy's max_declines_per_step={cap}; the adapter would have raised")
     if policy.ess_floor is not None:
         floor = Fraction(policy.ess_floor)
-        while True:
-            kept = [k for k in range(n) if reasons[k] is None]
-            if len(kept) <= 1:
-                break
-            total = sum((is_weights[k] for k in kept), Fraction(0))
-            squares = sum((is_weights[k] * is_weights[k] for k in kept), Fraction(0))
-            if total * total / squares >= floor * len(kept):
-                break
-            reasons[max(kept, key=lambda k: (abs(ratios[k]), -k))] = "ess"
+        kept = [k for k in range(n) if reasons[k] is None]
+        total = sum((is_weights[k] for k in kept), Fraction(0))
+        squares = sum((is_weights[k] * is_weights[k] for k in kept), Fraction(0))
+        while len(kept) > 1 and total * total < floor * len(kept) * squares:
+            victim = max(kept, key=lambda k: (abs(ratios[k]), -k))
+            reasons[victim] = "ess"
+            kept.remove(victim)
+            total -= is_weights[victim]
+            squares -= is_weights[victim] * is_weights[victim]
+            declined += 1
+            if cap is not None and declined > cap:
+                raise CheckerError(f"{declined} declines exceed the policy's max_declines_per_step={cap}; the adapter would have raised")
     scales = [Fraction(1)] * n
     if policy.mass_cap is not None:
         cap_per_row = 1 + Fraction(policy.mass_cap)
@@ -202,10 +223,13 @@ def verify_decisions(
             if d.group != d.row // policy.group_size:
                 raise CheckerError(f"{where}, decision {d.draw}: row {d.row} is in group {d.row // policy.group_size} "
                                    f"of size {policy.group_size}, not {d.group}")
-    expected = replay_decisions(
-        policy, ratios=ratios, is_weights=is_weights, ages=ages,
-        rows=[d.row for d in declared], groups=[d.group for d in declared],
-    )
+    try:
+        expected = replay_decisions(
+            policy, ratios=ratios, is_weights=is_weights, ages=ages,
+            rows=[d.row for d in declared], groups=[d.group for d in declared],
+        )
+    except CheckerError as exc:
+        raise CheckerError(f"{where}: {exc}") from None
     for d, (_, _, _, reason, scale) in zip(declared, expected):
         if d.reason != reason:
             raise CheckerError(f"{where}, decision {d.draw}: declared {d.reason or 'kept'} but the policy gives "
@@ -219,6 +243,8 @@ def verify_decisions(
 
 
 __all__ = [
+    "MAX_INTEGER_DIGITS",
+    "canonical_int",
     "DECISION_FIELDS",
     "DECLINE_REASONS",
     "EXP_DIGITS",

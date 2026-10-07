@@ -46,6 +46,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from fractions import Fraction
 from typing import Optional, Sequence
 
@@ -70,6 +71,7 @@ TELEMETRY_RESERVED = frozenset(TELEMETRY_COUNTERS) | {
 TELEMETRY_POLICY_FIELDS = ("max_age", "ess_floor", "mass_cap", "max_log_ratio", "max_declines_per_step", "group_size")
 TELEMETRY_DECISION_FIELDS = ("draw", "row", "group", "reason", "scale_num", "scale_den")
 TELEMETRY_DECLINE_REASONS = ("drift", "age", "ess")
+_CANONICAL_INTEGER = re.compile(r"0|[1-9][0-9]{0,3999}")   # scale_num / scale_den spelling; the checker caps at 4000 digits
 _MAX_SOURCE_LENGTH = 256      # same bound as reservoir.rollout.MAX_SOURCE_LENGTH
 _MAX_PREDICATE_LENGTH = 1024  # same bound as reservoir.rollout_quarantine.MAX_PREDICATE_LENGTH
 
@@ -137,8 +139,8 @@ def _staleness_fields(
         if entry["reason"] is not None and entry["reason"] not in TELEMETRY_DECLINE_REASONS:
             raise ValueError(f"telemetry: decisions[{k}].reason must be None or one of {TELEMETRY_DECLINE_REASONS}")
         num, den = entry["scale_num"], entry["scale_den"]
-        if not (isinstance(num, str) and isinstance(den, str) and num.isdigit() and den.isdigit() and int(den) > 0):
-            raise ValueError(f"telemetry: decisions[{k}] scale must be decimal integer strings with a positive denominator")
+        if not all(isinstance(v, str) and _CANONICAL_INTEGER.fullmatch(v) for v in (num, den)) or int(den) == 0:
+            raise ValueError(f"telemetry: decisions[{k}] scale must be canonical decimal integer strings with a positive denominator")
         scale = Fraction(int(num), int(den))
         if (scale.numerator, scale.denominator) != (int(num), int(den)) or not 0 < scale <= 1:
             raise ValueError(f"telemetry: decisions[{k}] scale {num}/{den} must be a reduced fraction in (0, 1]")

@@ -18,6 +18,18 @@ minor bump may change interfaces.
   cost, a greedy held-out evaluation, per-run dollars, and a report and
   ESS-vs-reward figure rebuilt offline. CPU-smoked only; GPU results
   pending (`docs/staleness.md`).
+- **Staleness policy.** `ReservoirReplay(staleness_policy=...)` (TRL and
+  verl) decides per replayed row, from its sequence log-ratio, exact
+  importance weight and age: an age bound, an exact ESS floor that declines
+  the largest-|log-ratio| row first, a per-group importance-mass cap that
+  rescales a group's advantages by an exact fraction, and the 0.6.0
+  `max_log_ratio` gate as the last stage. Presets `conservative`, `async`,
+  `off`. Every decision, the policy and every draw's log-ratio (as a hex
+  float) are written to the telemetry record under log format 3 as
+  optional fields; the checker replays the decisions, recomputes the
+  reported log-ratio statistics and cross-checks the batch witness. New
+  eviction reason `age`. Mutation category `staleness` (34 forgeries, one measured limit).
+  `docs/design.md` §13, `docs/nonclaims.md` §25.
 
 ## [0.6.0] - 2026-10-06
 

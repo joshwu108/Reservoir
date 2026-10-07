@@ -306,6 +306,34 @@ class TestRejects:
             buf.record_telemetry(0, dict(batch_rows=4, replaced_rows=2, declined_rows=0, dead_groups=1,
                                          near_dead_groups=0), batch, {"decisions": 1.0})
 
+    def test_a_later_record_cannot_drop_the_fields(self, run):
+        records, _ = run
+        later = telemetry_indices(records)[1]
+        with pytest.raises(CheckerError, match="cannot leave them out"):
+            verify_chain(edited(records, later, lambda r: [r.pop(k) for k in ("log_ratios", "policy", "decisions")]))
+        with pytest.raises(CheckerError, match="cannot leave it out"):
+            verify_chain(edited(records, later, lambda r: (r.pop("policy"), r.pop("decisions"))))
+
+    def test_the_policy_is_fixed_for_a_run(self, run):
+        records, _ = run
+        later = telemetry_indices(records)[1]
+        # A looser age bound at a step with no row near it would otherwise pass (the measured limit); across
+        # records the policy must not move.
+        with pytest.raises(CheckerError, match="differs from the one recorded earlier"):
+            verify_chain(edited(records, later, lambda r: r["policy"].update(max_age=100)))
+
+    @pytest.mark.parametrize("bad", ["²", "001", "+1", "1" * 4001, 1])
+    def test_scale_strings_must_be_canonical_integers(self, run, bad):
+        records, i = run
+        scaled = next(k for k, d in enumerate(records[i]["decisions"]) if d["scale_den"] != "1")
+        with pytest.raises(CheckerError, match="canonical decimal integer"):
+            verify_chain(edited(records, i, lambda r: r["decisions"][scaled].update(scale_num=bad)))
+
+    def test_checker_exact_exp_rejects_non_finite(self):
+        from reservoir_checker.staleness import exact_exp
+        with pytest.raises(CheckerError):
+            exact_exp(float("nan"))
+
     def test_age_evict_is_a_recorded_reason(self):
         records, _ = policy_run(policy=StalenessPolicy(max_age=0))
         i = next(k for k, r in enumerate(records) if r["op"] == "evict" and r.get("reason") == "age")

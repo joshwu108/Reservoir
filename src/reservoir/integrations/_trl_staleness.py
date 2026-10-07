@@ -79,15 +79,19 @@ _PRESET_VALUES: Final[dict[str, dict]] = {
 }
 
 
+_EXP_CONTEXT: Final[decimal.Context] = decimal.Context(
+    prec=EXP_DIGITS, Emax=1000, Emin=-1000, rounding=decimal.ROUND_HALF_EVEN,
+    traps=[decimal.InvalidOperation, decimal.Overflow, decimal.DivisionByZero],
+)
+"""A context of its own, so a host application's thread-local decimal traps cannot change the result."""
+
+
 def exact_exp(r: float) -> Fraction:
     """``exp(r)`` as an exact fraction, correctly rounded to ``EXP_DIGITS`` digits, after clamping ``r``."""
     if not math.isfinite(r):
         raise ValueError(f"exact_exp needs a finite log-ratio, got {r!r}")
     r = min(max(float(r), -LOG_RATIO_CLAMP), LOG_RATIO_CLAMP)
-    with decimal.localcontext() as ctx:
-        ctx.prec = EXP_DIGITS
-        ctx.Emax, ctx.Emin = 1000, -1000
-        return Fraction(decimal.Decimal(r).exp())
+    return Fraction(_EXP_CONTEXT.exp(decimal.Decimal(r)))
 
 
 def _optional_int(value: Optional[int], name: str) -> Optional[int]:
@@ -232,11 +236,15 @@ def decide(
                 reasons[k] = "age"
     if policy.ess_floor is not None:                                                          # stage 2
         floor = Fraction(policy.ess_floor)
-        while True:
-            kept = [k for k in range(n) if reasons[k] is None]
-            if len(kept) <= 1 or ess_of([is_weights[k] for k in kept]) >= floor * len(kept):
-                break
-            reasons[max(kept, key=lambda k: (abs(ratios[k]), -k))] = "ess"
+        kept = [k for k in range(n) if reasons[k] is None]
+        total = sum((is_weights[k] for k in kept), Fraction(0))
+        squares = sum((is_weights[k] * is_weights[k] for k in kept), Fraction(0))
+        while len(kept) > 1 and total * total < floor * len(kept) * squares:   # ESS/n < floor, cross-multiplied
+            victim = max(kept, key=lambda k: (abs(ratios[k]), -k))
+            reasons[victim] = "ess"
+            kept.remove(victim)
+            total -= is_weights[victim]
+            squares -= is_weights[victim] * is_weights[victim]
     scales = [Fraction(1)] * n
     if policy.mass_cap is not None:                                                           # stage 3
         cap_per_row = 1 + Fraction(policy.mass_cap)

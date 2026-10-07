@@ -37,6 +37,11 @@ Categories (per spec):
      quarantine in an older log format, and a manifest whose rewards are
      not numeric; the report states the limit (the texts and values are
      recorded, not committed).
+ 14. Manifest tamperings against the offline replay (campaigns/mutation_replay.py).
+ 15. Staleness-decision forgeries (campaigns/mutation_staleness.py): a
+     decision's reason or scale changed, a log-ratio or policy parameter
+     changed, a group label or row moved, the fields dropped, the reported
+     statistics disagreeing with the recorded log-ratios.
 
 Run with: python -m campaigns.mutation
 Prints a report with exact counts.
@@ -499,6 +504,12 @@ def run_mutation_campaign() -> dict:
     from campaigns.mutation_replay import run_replay_category
     run_replay_category(results)
 
+    # -----------------------------------------------------------------------
+    # Category 15: Staleness-decision forgeries
+    # -----------------------------------------------------------------------
+    from campaigns.mutation_staleness import run_staleness_category
+    run_staleness_category(results)
+
     return results
 
 
@@ -685,6 +696,11 @@ def main() -> None:
         print(f"Documented limit: {len(provenance_limit['survive'])} provenance changes survive "
               f"({', '.join(provenance_limit['survive'])}).")
         print(f"  {provenance_limit['statement']}")
+    staleness_limit = results.get("staleness_limit")
+    if staleness_limit:
+        print(f"Documented limit: {len(staleness_limit['pass'])} of {len(staleness_limit['mutants'])} policy-parameter "
+              f"changes that flip no decision pass ({', '.join(staleness_limit['pass'])}).")
+        print(f"  {staleness_limit['statement']}")
     replay_split = results.get("replay_manifest")
     if replay_split:
         print(f"Offline replay: {len(replay_split['broke'])} manifest tamperings break it (counted above); "
@@ -719,6 +735,7 @@ def main() -> None:
         "draw_limit": results.get("draw_limit"),
         "provenance_limit": results.get("provenance_limit"),
         "replay_manifest": results.get("replay_manifest"),
+        "staleness_limit": results.get("staleness_limit"),
         "pass": len(results["survived"]) == 0 and results["total_mutants"] >= 60,
     }
     Path("results/mutation_campaign_report.json").write_text(
