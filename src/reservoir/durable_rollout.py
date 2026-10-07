@@ -529,13 +529,25 @@ class DurableRolloutBuffer:
         self._commit("quarantine", {"positions": slots, "predicate": predicate_text, "note": reason},
                      lambda: self._buf.quarantine_positions(slots, predicate_text, reason))
 
-    def record_telemetry(self, step: int, counts: dict, sample=None, reported=None) -> None:
-        """Durably write a telemetry record; see ``RolloutBuffer.record_telemetry``."""
+    def record_telemetry(self, step: int, counts: dict, sample=None, reported=None, *, log_ratios=None,
+                         policy=None, decisions=None) -> None:
+        """Durably write a telemetry record; see ``RolloutBuffer.record_telemetry``.
+
+        The log-ratios are journaled as ``float.hex()`` strings so a NaN or
+        an infinity survives the JSON round trip exactly.
+        """
         args = {"step": step, "counts": dict(counts), "with_sample": sample is not None,
                 "sample_op": int(sample.op_counter) if sample is not None else None,
                 "reported": dict(reported or {})}
+        if log_ratios is not None:
+            args["log_ratios"] = [float(r).hex() for r in log_ratios]
+        if policy is not None:
+            args["policy"] = dict(policy)
+        if decisions is not None:
+            args["decisions"] = [dict(d) for d in decisions]
         self._commit("record_telemetry", args,
-                     lambda: self._buf.record_telemetry(step, counts, sample, reported))
+                     lambda: self._buf.record_telemetry(step, counts, sample, reported, log_ratios=log_ratios,
+                                                        policy=policy, decisions=decisions))
 
     # -- read-only passthroughs --------------------------------------------
     # Each of these reads the wrapped buffer and touches nothing on disk;

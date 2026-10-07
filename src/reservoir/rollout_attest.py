@@ -346,14 +346,19 @@ class RolloutAttester:
         self._emit(self._log.append_batch(step, sample_op_counter, batch_rows, replaced, tensor_digest, declined))
 
     def record_telemetry(self, step: int, counts: dict, sample_op_counter: Optional[int],
-                         exact, reported: dict) -> None:
-        """One telemetry record; ``exact`` is an ``ExactTelemetry`` or None (no replay this step)."""
+                         exact, reported: dict, *, log_ratios=None, policy=None, decisions=None) -> None:
+        """One telemetry record; ``exact`` is an ``ExactTelemetry`` or None (no replay this step).
+
+        ``log_ratios``, ``policy`` and ``decisions`` are the optional
+        staleness fields; see ``AttestationLog.append_telemetry``.
+        """
         if self._log is None:
             return
         self._emit(self._log.append_telemetry(
             step, counts, sample_op_counter,
             exact.ess if exact else None, exact.staleness_max if exact else None,
             exact.staleness_sum if exact else None, reported,
+            log_ratios=log_ratios, policy=policy, decisions=decisions,
         ))
 
     def restore(self, records: list[dict], manifest_records: Optional[list[dict]] = None) -> None:

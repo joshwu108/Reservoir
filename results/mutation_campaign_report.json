@@ -1,7 +1,7 @@
 {
   "campaign": "T4_mutation",
-  "total_mutants": 221,
-  "rejected": 221,
+  "total_mutants": 255,
+  "rejected": 255,
   "survived": [],
   "categories": [
     {
@@ -78,6 +78,11 @@
       "name": "replay_manifest",
       "total": 16,
       "rejected": 16
+    },
+    {
+      "name": "staleness",
+      "total": 34,
+      "rejected": 34
     }
   ],
   "content_limit": {
@@ -139,6 +144,17 @@
       "manifest_rewards_changed_on_generated_example"
     ],
     "statement": "a tampered manifest either fails to open the log's commitments, so the replay refuses it, or changes a per-reward-function value, which the log does not commit to; the replay then runs and reports the manifest's value, and nothing else in its output moves"
+  },
+  "staleness_limit": {
+    "mutants": [
+      "staleness_policy_decline_cap_added_never_binding",
+      "staleness_policy_ess_floor_loosened_nothing_declined_for_ess"
+    ],
+    "pass": [
+      "staleness_policy_decline_cap_added_never_binding",
+      "staleness_policy_ess_floor_loosened_nothing_declined_for_ess"
+    ],
+    "statement": "a policy parameter changed so that no recorded decision differs passes: the checker verifies that the decisions follow the declared policy from the recorded inputs, not which policy the adapter intended"
   },
   "pass": true
 }

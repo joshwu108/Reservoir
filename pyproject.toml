@@ -16,6 +16,7 @@ license = { text = "Apache-2.0" }
 dependencies = []
 
 [project.scripts]
+reservoir = "reservoir.cli:main"
 reservoir-verify = "reservoir_checker.verify:main"
 reservoir-transcript = "reservoir_checker.transcript:main"
 reservoir-diff = "reservoir_checker.diff:main"
@@ -49,23 +50,6 @@ verl = [
     "torch>=2.0.0",
     "verl==0.9.1",
 ]
-prefcheck = [
-    "numpy>=2.2.6",
-    "torch>=2.0.0",
-    "trl>=0.11",
-    "transformers>=4.40",
-    "datasets>=2.18",
-    "accelerate>=0.27",
-    "matplotlib>=3.7",
-]
-anchor = [
-    "numpy>=2.2.6",
-    "torch>=2.0.0",
-    "transformers>=4.40",
-    "datasets>=2.18",
-    "accelerate>=0.27",
-    "matplotlib>=3.7",
-]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -73,6 +57,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--tb=short -v"
+markers = ["slow: end-to-end runs that train a tiny model (deselect with -m 'not slow')"]
 
 [dependency-groups]
 dev = [

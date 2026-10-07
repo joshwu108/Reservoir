@@ -148,7 +148,7 @@ def test_too_many_declines_raise_instead_of_continuing():
     trainer = MetricTrainer(r, [live_batch(), mixed_batch()])
     trainer.generate(step=1)
     trainer.current_logp = LOGP - 1.0
-    with pytest.raises(RuntimeError, match="drift gate would decline 2"):
+    with pytest.raises(RuntimeError, match="would decline 2"):
         trainer.generate(step=2)
 
 

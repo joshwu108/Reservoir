@@ -370,3 +370,49 @@ adapter runs no extra forward on the fresh rows; the telemetry forward over
 the replayed rows is a worker-group call that does not touch the trainer's
 RNG. No claim is made about throughput or about training quality (§10,
 §13).
+
+### 25. Staleness Policy
+
+The staleness policy (`docs/design.md` §13) is a declared rule, not a
+result. No claim is made that its age bound, ESS floor or group-mass cap
+is optimal, that any preset improves reward, or that the weights it
+produces are unbiased. The sequence-level importance ratios the policy
+reasons about are the unbiased family; Martingale's exact bench shows
+per-token clipping is biased; and the cap and the floor are deliberate
+departures from unbiasedness, trading bias for variance. The trade is
+measured by the staleness sweep (D3 of
+`planning/2026-10-06-staleness-controller.md`), not asserted here.
+
+What the checker verifies is that every recorded decision follows the
+declared policy from the recorded inputs. The inputs it cannot
+recompute are declared: the sequence log-ratios are measurements of a
+forward the log does not see (a dishonest adapter could record any
+finite value, and the policy would be verified against it), and the verl
+adapter's group labels are declared, since the log does not see `uid`s.
+The ESS floor is over the buffer's importance weights, which correct for
+prioritized sampling, not over the policy ratios; the two are distinct
+quantities and the floor says nothing about the latter. The rows of
+declined draws are declared too: the batch witness binds a row only to a
+placed draw, so a declined draw's row (and hence its group, when the
+group is not fixed by `group_size`) is checked for shape and distinctness
+only; under the legacy gate, which runs after the mass cap, a declined
+draw still counts in its group's mass, so its declared group affects the
+kept rows' scale. The scale itself reaches the loss through the written
+advantage, which the batch witness digests and the log cannot open.
+`exp(r)` at 30
+decimal digits with `r` clamped to `±700` is a convention that makes the
+replay exact, not a statement about precision the training needs. An
+`age` or `drift` decline evicts the entry, but the checker does not tie
+an eviction record to the decision that caused it; an adapter that
+declined and did not evict would still verify. The staleness fields are
+required of every replayed step after the first that carries them, not
+before: a log whose early replayed steps lack them reads as a run whose
+adapter wrote the 0.6.0 shape at first, and the checker cannot tell that
+from a tamperer dropping the fields from a prefix of the log. Binding the
+policy to the log's first record would close this and is left for the
+format bump that retires the legacy gate. Old checkers reject new logs
+(`docs/design.md` §13.4); the fields are additive for the new checker
+reading old logs, not the other way round. The legacy gate runs after
+the mass cap, so a row it declines was counted in its group's mass; this
+is the declared order, kept so 0.6.0 gate logs read unchanged, and may
+change in 0.7.0 with the gate's deprecation.

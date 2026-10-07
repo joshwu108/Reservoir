@@ -4038,14 +4038,6 @@ version = "0.6.0"
 source = { editable = "." }
 
 [package.optional-dependencies]
-anchor = [
-    { name = "accelerate" },
-    { name = "datasets" },
-    { name = "matplotlib" },
-    { name = "numpy" },
-    { name = "torch" },
-    { name = "transformers" },
-]
 atari = [
     { name = "ale-py" },
     { name = "autorom", extra = ["accept-rom-license"] },
@@ -4057,15 +4049,6 @@ classic = [
     { name = "gymnasium" },
     { name = "numpy" },
     { name = "torch" },
-]
-prefcheck = [
-    { name = "accelerate" },
-    { name = "datasets" },
-    { name = "matplotlib" },
-    { name = "numpy" },
-    { name = "torch" },
-    { name = "transformers" },
-    { name = "trl" },
 ]
 trl = [
     { name = "numpy" },
@@ -4093,36 +4076,23 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "accelerate", marker = "extra == 'anchor'", specifier = ">=0.27" },
-    { name = "accelerate", marker = "extra == 'prefcheck'", specifier = ">=0.27" },
     { name = "ale-py", marker = "extra == 'atari'", specifier = ">=0.9" },
     { name = "autorom", extras = ["accept-rom-license"], marker = "extra == 'atari'" },
-    { name = "datasets", marker = "extra == 'anchor'", specifier = ">=2.18" },
-    { name = "datasets", marker = "extra == 'prefcheck'", specifier = ">=2.18" },
     { name = "gymnasium", marker = "extra == 'classic'", specifier = ">=1.3.0" },
     { name = "gymnasium", extras = ["atari"], marker = "extra == 'atari'", specifier = ">=1.0" },
-    { name = "matplotlib", marker = "extra == 'anchor'", specifier = ">=3.7" },
     { name = "matplotlib", marker = "extra == 'atari'", specifier = ">=3.7" },
-    { name = "matplotlib", marker = "extra == 'prefcheck'", specifier = ">=3.7" },
-    { name = "numpy", marker = "extra == 'anchor'", specifier = ">=2.2.6" },
     { name = "numpy", marker = "extra == 'classic'", specifier = ">=2.2.6" },
-    { name = "numpy", marker = "extra == 'prefcheck'", specifier = ">=2.2.6" },
     { name = "numpy", marker = "extra == 'trl'", specifier = ">=2.2.6" },
     { name = "numpy", marker = "extra == 'verl'", specifier = ">=2.0.0" },
     { name = "stable-baselines3", marker = "extra == 'atari'", specifier = ">=2.9.0" },
-    { name = "torch", marker = "extra == 'anchor'", specifier = ">=2.0.0" },
     { name = "torch", marker = "extra == 'classic'", specifier = ">=2.0.0" },
-    { name = "torch", marker = "extra == 'prefcheck'", specifier = ">=2.0.0" },
     { name = "torch", marker = "extra == 'trl'", specifier = ">=2.0.0" },
     { name = "torch", marker = "extra == 'verl'", specifier = ">=2.0.0" },
-    { name = "transformers", marker = "extra == 'anchor'", specifier = ">=4.40" },
-    { name = "transformers", marker = "extra == 'prefcheck'", specifier = ">=4.40" },
     { name = "transformers", marker = "extra == 'trl'", specifier = ">=4.56.2" },
-    { name = "trl", marker = "extra == 'prefcheck'", specifier = ">=0.11" },
     { name = "trl", marker = "extra == 'trl'", specifier = "==1.13.0" },
     { name = "verl", marker = "extra == 'verl'", specifier = "==0.9.1" },
 ]
-provides-extras = ["classic", "atari", "trl", "verl", "prefcheck", "anchor"]
+provides-extras = ["classic", "atari", "trl", "verl"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -35,7 +35,7 @@ star = {{}}
 exec("from reservoir import *", star)
 out = {{"ok": True, "version": reservoir.__version__, "star": sorted(k for k in star if not k.startswith("__")),
        "sampled": build_transcript(verified)["sampled_rows"], "loaded": sorted(m for m in sys.modules if m.split(".")[0] in {BLOCKED!r} and sys.modules[m] is not None)}}
-for name in ("FastPERBuffer", "ForgettingMonitor", "backend", "DatasetBuffer"):
+for name in ("FastPERBuffer", "backend", "DatasetBuffer"):
     try:
         getattr(reservoir, name)
         out[name] = "resolved"
@@ -52,8 +52,7 @@ def test_rollout_path_and_checker_need_no_third_party_package():
     assert out["ok"] and out["sampled"] == 2 and out["loaded"] == []
     assert set(out["star"]) == {"ExactPERBuffer", "Rollout", "RolloutGroup", "RolloutBatch", "RolloutBuffer",
                                 "DurableRolloutBuffer"}
-    for name, extra in (("FastPERBuffer", "classic"), ("backend", "classic"), ("DatasetBuffer", "classic"),
-                        ("ForgettingMonitor", "anchor")):
+    for name, extra in (("FastPERBuffer", "classic"), ("backend", "classic"), ("DatasetBuffer", "classic")):
         assert out[name]["type"] == "ImportError"
         assert f"'{extra}' extra" in out[name]["message"] and f"reservoir-replay[{extra}]" in out[name]["message"]
 
@@ -88,8 +87,8 @@ def test_genuine_import_errors_are_not_disguised(monkeypatch):
 
 def test_console_scripts_resolve():
     scripts = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["scripts"]
-    assert set(scripts) == {"reservoir-verify", "reservoir-transcript", "reservoir-diff", "reservoir-replay-offline"}
-    for target in scripts.values():
+    assert set(scripts) == {"reservoir", "reservoir-verify", "reservoir-transcript", "reservoir-diff", "reservoir-replay-offline"}
+    for name, target in scripts.items():
         module, func = target.split(":")
         assert callable(getattr(importlib.import_module(module), func))
-        assert module.startswith("reservoir_checker.")
+        assert module == "reservoir.cli" if name == "reservoir" else module.startswith("reservoir_checker.")

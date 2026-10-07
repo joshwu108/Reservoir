@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shlex
 import warnings
 from pathlib import Path
 from typing import Final, Optional
@@ -256,6 +257,31 @@ def _resume_on_owner(replay: ReservoirReplay, global_step: int, model_checkpoint
         )
     check_model_binding(replay.buffer.checkpoint_binding(tag), model_checkpoint, global_step)
     replay.buffer.restore_checkpoint(tag)
+
+
+def on_train_end(self, args, state, control, **kwargs):
+    """Print the owner rank's replay recovery and audit file locations."""
+    replay = self.replay
+    if not replay.is_owner:
+        return control
+    replay.close()
+    rows = replay.stats["replaced_rows"]
+    generated = getattr(replay, "_generated_rows", 0)
+    share = 100 * rows / generated if generated else 0.0
+    attest = replay._buffer_kwargs.get("attest")
+    manifest = replay._buffer_kwargs.get("manifest")
+    print("Reservoir replay summary")
+    print(f"  Rows replayed: {rows}")
+    print(f"  Share of generation recovered: {share:.1f}% ({rows}/{generated})")
+    print(f"  Buffer size: {replay.buffer.size}")
+    print(f"  Attestation log: {attest or 'disabled'}")
+    print(f"  Manifest: {manifest or 'disabled'}")
+    if attest:
+        command = f"reservoir-verify {shlex.quote(str(attest))}"
+        if manifest:
+            command += f" --manifest {shlex.quote(str(manifest))}"
+        print(f"  Verify: {command}")
+    return control
 
 
 __all__ = [

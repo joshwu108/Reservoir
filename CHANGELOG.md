@@ -5,6 +5,32 @@ All notable changes to `reservoir-replay`. The format follows
 [Semantic Versioning](https://semver.org/) with the pre-1.0 convention that a
 minor bump may change interfaces.
 
+## [Unreleased]
+
+### Added
+
+- **Staleness sweep harness** (`benchmarks/modal/staleness_sweep.py`,
+  `benchmarks/staleness/`): TRL 1.13 GRPO with colocated vLLM on one A10G
+  over GSM8K, seven arms (plain GRPO; Reservoir at `max_policy_age` 8, 32,
+  128 with the policy off and on) × three seeds, every Reservoir run
+  verified by the checker before it is written, a stale-engine check that
+  compares vLLM's sampling logprobs with the trainer's forward at no extra
+  cost, a greedy held-out evaluation, per-run dollars, and a report and
+  ESS-vs-reward figure rebuilt offline. CPU-smoked only; GPU results
+  pending (`docs/staleness.md`).
+- **Staleness policy.** `ReservoirReplay(staleness_policy=...)` (TRL and
+  verl) decides per replayed row, from its sequence log-ratio, exact
+  importance weight and age: an age bound, an exact ESS floor that declines
+  the largest-|log-ratio| row first, a per-group importance-mass cap that
+  rescales a group's advantages by an exact fraction, and the 0.6.0
+  `max_log_ratio` gate as the last stage. Presets `conservative`, `async`,
+  `off`. Every decision, the policy and every draw's log-ratio (as a hex
+  float) are written to the telemetry record under log format 3 as
+  optional fields; the checker replays the decisions, recomputes the
+  reported log-ratio statistics and cross-checks the batch witness. New
+  eviction reason `age`. Mutation category `staleness` (34 forgeries, one measured limit).
+  `docs/design.md` §13, `docs/nonclaims.md` §25.
+
 ## [0.6.0] - 2026-10-06
 
 Phase 5: the developer-facing release. Everything below is implemented,
@@ -85,7 +111,7 @@ result; `docs/nonclaims.md` lists what is not claimed.
 - **No required dependencies.** `import reservoir`, the rollout buffer, the
   attestation log and the checker need the standard library only; numpy
   and torch come with the extras that use them (`classic`, `trl`, `verl`,
-  `prefcheck`, `anchor`) and resolve lazily with a message naming the
+  and, until their removal below, `prefcheck`, `anchor`) and resolve lazily with a message naming the
   extra. Enforced by `tests/test_import_light.py`.
 - **Attestation log format 3.** The log records `seed`, `buffer_id` and
   `beta` (a draw moved inside its leaf's range, or a reweighted sample, is
@@ -100,6 +126,16 @@ result; `docs/nonclaims.md` lists what is not claimed.
   divergence campaign is the decision-relevant measurement.
 - Checker, transcript and diff documentation moved to `docs/design.md` §9
   to §12 and `docs/nonclaims.md` §13 to §24.
+
+### Removed
+
+- The preference-noise detector (`prefcheck`, `trajectory`, `report`) and the
+  forgetting monitor (`anchor_set`, `forgetting_monitor`, `replay_scheduler`)
+  with their `prefcheck` and `anchor` extras, benchmarks and Modal scripts.
+  They predate the replay buffer, share nothing with it, and sit in the wrong
+  package to be found by anyone who needs them; the project is the replay
+  buffer. Their last version is 0.5.0 (`git checkout 0.5.0 -- src/reservoir/prefcheck.py`
+  and friends recovers them).
 
 ### Fixed
 

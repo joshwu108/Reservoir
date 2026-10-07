@@ -608,12 +608,14 @@ class RolloutBuffer:
 
         ``"explicit"`` is the caller's decision; ``"drift"`` is an adapter
         declining an entry whose behavior logprobs drifted too far from
-        the current policy. ``"stale"`` and ``"capacity"`` are the buffer's
-        own reasons and cannot be given here; ``"quarantine"`` is written
-        by ``quarantine``, which records why.
+        the current policy; ``"age"`` is an adapter's staleness policy
+        declining an entry older than its ``max_age``. ``"stale"`` and
+        ``"capacity"`` are the buffer's own reasons and cannot be given
+        here; ``"quarantine"`` is written by ``quarantine``, which records
+        why.
         """
-        if reason not in ("explicit", "drift"):
-            raise ValueError(f"evict reason must be 'explicit' or 'drift' (quarantine() for 'quarantine'), got {reason!r}")
+        if reason not in ("explicit", "drift", "age"):
+            raise ValueError(f"evict reason must be 'explicit', 'drift' or 'age' (quarantine() for 'quarantine'), got {reason!r}")
         pos = self._to_index(position)
         if pos not in self._tree.entries:
             raise ValueError(f"evict: slot {pos} holds no live entry")
@@ -640,7 +642,8 @@ class RolloutBuffer:
         apply_quarantine(self, positions, predicate_text, reason)
 
     def record_telemetry(self, step: int, counts: dict, sample: Optional[RolloutBatch] = None,
-                         reported: Optional[dict] = None) -> None:
+                         reported: Optional[dict] = None, *, log_ratios: Optional[Sequence[float]] = None,
+                         policy: Optional[dict] = None, decisions: Optional[Sequence[dict]] = None) -> None:
         """Write a ``telemetry`` record for ``step``; see ``rollout_telemetry``.
 
         ``counts`` holds the integer counters the adapter observed
@@ -648,8 +651,13 @@ class RolloutBuffer:
         ``dead_groups``, ``near_dead_groups``); ``sample`` is the step's
         batch when rows were replayed, from which the exact effective
         sample size and staleness are derived here and re-derived by the
-        checker; ``reported`` holds float measurements the checker can only
-        carry (the log-ratio statistics). A no-op when attestation is off.
+        checker; ``reported`` holds float measurements (the log-ratio
+        statistics). ``log_ratios`` is one float per draw of ``sample``,
+        written as hex floats, from which the checker recomputes the
+        reported statistics; ``policy`` and ``decisions`` are the staleness
+        policy and its per-draw decisions in record form
+        (``reservoir.integrations._trl_staleness``), which the checker
+        replays. A no-op when attestation is off.
         """
         if not self._attester.enabled:
             return
@@ -658,7 +666,13 @@ class RolloutBuffer:
             if sample.op_counter != self._op_counter:
                 raise ValueError("record_telemetry: the sample is not the buffer's latest batch")
             exact = exact_telemetry(sample.is_weights, [self.current_version - v for v in sample.model_versions])
-        self._attester.record_telemetry(step, counts, sample.op_counter if sample else None, exact, reported or {})
+            if log_ratios is not None and len(log_ratios) != len(sample.rollouts):
+                raise ValueError(f"record_telemetry: {len(log_ratios)} log-ratios for {len(sample.rollouts)} draws; "
+                                 "one log-ratio per draw is required")
+        elif log_ratios is not None:
+            raise ValueError("record_telemetry: log_ratios need the sample they describe")
+        self._attester.record_telemetry(step, counts, sample.op_counter if sample else None, exact, reported or {},
+                                        log_ratios=log_ratios, policy=policy, decisions=decisions)
 
     def update_priorities(self, indices: Sequence[int], raw_scores: Sequence[float]) -> None:
         """Re-score live entries. All inputs are validated before any write.

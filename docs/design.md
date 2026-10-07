@@ -1211,3 +1211,131 @@ the trainer kept; `_load_checkpoint` at `n > 0` rewinds the buffer to
 was taken (§3 above). The hook-ran check
 counts steps trained by this process (`global_steps - n`), so a resumed run
 is not failed for the steps the checkpoint already contained.
+
+## 13. Staleness Policy
+
+Asynchronous generation and replay both train on rollouts the current
+policy did not produce. The adapters' 0.6.0 answer was one knob,
+`max_log_ratio`, applied per row. `StalenessPolicy`
+(`reservoir.integrations._trl_staleness`) replaces it with a declared,
+deterministic rule whose every decision is written to the log and replayed
+by the checker (`reservoir_checker.staleness`).
+
+### 13.1 Inputs
+
+Per draw of the sampled batch, all available at `_replay` time: the
+sequence log-ratio `r` (current minus stored behaviour logprobs, summed
+over the completion tokens; one no-grad forward over the replayed rows),
+the exact importance weight `w` from the sample record, the age in model
+versions (recomputed by the checker from the live slots), and the training
+row and group the draw would fill. The log-ratios are measurements; the
+record carries them as `float.hex()` strings (`log_ratios`, one per draw,
+non-finite values included) so the replay is bit-exact and the reported
+`log_ratio_mean_abs` / `log_ratio_max_abs` are now recomputed by the
+checker rather than carried.
+
+### 13.2 The four stages
+
+Applied in this order and nowhere else; a non-finite `r` is declined first
+(reason `drift`) because nothing below can compare it.
+
+1. **Age bound.** `age > max_age` declines the row (reason `age`). The
+   buffer's `max_policy_age` evicts on `advance`; this makes a tighter
+   bound explicit per row.
+2. **ESS floor.** Over the rows still kept, the exact effective sample
+   size `(Σw)²/Σw²` of their importance weights must be at least
+   `ess_floor` times their count. While it is not, the kept row with the
+   largest `|r|` is declined (reason `ess`; ties go to the lower draw
+   position). One row always satisfies the floor, so the loop terminates.
+   An `ess` decline does not evict: the batch's weight mix, not the row,
+   was the problem. The victim is chosen by drift, not by weight: the
+   floor says when the batch is too concentrated, and the rows given up
+   to fix it are the ones the policy trusts least. When one row carries
+   most of the weight this can decline every other row down to that one;
+   `max_declines_per_step` is the guard.
+3. **Group-mass cap.** For each training group that still receives rows,
+   the group's importance mass `Σ w·exp(r)` over those rows may not exceed
+   `(1 + mass_cap)` times their count, which is the mass fresh rows in
+   those slots would carry (ratio 1, weight 1). When it does, every kept
+   row of the group has its advantage multiplied by the exact fraction
+   `cap / mass`. This is the group-mass cap of 2610.01896 applied to
+   replayed rows. `exp(r)` is the one transcendental: it is computed with
+   the `decimal` module at 30 significant digits, which is correctly
+   rounded and therefore identical on every platform, after clamping `r`
+   to `±700`, and frozen to a `Fraction`; everything after it is exact.
+4. **Legacy gate.** `|r| > max_log_ratio` declines the row (reason
+   `drift`). It runs last so a log written with the gate alone reads as it
+   did in 0.6.0; a consequence is that a row it declines was counted in
+   its group's mass in stage 3. The presets do not set it.
+
+More than `max_declines_per_step` declines in one step raise before any
+record is written.
+
+### 13.3 What reaches the loss
+
+The advantage written for a kept draw is `reward · float(w · scale)`:
+the product of the exact weight and the exact scale, rounded to a float
+once. `verify_written_rows` re-reads it, the batch witness's
+`tensor_digest` is over the final tensors (so it covers the rescaled
+values; the same draws without the policy give a different digest), and
+the dead slot of a declined draw stays dead. Declines for `age` and
+`drift` evict the entry (a slot drawn more than once only if no draw of
+it was kept) with that reason; `age` is a new eviction reason the checker
+accepts.
+
+### 13.4 The record
+
+Format 3, additive and optional. A replayed step's telemetry record
+gains `log_ratios` whenever telemetry is on, and, when a policy is
+active, `policy` (`max_age`, `ess_floor`, `mass_cap`, `max_log_ratio`,
+`max_declines_per_step`, `group_size`; ints as ints, floats as hex, unused
+stages `null`) and `decisions` (one per draw, in draw order: `draw`,
+`row`, `group`, `reason` or `null`, `scale_num`, `scale_den`). The
+checker rejects a record whose decisions differ from its own replay of
+the policy over the recorded inputs, whose kept rows disagree with the
+batch witness's row/draw pairs or declined list, whose counters disagree
+with the decisions, whose declines exceed the policy's cap, whose group
+labels disagree with `group_size` when one is given, or whose reported
+statistics disagree with the log-ratios. A record with `log_ratios` and no
+`policy` may decline nothing. A record in the 0.6.0 shape (reported
+statistics, no `log_ratios`) still verifies, so logs written before this
+section verify with the current checker; the reverse does not hold, since
+the 0.6.0 checker requires a telemetry record's extra fields to be exactly
+its `reported` list and knows no `age` eviction, so it rejects a new log
+(at its first replayed telemetry record, with that message). The fields
+are optional per log, not per record: once a replayed telemetry record
+has carried `log_ratios`, every later replayed record must, and once one
+has carried a `policy`, every later one must carry the same policy. A
+tamperer therefore cannot drop the fields from one record to escape the
+checks; what remains possible is stated in `docs/nonclaims.md` §25.
+
+`group_size` is the TRL case (rows `[g·G, (g+1)·G)` are one prompt; the
+group is `row // G`, which the checker enforces). verl's rows of one
+prompt share a `uid` and may be reordered by `balance_batch`, so that
+adapter declares each decision's group (uids in order of first
+appearance among the dead rows) and writes `group_size: null`; the labels
+are then declared inputs, like the log-ratios.
+
+### 13.5 Configuration and presets
+
+`ReservoirReplay(staleness_policy=...)` takes a `StalenessPolicy` or a
+preset name; the legacy `max_log_ratio` and `max_declines_per_step`
+keywords fill stage 4 when the policy does not set it and conflict
+otherwise. Presets: `conservative` (age 16, floor 0.5, cap 0.25), `async`
+(age 64, floor 0.3, cap 0.5), `off` (the 0.6.0 behaviour). Stages 1 to 3
+record their decisions in the telemetry record and so require
+`telemetry=True`; the legacy gate alone still runs with telemetry off,
+its declines visible only in the batch witness, as before. The verl
+adapter takes the same arguments and shares the module. Metrics:
+`reservoir/declined_age`, `declined_ess`, `declined_drift`,
+`rescaled_rows`, `mass_scale_min`.
+
+Mutation category `staleness` (`campaigns/mutation_staleness.py`) forges
+each of these fields; the campaign requires every forgery rejected. It
+also measures one limit (`staleness_limit` in the report): a policy
+parameter changed consistently on every record so that no recorded
+decision differs (a decline cap that never bound, an ESS floor looser than
+one that never declined) passes, because the checker verifies that the
+decisions follow the declared policy, not which policy the adapter
+intended; the campaign fails if that measurement changes. What the policy does not claim is in
+`docs/nonclaims.md` §25.

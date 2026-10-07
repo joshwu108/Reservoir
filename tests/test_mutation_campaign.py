@@ -46,6 +46,7 @@ class TestMutationCampaign:
             "telemetry",
             "provenance",
             "replay_manifest",
+            "staleness",
         }
         assert required.issubset(category_names), (
             f"Missing categories: {required - category_names}"
@@ -132,4 +133,19 @@ class TestReplayCampaign:
                                          "manifest_rewards_changed_on_generated_example"}
         assert len(split["broke"]) == 16 and not set(split["broke"]) & set(split["changed"])
         assert split["statement"]
+        assert results["survived"] == []
+
+
+class TestStalenessCampaign:
+    def test_staleness_category_fully_rejected(self, results):
+        cat = next(d for d in results["details"] if d[0] == "staleness")
+        assert cat[1] >= 30 and cat[1] == cat[2]
+
+    def test_consistent_parameter_changes_are_measured_not_counted(self, results):
+        # The checker verifies that the decisions follow the declared policy; a parameter changed on every
+        # record so that no decision differs passes, and the campaign states it.
+        limit = results["staleness_limit"]
+        assert set(limit["pass"]) == set(limit["mutants"]) == {"staleness_policy_decline_cap_added_never_binding",
+                                                               "staleness_policy_ess_floor_loosened_nothing_declined_for_ess"}
+        assert limit["statement"]
         assert results["survived"] == []

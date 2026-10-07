@@ -300,6 +300,10 @@ class ContentState:
     _samples_by_op: dict[int, list[ResolvedSample]] = field(default_factory=dict)
     _witnessed_ops: set[int] = field(default_factory=set)
     last_sample_op: Optional[int] = None    # op_counter of the latest sample record; they must increase
+    # Once a replayed telemetry record carries log_ratios (or a policy), every later one must too, and the
+    # policy must not change: a record cannot opt out of the stronger checks (reservoir_checker.telemetry).
+    staleness_log_ratios_seen: bool = False
+    staleness_policy: Optional[dict] = None
 
     def on_mutation(self, record: dict, idx: int) -> None:
         """Called after verify.py accepted the mutation's tree effect (so ``index`` is valid)."""

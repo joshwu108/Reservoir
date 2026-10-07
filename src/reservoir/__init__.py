@@ -36,10 +36,6 @@ Shared:
                         two-log comparison (diff). Imports nothing from the rest
                         of this package; ships with console scripts.
 
-Fine-tuning tools (separate from replay): prefcheck.py, trajectory.py,
-report.py (preference-noise detection); anchor_set.py, forgetting_monitor.py,
-replay_scheduler.py (forgetting measurement and replay).
-
 See ``rollout_buffer.py`` ("Call structure"), ``decayed_tree.py`` and
 ``decay.py`` with docs/design.md §7 for the replay path. ``tests/`` mirrors
 this layout, one file per module.
@@ -63,13 +59,6 @@ _LAZY: dict[str, tuple[str, str, str]] = {
     "PyFastPERBuffer": ("reservoir.fast_buffer", "FastPERBuffer", "classic"),
     "backend": ("reservoir._classic", "backend", "classic"),
     "DatasetBuffer": ("reservoir.dataset_buffer", "DatasetBuffer", "classic"),
-    "AnchorSet": ("reservoir.anchor_set", "AnchorSet", "anchor"),
-    "ForgettingMonitor": ("reservoir.forgetting_monitor", "ForgettingMonitor", "anchor"),
-    "ForgettingAlert": ("reservoir.forgetting_monitor", "ForgettingAlert", "anchor"),
-    "ReplayScheduler": ("reservoir.replay_scheduler", "ReplayScheduler", "anchor"),
-    "PreferenceQualityReport": ("reservoir.report", "PreferenceQualityReport", "prefcheck"),
-    "NoiseLabel": ("reservoir.report", "NoiseLabel", "prefcheck"),
-    "PreferenceNoiseDetector": ("reservoir.prefcheck", "PreferenceNoiseDetector", "prefcheck"),
 }
 
 

@@ -45,15 +45,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 from fractions import Fraction
-from typing import Optional
+from typing import Optional, Sequence
 
 # Domain separator for attestation hashing
 _PERSON = b"attest\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"  # 16 bytes
 _GENESIS = "genesis"
 
 _MUTATION_OPS = ("insert", "update", "evict")
-_EVICT_REASONS = ("stale", "capacity", "explicit", "drift", "quarantine")
+_EVICT_REASONS = ("stale", "capacity", "explicit", "drift", "age", "quarantine")
 _DECAY_FIELDS = ("base_priority_int", "entry_version", "base_epoch")
 _CONTENT_DIGEST_LENGTH = 64   # hex characters of a BLAKE2b-256 digest
 LOG_FORMAT = "3"              # schema version written into decay_config; "2" added batch witnesses and telemetry, "3" quarantine evictions
@@ -62,8 +64,14 @@ TELEMETRY_COUNTERS = ("batch_rows", "replaced_rows", "declined_rows", "dead_grou
 # (reservoir_checker.telemetry) keeps the same list; the two must not drift apart.
 TELEMETRY_RESERVED = frozenset(TELEMETRY_COUNTERS) | {
     "op", "step", "prev_digest", "digest", "sample_op_counter", "ess_num", "ess_den",
-    "staleness_max", "staleness_sum", "reported",
+    "staleness_max", "staleness_sum", "reported", "log_ratios", "policy", "decisions",
 }
+# The staleness policy block and one decision per draw (reservoir.integrations._trl_staleness); the
+# checker (reservoir_checker.staleness) keeps the same field lists.
+TELEMETRY_POLICY_FIELDS = ("max_age", "ess_floor", "mass_cap", "max_log_ratio", "max_declines_per_step", "group_size")
+TELEMETRY_DECISION_FIELDS = ("draw", "row", "group", "reason", "scale_num", "scale_den")
+TELEMETRY_DECLINE_REASONS = ("drift", "age", "ess")
+_CANONICAL_INTEGER = re.compile(r"0|[1-9][0-9]{0,3999}")   # scale_num / scale_den spelling; the checker caps at 4000 digits
 _MAX_SOURCE_LENGTH = 256      # same bound as reservoir.rollout.MAX_SOURCE_LENGTH
 _MAX_PREDICATE_LENGTH = 1024  # same bound as reservoir.rollout_quarantine.MAX_PREDICATE_LENGTH
 
@@ -86,6 +94,58 @@ def _blake2b_digest(data: bytes) -> str:
     """BLAKE2b-256 digest of data, hex-encoded."""
     h = hashlib.blake2b(data, digest_size=32, person=_PERSON)
     return h.hexdigest()
+
+
+def _staleness_fields(
+    has_sample: bool, log_ratios: Optional[Sequence[float]], policy: Optional[dict], decisions: Optional[Sequence[dict]],
+) -> dict:
+    """Validate and serialize the optional ``log_ratios``, ``policy`` and ``decisions`` fields of a telemetry record."""
+    if log_ratios is None:
+        if policy is not None or decisions is not None:
+            raise ValueError("telemetry: policy and decisions require log_ratios")
+        return {}
+    if not has_sample:
+        raise ValueError("telemetry: log_ratios need a sample (a step that replayed rows)")
+    out: dict = {"log_ratios": []}
+    for k, value in enumerate(log_ratios):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"telemetry: log_ratios[{k}] must be a float, got {value!r}")
+        out["log_ratios"].append(float(value).hex())
+    if (policy is None) != (decisions is None):
+        raise ValueError("telemetry: policy and decisions are written together or not at all")
+    if policy is None:
+        return out
+    if not isinstance(policy, dict) or set(policy) != set(TELEMETRY_POLICY_FIELDS):
+        raise ValueError(f"telemetry: policy must be a dict with exactly the fields {list(TELEMETRY_POLICY_FIELDS)}")
+    for name in ("max_age", "max_declines_per_step", "group_size"):
+        if policy[name] is not None:
+            _require_int(policy[name], f"policy.{name}", 1 if name == "group_size" else 0)
+    for name in ("ess_floor", "mass_cap", "max_log_ratio"):
+        value = policy[name]
+        if value is not None and (not isinstance(value, str) or float.fromhex(value).hex() != value
+                                  or not math.isfinite(float.fromhex(value))):
+            raise ValueError(f"telemetry: policy.{name} must be a canonical finite float.hex() string or None")
+    if not isinstance(decisions, (list, tuple)) or len(decisions) != len(out["log_ratios"]):
+        raise ValueError("telemetry: decisions must list one entry per draw")
+    out["policy"] = dict(policy)
+    out["decisions"] = []
+    for k, entry in enumerate(decisions):
+        if not isinstance(entry, dict) or set(entry) != set(TELEMETRY_DECISION_FIELDS):
+            raise ValueError(f"telemetry: decisions[{k}] must have exactly the fields {list(TELEMETRY_DECISION_FIELDS)}")
+        if entry["draw"] != k:
+            raise ValueError(f"telemetry: decisions[{k}] is for draw {entry['draw']!r}; decisions are in draw order")
+        _require_int(entry["row"], f"decisions[{k}].row", 0)
+        _require_int(entry["group"], f"decisions[{k}].group", 0)
+        if entry["reason"] is not None and entry["reason"] not in TELEMETRY_DECLINE_REASONS:
+            raise ValueError(f"telemetry: decisions[{k}].reason must be None or one of {TELEMETRY_DECLINE_REASONS}")
+        num, den = entry["scale_num"], entry["scale_den"]
+        if not all(isinstance(v, str) and _CANONICAL_INTEGER.fullmatch(v) for v in (num, den)) or int(den) == 0:
+            raise ValueError(f"telemetry: decisions[{k}] scale must be canonical decimal integer strings with a positive denominator")
+        scale = Fraction(int(num), int(den))
+        if (scale.numerator, scale.denominator) != (int(num), int(den)) or not 0 < scale <= 1:
+            raise ValueError(f"telemetry: decisions[{k}] scale {num}/{den} must be a reduced fraction in (0, 1]")
+        out["decisions"].append(dict(entry))
+    return out
 
 
 def _digest_record(record: dict, exclude_key: str = "digest") -> str:
@@ -410,6 +470,9 @@ class AttestationLog:
         staleness_max: Optional[int],
         staleness_sum: Optional[int],
         reported: dict,
+        log_ratios: Optional[Sequence[float]] = None,
+        policy: Optional[dict] = None,
+        decisions: Optional[Sequence[dict]] = None,
     ) -> dict:
         """Append a telemetry record: integer counters, exact ESS and staleness, carried floats.
 
@@ -419,6 +482,14 @@ class AttestationLog:
         are required and the checker recomputes them; ``reported`` maps
         names to finite floats, written in ``float.hex()`` form and listed
         under ``"reported"`` so a reader can tell carried from verified.
+
+        Format-3 additive fields, all optional: ``log_ratios`` is one
+        float per draw of the sample (any float, non-finite included),
+        written as ``float.hex()`` so the checker can recompute the reported
+        statistics and replay the policy exactly; ``policy`` is the
+        staleness policy block and ``decisions`` one entry per draw, both
+        already in record form (``StalenessPolicy.to_record``,
+        ``RowDecision.to_record``), and both require ``log_ratios``.
         """
         _require_int(step, "step", 0)
         names = TELEMETRY_COUNTERS
@@ -442,6 +513,7 @@ class AttestationLog:
                 raise ValueError(f"reported {name} must be a finite float, got {value!r}")
             record[name] = float(value).hex()
         record["reported"] = sorted(reported)
+        record.update(_staleness_fields(sample_op_counter is not None, log_ratios, policy, decisions))
         return self._commit(record)
 
     def restore(self, records: list[dict]) -> None:

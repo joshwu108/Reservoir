@@ -76,7 +76,7 @@ _CONFIG_INT_FIELDS = (
 # score exponent, recorded so the sampling distribution is fully declared.
 _DRAW_FIELDS = ("seed", "buffer_id", "alpha", "beta")
 _DECAY_FIELDS = ("base_priority_int", "entry_version", "base_epoch")
-_EVICT_REASONS = ("stale", "capacity", "explicit", "drift", "quarantine")
+_EVICT_REASONS = ("stale", "capacity", "explicit", "drift", "age", "quarantine")
 
 
 # ---------------------------------------------------------------------------
