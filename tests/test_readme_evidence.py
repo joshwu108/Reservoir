@@ -57,6 +57,9 @@ def test_crash_row_matches_the_campaign_report():
     text = row("The durable buffers are failure-atomic under SIGKILL")
     report = load(RESULTS / "crash_campaign_report.json")
     assert report["torn"] == 0 and report["passed"] == report["total"] and "zero torn" in text
+    pre = sum(case["matches_pre"] for case in report["results"])
+    post = sum(case["matches_post"] for case in report["results"])
+    assert pre + post == report["total"] and f"the pre-state ({pre}) or the post-state ({post})" in text
     if "[pending: crash-campaign count]" not in text:
         assert f"{report['passed']}/{report['total']} crash tests" in text
 
