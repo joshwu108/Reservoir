@@ -88,9 +88,8 @@ def trainer_checkpoint_dir(output_dir, global_step: int) -> Optional[Path]:
 def directory_digest(path) -> dict:
     """BLAKE2b-256 over every regular file under ``path``: relative path, size and bytes, in path order.
 
-    Symbolic links to files are read through; symbolic links to
-    directories, broken links and anything that is not a regular file are
-    skipped without notice. Returns ``{"digest", "files", "bytes"}``. Two
+    Symbolic links and anything that is not a regular file are skipped
+    without notice. Returns ``{"digest", "files", "bytes"}``. Two
     directories with the same files, names and contents digest the same
     wherever they sit; a changed byte, name or file count changes the
     digest. The cost is one read of the directory (optimizer state
@@ -103,7 +102,7 @@ def directory_digest(path) -> dict:
         raise FileNotFoundError(f"{root} is not a directory")
     h = hashlib.blake2b(digest_size=32, person=_DIGEST_PERSON)
     files = total = 0
-    for file in sorted(p for p in root.rglob("*") if p.is_file()):
+    for file in sorted(p for p in root.rglob("*") if p.is_file() and not p.is_symlink()):
         relative = file.relative_to(root).as_posix()
         try:
             size = file.stat().st_size
@@ -180,6 +179,9 @@ def resume_model_checkpoint(replay: ReservoirReplay, args, global_step: int) -> 
     relocated checkpoint), the trainer argument ``resume_from_checkpoint``
     when it names a directory, else ``output_dir/checkpoint-N``.
     """
+    limit = getattr(args, "save_total_limit", None)
+    if isinstance(replay.buffer, DurableRolloutBuffer) and limit is not None and limit < 2:
+        raise ValueError("durable replay requires save_total_limit >= 2")
     override = getattr(replay, "model_checkpoint", None)
     if override is not None:
         return Path(override)

@@ -67,7 +67,7 @@ the source was, not to where the data truly came from.
 uv run python -m demo.reproducible_grpo            # three CPU runs, about a minute
 ```
 
-This runs the Phase 2 GRPO integration (`ReservoirGRPOTrainer` on TRL's
+This runs the TRL GRPO integration (`ReservoirGRPOTrainer` on TRL's
 tiny Qwen2 test model) three times: **a** and **b** with the same seeds,
 **c** with a different data seed. The committed result
 (`results/reproducible_grpo_report.json`, logs under
@@ -192,29 +192,37 @@ provider compliant.
 
 ## Costs
 
-From `results/attestation_overhead.json` (medians of three on an Apple
-Silicon laptop, 2000 groups of 8 rollouts of 256 tokens, 200 batches of
-64, pure-Python buffer):
+From `results/attestation_overhead.json` (the 0.6.0 working tree on an
+Apple Silicon laptop shared with other work, load average about
+9; 2000 groups of 8 rollouts of 256 tokens, 200 batches of 64,
+pure-Python buffer; medians of 5 interleaved repeats after a warm-up, with the
+collector paused; the file gives each figure's range over the repeats):
 
-| configuration | add_group, µs per rollout | sample, µs per draw | storage |
+| configuration | add_group, µs per rollout | sample, µs per draw (steady) | storage |
 |---|---|---|---|
-| no attestation | 32 | 15 | |
-| in-memory log | 103 | 18 | |
-| log file | 112 | 19 | 465 bytes per record |
-| log file and manifest | 187 | 19 | plus 1643 bytes per inserted rollout |
+| no attestation | 27.0 | 14.9 | |
+| in-memory log | 114 | 15.1 | |
+| log file | 110 | 15.8 | 465 bytes per record |
+| log file and manifest | 237 | 15.7 | plus 1643 bytes per inserted rollout |
 
-Verifying a log with its manifest takes about 0.3 seconds per 10,000
+The sample column is a second run of 200 batches on the same buffer. In
+the first 200 an unattested buffer averages 37.0 µs per draw, because
+it computes each group's content digests on the first sample that touches
+the group, where an attested buffer computed them on insert.
+
+Verifying a log with its manifest takes about 0.44 seconds per 10,000
 records; building the transcript about 0.01 seconds per 10,000 records.
-These are the costs of reproducibility and verification. Generation
-dominates a GRPO step by orders of magnitude; no training-quality claim is
-made for replay (`docs/nonclaims.md` §10, §13).
+These are the costs of reproducibility and verification. Generation time
+is not measured here; no training-quality claim is made for replay (`docs/nonclaims.md` §10, §13).
 
 ## Limits
 
 - Without the manifest, a chain-consistent change to an insert's content
   digest or source is not detectable. The mutation campaign measures this:
   3 such forgeries survive the log-only check and all 3 are rejected with
-  the manifest (`results/mutation_campaign_report.json`, `content_limit`).
+  the unedited manifest (`results/mutation_campaign_report.json`,
+  `content_limit`); editing the log and the manifest together is not
+  detected.
 - A log written before version 0.5.0 does not record its seed, buffer id
   and `beta`; for such a log a draw moved inside its leaf's range or a
   reweighted sample passes the checker. The campaign measures this

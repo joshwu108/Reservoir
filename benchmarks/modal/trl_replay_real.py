@@ -254,6 +254,7 @@ def run_grpo(
             "capacity": capacity, "half_life": half_life, "max_policy_age": max_policy_age,
             "buffer_seed": buffer_seed, "beta_is": replay.beta, "source": source,
             "device": "cpu" if use_cpu else str(trainer.model.device), "extra_config": extra_config or {},
+            "gpu_name": None if use_cpu or not torch.cuda.is_available() else torch.cuda.get_device_name(0),
             "torch_deterministic": torch_deterministic,
             "bf16": args.bf16, "fp16": args.fp16, "gradient_checkpointing": args.gradient_checkpointing,
         },
@@ -300,8 +301,10 @@ def write_results(results: dict, label: str, out_dir: Path = RESULTS_DIR) -> Pat
         "returncode": verify.returncode,
         "output": (verify.stdout + verify.stderr).strip(),
     }
+    from benchmarks.provenance import gpu_of, stamped
+
     out = out_dir / f"{label}.json"
-    out.write_text(json.dumps(results, indent=2))
+    out.write_text(json.dumps(stamped(results, gpu=gpu_of(results)), indent=2))
     if verify.returncode != 0:
         raise RuntimeError(
             f"the independent checker rejected the run's log ({results['attestation']['checker']['output']}); "

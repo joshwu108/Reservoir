@@ -2,14 +2,14 @@
 
 The reproducibility demo (``demo/reproducible_grpo.py``) on a GPU with HF
 ``generate``: the same three runs as the CPU demo (**a** and **b** with the
-same seeds, **c** with a different data seed), on a T4, with the Phase 2
-image and model. Every log is verified with its manifest and the pairs are
+same seeds, **c** with a different data seed), on a T4, with the TRL
+replay run's image and model (``trl_replay_real``). Every log is verified with its manifest and the pairs are
 compared with ``checker.diff``.
 
 HF generation on a GPU is not guaranteed to be bitwise reproducible run to
 run, so one invocation runs the triplet twice, in two containers:
 
-- ``plain``: PyTorch defaults, which is how the Phase 2 integration ran.
+- ``plain``: PyTorch defaults, which is how the TRL replay run ran.
 - ``deterministic``: ``CUBLAS_WORKSPACE_CONFIG=:4096:8`` on the image and
   ``torch.use_deterministic_algorithms(True, warn_only=True)`` plus
   deterministic cuDNN in the process. The two differ in which kernels
@@ -118,6 +118,7 @@ def write_triplet(results: dict, out_dir: Path, label: str) -> dict:
             "head_digest": result["attestation"]["head_digest"], "records": result["attestation"]["records"],
             "examples_committed": len(verified.content.history), "totals": result["totals"],
             "versions": result["versions"], "device": result["config"]["device"],
+            "gpu_name": result["config"].get("gpu_name"),
             "torch_deterministic": result["config"]["torch_deterministic"],
             "extra_config": result["config"]["extra_config"],
             "wall_clock_seconds": result["wall_clock_seconds"],
@@ -147,6 +148,9 @@ def write_triplet(results: dict, out_dir: Path, label: str) -> dict:
             "UNEXPECTED": "a difference not attributable to the generated data; inspect diffs",
         },
     }
+    from benchmarks.provenance import stamped
+
+    report = stamped(report, gpu=runs["a"]["gpu_name"])
     (out_dir / "report.json").write_text(json.dumps(report, indent=2))
     return report
 

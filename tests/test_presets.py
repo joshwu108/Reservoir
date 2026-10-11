@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from reservoir.integrations._trl_staleness import PRESET_RULES, PRESETS, StalenessPolicy
 from reservoir.integrations.trl import ReservoirReplay, build_trainer_class
 
 
@@ -13,10 +14,29 @@ def test_grpo_presets_derive_valid_schedule_and_explain_choices():
         assert replay.buffer.capacity >= 8
         assert replay.buffer.params.half_life > 0
         assert replay.buffer.params.max_policy_age <= 2000
-        assert set(choices) == {"capacity", "half_life", "max_policy_age",
-                                "max_log_ratio", "max_declines_per_step"}
-    assert ReservoirReplay.for_grpo(8, 2000, 2, "off")[0].max_log_ratio is None
-    assert ReservoirReplay.for_grpo(8, 2000, 2, "async")[0].max_log_ratio == 10.0
+        assert set(choices) == {"capacity", "half_life", "max_policy_age", "staleness_policy"}
+        assert choices["staleness_policy"].startswith(profile)
+
+
+@pytest.mark.parametrize("profile", ["conservative", "async", "off"])
+def test_a_profile_name_is_one_rule_everywhere(profile):
+    replay, _ = ReservoirReplay.for_grpo(8, 2000, 2, profile=profile)
+    assert replay.policy == StalenessPolicy.preset(profile) == PRESETS[profile]
+    assert replay.policy == StalenessPolicy(**PRESET_RULES[profile])
+    assert ReservoirReplay(capacity=8, staleness_policy=profile).policy == replay.policy
+
+
+def test_presets_carry_no_legacy_gate():
+    # The 0.6.0 for_grpo profiles were a max_log_ratio gate (5.0 with zero declines allowed, 10.0);
+    # the profile is now the staleness rule alone.
+    for profile in PRESET_RULES:
+        replay, _ = ReservoirReplay.for_grpo(8, 2000, 2, profile=profile)
+        assert replay.max_log_ratio is None and replay.policy.max_declines_per_step is None
+
+
+def test_unknown_profile_names_the_choices():
+    with pytest.raises(ValueError, match="async"):
+        ReservoirReplay.for_grpo(8, 2000, 2, profile="aggressive")
 
 
 @pytest.mark.parametrize("args", [(0, 10, 1), (8, 0, 1), (8, 10, True)])

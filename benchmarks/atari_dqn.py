@@ -294,8 +294,11 @@ def train(args=None):
         out_path = Path(args.output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         final_mean = float(np.mean(episodic_returns[-100:])) if episodic_returns else 0.0
+        from benchmarks.provenance import stamped
+
+        gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
         with open(out_path, "w") as f:
-            json.dump({
+            json.dump(stamped({
                 "game": args.env_id,
                 "buffer_type": args.buffer_type,
                 "seed": args.seed,
@@ -303,7 +306,7 @@ def train(args=None):
                 "episode_rewards": episodic_returns,
                 "final_mean_reward_100ep": final_mean,
                 "duration_seconds": round(duration, 1),
-            }, f, indent=2)
+            }, gpu=gpu), f, indent=2)
         print(f"Result written to {args.output}")
 
     return episodic_returns

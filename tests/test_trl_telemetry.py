@@ -1,9 +1,9 @@
 """Tests for the adapter's replay-health telemetry and drift gate.
 
 Every generation step the adapter measures replay fraction, dead and
-near-dead groups, the effective sample size and staleness of the replayed
-rows and the log-ratio between stored behavior logprobs and the current
-policy; it logs them under ``reservoir/`` in TRL's metrics and writes a
+near-dead groups, the sampling-design effective sample size and staleness
+of the replayed rows and the per-token mean log-ratio between stored
+behavior logprobs and the current policy; it logs them under ``reservoir/`` in TRL's metrics and writes a
 ``telemetry`` record the checker recomputes where it can. With
 ``max_log_ratio`` set, rows that drifted too far are declined: the dead
 row stays dead, the entry is evicted with reason ``drift``, the witness
@@ -55,27 +55,29 @@ def test_metrics_and_record_for_a_replayed_step():
     point = r.last_telemetry
     assert point.batch_rows == 4 and point.replaced_rows == 2 and point.declined_rows == 0
     assert point.dead_groups == 1 and point.near_dead_groups == 0
-    assert point.ess == pytest.approx(sum(float(w) for w in r.last_replay.is_weights) ** 2
+    assert point.sampling_design_ess == pytest.approx(sum(float(w) for w in r.last_replay.is_weights) ** 2
                                       / sum(float(w) ** 2 for w in r.last_replay.is_weights))
     assert point.staleness_max == 1 and point.staleness_mean == 1.0      # stored at step 1, replayed at step 2
     assert point.log_ratio_mean_abs == 0.0 and point.log_ratio_max_abs == 0.0   # current policy == behavior
     metrics = trainer._metrics["train"]
     assert metrics[METRIC_PREFIX + "replay_fraction"] == [0.0, 0.5]
-    assert metrics[METRIC_PREFIX + "ess"][-1] == pytest.approx(point.ess)
+    assert metrics[METRIC_PREFIX + "sampling_design_ess"][-1] == pytest.approx(point.sampling_design_ess)
     assert set(k for k in metrics if k.startswith(METRIC_PREFIX)) >= {
         METRIC_PREFIX + n for n in ("replay_fraction", "replaced_rows", "declined_rows", "dead_groups",
-                                     "near_dead_groups", "ess", "ess_fraction", "staleness_mean",
+                                     "near_dead_groups", "sampling_design_ess", "sampling_design_ess_fraction",
+                                     "staleness_mean",
                                      "staleness_max", "log_ratio_mean_abs", "log_ratio_max_abs")}
+    assert not any(k in metrics for k in (METRIC_PREFIX + "ess", METRIC_PREFIX + "ess_fraction"))
     assert r.stats["telemetry_forwards"] == 1
     records = r.buffer.attestation_log.records
     telemetry = [rec for rec in records if rec["op"] == "telemetry"]
     assert len(telemetry) == 2
     assert telemetry[0]["replaced_rows"] == 0 and "sample_op_counter" not in telemetry[0]
     assert telemetry[1]["sample_op_counter"] == 1 and telemetry[1]["reported"] == ["log_ratio_max_abs", "log_ratio_mean_abs"]
-    assert Fraction(int(telemetry[1]["ess_num"]), int(telemetry[1]["ess_den"])) == pytest.approx(point.ess)
+    assert Fraction(int(telemetry[1]["ess_num"]), int(telemetry[1]["ess_den"])) == pytest.approx(point.sampling_design_ess)
     result = verify_chain(records)
     assert [t.step for t in result.content.telemetry] == [1, 2]
-    assert float(result.content.telemetry[1].ess) == pytest.approx(point.ess)
+    assert float(result.content.telemetry[1].ess) == pytest.approx(point.sampling_design_ess)
 
 
 def test_log_ratio_measures_policy_drift():
@@ -84,11 +86,36 @@ def test_log_ratio_measures_policy_drift():
     trainer.generate(step=1)                 # stored with behavior logprobs LOGP
     trainer.current_logp = LOGP - 0.25       # the policy moved before the next step
     trainer.generate(step=2)
-    # Each replayed row sums (current - behavior) over its tokens: -0.25 per token.
-    lengths = [len(rollout) for rollout in r.last_replay.rollouts]
-    expected = [0.25 * n for n in lengths]
-    assert r.last_telemetry.log_ratio_max_abs == pytest.approx(max(expected))
-    assert r.last_telemetry.log_ratio_mean_abs == pytest.approx(sum(expected) / len(expected))
+    # Each replayed row is the mean of (current - behavior) over its tokens: -0.25, whatever its length.
+    assert r.last_telemetry.log_ratios == pytest.approx([-0.25] * len(r.last_replay.rollouts))
+    assert r.last_telemetry.log_ratio_max_abs == pytest.approx(0.25)
+    assert r.last_telemetry.log_ratio_mean_abs == pytest.approx(0.25)
+
+
+def test_log_ratio_is_the_token_mean_so_exp_is_the_sequence_level_ratio():
+    # Rows of different lengths with per-token drift d: a sum would scale with length, the mean does not,
+    # and exp(mean) is the ratio TRL's importance_sampling_level="sequence" forms from the same tokens.
+    from reservoir.integrations._trl_telemetry import sequence_log_ratios
+
+    class Model:
+        args = type("Args", (), {"per_device_train_batch_size": 2})()
+        model = None
+
+        def _get_per_token_logps_and_entropies(self, model, input_ids, attention_mask, logits_to_keep, batch_size=None):
+            return torch.tensor([[-1.0, -1.5, -2.0, -2.0], [-1.0, -1.0, -1.0, -1.0]]), None, None
+
+    output = {
+        "prompt_ids": torch.zeros((2, 1), dtype=torch.long), "prompt_mask": torch.ones((2, 1), dtype=torch.long),
+        "completion_ids": torch.zeros((2, 4), dtype=torch.long),
+        "completion_mask": torch.tensor([[1, 1, 1, 0], [1, 1, 0, 0]]),
+        "old_per_token_logps": torch.tensor([[-1.5, -1.5, -1.5, float("nan")], [-1.25, -1.25, 0.0, 0.0]]),
+    }
+    ratios = sequence_log_ratios(output, [0, 1], Model())
+    assert ratios == pytest.approx([(0.5 + 0.0 - 0.5) / 3, 0.25])    # masked NaN ignored, divided by token count
+    mask = output["completion_mask"].bool()
+    per_token = torch.where(mask, torch.tensor([[-1.0, -1.5, -2.0, -2.0], [-1.0] * 4]) - output["old_per_token_logps"], 0.0)
+    trl_sequence_ratio = torch.exp(per_token.sum(-1) / mask.sum(-1).clamp(min=1))
+    assert [float(torch.exp(torch.tensor(r))) for r in ratios] == pytest.approx(trl_sequence_ratio.tolist())
 
 
 def test_telemetry_off_skips_the_forward_and_the_record():

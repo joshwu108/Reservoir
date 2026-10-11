@@ -70,6 +70,15 @@ buffer sizes, priority values, or operation sequences. It is a falsification too
 if the model checker finds a counterexample in the small scope, the protocol is wrong.
 If it finds no counterexample, that is evidence (not proof) of correctness.
 
+The model covers the seven-stage intent, segment and rename snapshot
+protocol only. The rollout buffer's command log, epochs, compaction,
+checkpoints, restore and attestation files are not modelled. The
+no-parent-fsync variant (`spec/NoParentFsync.tla`) uses the correct
+recovery action; its violation comes from an action that assigns a torn
+state directly, so it shows that the invariant detects a torn state, not
+that leaving out the directory fsync produces one. No TLC output or state
+count is committed.
+
 
 ### 9. Age Decay Semantics
 
@@ -248,10 +257,15 @@ therefore untested here.
 
 ### 19. Attestation Overhead
 
-The numbers in `results/attestation_overhead.json` measure the pure-Python
-buffer on one laptop and describe the relative cost of attestation and
-verification. They are not throughput claims (§1) and say nothing about
-training quality (§10, §13).
+The numbers in `results/attestation_overhead.json` and
+`results/durable_overhead.json` measure the pure-Python buffer on one
+laptop that was running other work at the time (the files record the load
+average and each figure's range over the repeats), and describe the
+relative cost of attestation, durability and verification. They are not
+throughput claims (§1) and say nothing about training quality (§10, §13).
+Where a cost is paid also differs between configurations: an unattested
+buffer computes content digests on the first sample of a group, an
+attested one on insert.
 
 
 ### 20. Telemetry
@@ -394,14 +408,18 @@ RNG. No claim is made about throughput or about training quality (§10,
 ### 25. Staleness Policy
 
 The staleness policy (`docs/design.md` §13) is a declared rule, not a
-result. No claim is made that its age bound, ESS floor or group-mass cap
-is optimal, that any preset improves reward, or that the weights it
+result. No claim is made that its age bound, sampling-design ESS floor or
+group-mass cap is optimal, that any preset improves reward, or that the weights it
 produces are unbiased. The sequence-level importance ratios the policy
 reasons about are the unbiased family; Martingale's exact bench shows
 per-token clipping is biased; and the cap and the floor are deliberate
-departures from unbiasedness, trading bias for variance. The trade is
-measured by the staleness sweep (D3 of
-`planning/2026-10-06-staleness-controller.md`), not asserted here.
+departures from unbiasedness, trading bias for variance. The staleness
+sweep (`docs/staleness.md`) is built to measure the trade and has not been
+run on a GPU; nothing about it is asserted here. The group-mass cap
+rescales advantages, which equals rescaling the ratio only for a loss
+linear in `w · exp(r) · advantage` (REINFORCE or truncated importance
+sampling at sequence level); under TRL's clipped losses it bounds a proxy
+(`docs/design.md` §13.2).
 
 What the checker verifies is that every recorded decision follows the
 declared policy from the recorded inputs. The inputs it cannot
@@ -409,9 +427,13 @@ recompute are declared: the sequence log-ratios are measurements of a
 forward the log does not see (a dishonest adapter could record any
 finite value, and the policy would be verified against it), and the verl
 adapter's group labels are declared, since the log does not see `uid`s.
-The ESS floor is over the buffer's importance weights, which correct for
-prioritized sampling, not over the policy ratios; the two are distinct
-quantities and the floor says nothing about the latter. The rows of
+The sampling-design ESS floor is over the buffer's sampling weights, which
+correct for prioritized sampling, not over the policy ratios; the two are
+distinct quantities, the floor says nothing about the latter, and its
+value does not change with staleness. Which reduction produced the
+recorded log-ratios (the per-token mean the TRL adapter now writes, or the
+sum of earlier logs and of the verl adapter) is not in the record; the
+checker replays the decisions from the values either way. The rows of
 declined draws are declared too: the batch witness binds a row only to a
 placed draw, so a declined draw's row (and hence its group, when the
 group is not fixed by `group_size`) is checked for shape and distinctness
