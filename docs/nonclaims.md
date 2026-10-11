@@ -171,9 +171,8 @@ once per optimizer step, the later generations of that step replay nothing.
 The committed runs under `benchmarks/modal/results/` predate the floor:
 some of their replayed rows were stored at the same step (9 of 56 in the
 two-A10G TRL log, 10 of 56 in the verl T4 log) and their sample records
-carry neither `min_entry_age` nor per-draw `entry_version`. The fields are
-recorded for a checker; this repository's checker is not claimed to verify
-them until it does.
+carry neither `min_entry_age` nor per-draw `entry_version`, so the checker
+has no entry ages to confirm in them.
 
 ### 14. TRL Integration Scope
 
