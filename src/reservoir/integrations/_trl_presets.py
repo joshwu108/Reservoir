@@ -11,6 +11,7 @@ from pathlib import Path
 
 from reservoir.decay import DecayParams, MAX_HALF_LIFE
 from reservoir.integrations._trl_lifecycle import on_train_end
+from reservoir.integrations._trl_staleness import PRESET_RULES
 
 _UNSET = object()
 
@@ -23,12 +24,17 @@ def _positive_int(value: int, name: str) -> int:
 
 def for_grpo(cls, num_generations: int, max_steps: int,
              per_device_train_batch_size: int, profile: str = "conservative"):
-    """Build a replay and return it with reasons for every derived setting."""
+    """Build a replay and return it with reasons for every derived setting.
+
+    ``profile`` names a staleness rule in ``PRESET_RULES``, the table
+    ``StalenessPolicy.preset`` reads, so ``for_grpo(profile="conservative")``
+    and ``staleness_policy="conservative"`` are the same rule.
+    """
     g = _positive_int(num_generations, "num_generations")
     steps = _positive_int(max_steps, "max_steps")
     batch = _positive_int(per_device_train_batch_size, "per_device_train_batch_size")
-    if profile not in ("conservative", "async", "off"):
-        raise ValueError("profile must be 'conservative', 'async', or 'off'")
+    if profile not in PRESET_RULES:
+        raise ValueError(f"profile must be one of {sorted(PRESET_RULES)}, got {profile!r}")
 
     # Keep roughly eight optimizer batches of rollouts, capped by the run.
     capacity = max(g, min(steps * batch, 8 * batch * g))
@@ -40,21 +46,15 @@ def for_grpo(cls, num_generations: int, max_steps: int,
     max_age = min(max_age, max(0, 31 - capacity_bits) * half_life)
     DecayParams(half_life, max_age, capacity)
 
-    gates = {
-        "conservative": (5.0, 0),
-        "async": (10.0, None),
-        "off": (None, None),
-    }
-    max_log_ratio, max_declines = gates[profile]
-    replay = cls(capacity=capacity, half_life=half_life,
-                 max_policy_age=max_age, max_log_ratio=max_log_ratio,
-                 max_declines_per_step=max_declines)
+    rule = PRESET_RULES[profile]
+    replay = cls(capacity=capacity, half_life=half_life, max_policy_age=max_age,
+                 staleness_policy=profile if rule else None)
+    stages = ", ".join(f"{name}={value}" for name, value in rule.items()) or "no stage on"
     explanation = {
         "capacity": f"{capacity} rows: eight batches of {batch} × {g} generations, capped by {steps} steps",
         "half_life": f"{half_life} optimizer steps: up to four generation groups, capped by run length",
         "max_policy_age": f"{max_age} optimizer steps: up to four half-lives, within the 64-bit tree budget",
-        "max_log_ratio": f"{max_log_ratio}: {profile} drift gate; None disables it",
-        "max_declines_per_step": f"{max_declines}: {profile} decline limit; None permits declines",
+        "staleness_policy": f"{profile}: {stages} (StalenessPolicy.preset({profile!r}))",
     }
     return replay, explanation
 

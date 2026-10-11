@@ -1,8 +1,8 @@
 {
-  "total": 315,
-  "passed": 315,
+  "total": 330,
+  "passed": 330,
   "torn": 0,
-  "cut_fired": 315,
+  "cut_fired": 330,
   "cut_never_fired": 0,
   "failed": 0,
   "results": [
@@ -3149,6 +3149,156 @@
     {
       "op": "rollout_restore",
       "cut": "after_restore_before_wal_reset",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_checkpoint",
+      "cut": "after_checkpoint_stage_fsync",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_checkpoint",
+      "cut": "after_checkpoint_stage_fsync",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_checkpoint",
+      "cut": "after_checkpoint_stage_fsync",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_checkpoint",
+      "cut": "after_checkpoint_stage_fsync",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_checkpoint",
+      "cut": "after_checkpoint_stage_fsync",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_checkpoint",
+      "cut": "after_checkpoint_old_rename",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_checkpoint",
+      "cut": "after_checkpoint_old_rename",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_checkpoint",
+      "cut": "after_checkpoint_old_rename",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_checkpoint",
+      "cut": "after_checkpoint_old_rename",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_checkpoint",
+      "cut": "after_checkpoint_old_rename",
+      "seed": 4,
+      "cut_fired": true,
+      "matches_pre": true,
+      "matches_post": false,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_checkpoint",
+      "cut": "after_checkpoint_new_rename",
+      "seed": 0,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_checkpoint",
+      "cut": "after_checkpoint_new_rename",
+      "seed": 1,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_checkpoint",
+      "cut": "after_checkpoint_new_rename",
+      "seed": 2,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_checkpoint",
+      "cut": "after_checkpoint_new_rename",
+      "seed": 3,
+      "cut_fired": true,
+      "matches_pre": false,
+      "matches_post": true,
+      "torn": false,
+      "passed": true
+    },
+    {
+      "op": "rollout_checkpoint",
+      "cut": "after_checkpoint_new_rename",
       "seed": 4,
       "cut_fired": true,
       "matches_pre": false,

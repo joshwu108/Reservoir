@@ -239,5 +239,8 @@ def main(max_steps: int = 12, seed: int = 42, buffer_seed: int = 0):
     out_dir = RESULTS_DIR / f"repro_vllm_{GPU_LABEL}_{max_steps}steps_seed{seed}"
     report = write_triplet(results, out_dir, f"vllm-{VLLM_VERSION}-batch-invariant-server")
     report["vllm_server"] = {k: v for k, v in results["a"]["vllm_server"].items() if k != "log_tail"}
+    from benchmarks.provenance import stamped
+
+    report = stamped(report, gpu=report["provenance"]["gpu"])
     (out_dir / "report.json").write_text(json.dumps(report, indent=2))
     print_report(report, out_dir)

@@ -1,8 +1,51 @@
 {
+  "provenance": {
+    "reservoir_version": "0.6.0",
+    "commit": "f45b5386acc7dc54cae8a442f2cfe7db8217a773",
+    "changed_files": [
+      ".github/workflows/ci.yml",
+      "benchmarks/atari_dqn.py",
+      "benchmarks/attestation_overhead.py",
+      "benchmarks/durable_overhead.py",
+      "benchmarks/modal/nccl_probe.py",
+      "benchmarks/modal/reproducible_grpo_real.py",
+      "benchmarks/modal/reproducible_grpo_vllm.py",
+      "benchmarks/modal/staleness_sweep.py",
+      "benchmarks/modal/trl_replay_real.py",
+      "benchmarks/staleness/report.py",
+      "campaigns/crash.py",
+      "campaigns/divergence.py",
+      "docs/design.md",
+      "docs/nonclaims.md",
+      "docs/preregistration-deviations.md",
+      "docs/reproducible-training.md",
+      "docs/staleness.md",
+      "results/attestation_overhead.json",
+      "results/crash_campaign_report.json",
+      "results/durable_overhead.json",
+      "src/reservoir/durable_rollout.py",
+      "src/reservoir/integrations/_trl_lifecycle.py",
+      "src/reservoir/integrations/_trl_presets.py",
+      "src/reservoir/integrations/_trl_staleness.py",
+      "src/reservoir/integrations/_trl_telemetry.py",
+      "src/reservoir/rollout_wal.py",
+      "tests/test_durable_snapshot.py",
+      "tests/test_durable_wal.py",
+      "tests/test_presets.py",
+      "tests/test_quarantine.py",
+      "tests/test_staleness_sweep.py",
+      "tests/test_trl_checkpoint.py",
+      "tests/test_trl_staleness.py",
+      "tests/test_trl_telemetry.py",
+      "tests/test_verl_replay.py"
+    ],
+    "commit_dirty": true,
+    "date": "2026-10-11T04:26:57Z",
+    "python": "3.12.14",
+    "machine": "Darwin arm64",
+    "gpu": null
+  },
   "benchmark": "attestation_overhead",
-  "reservoir_version": "0.5.0",
-  "python": "3.14.2",
-  "machine": "Darwin arm64",
   "workload": {
     "groups": 2000,
     "group_size": 8,
@@ -11,46 +54,171 @@
     "batch_size": 64,
     "capacity": 10000,
     "version_advance_every_groups": 10,
-    "repeats": 3
+    "repeats": 5,
+    "warmup_passes": 1,
+    "gc": "collected before and disabled during each timed loop",
+    "order": "configurations interleaved within each repeat"
+  },
+  "load_average_1_5_15_min": {
+    "before": [
+      8.66,
+      7.51,
+      7.12
+    ],
+    "after": [
+      6.9,
+      8.0,
+      7.44
+    ]
   },
   "configs": {
     "none": {
       "config": "none",
-      "add_group_us_per_rollout": 31.611339160008356,
-      "sample_us_per_draw": 15.42075930046849,
-      "records": 0
+      "add_group_us_per_rollout": 27.008464425307466,
+      "add_group_us_per_rollout_median_call": 6.374997610691935,
+      "sample_us_per_draw": 36.9523562676477,
+      "sample_us_per_draw_median_call": 21.470703359227628,
+      "records": 0,
+      "sample_us_per_draw_steady": 14.88223188516713,
+      "spread": {
+        "add_group_us_per_rollout": [
+          25.62938847404439,
+          33.100570257374784
+        ],
+        "add_group_us_per_rollout_median_call": [
+          6.1093742260709405,
+          6.473870598711073
+        ],
+        "sample_us_per_draw": [
+          35.9710443763106,
+          38.28017480827839
+        ],
+        "sample_us_per_draw_median_call": [
+          21.33560928996303,
+          22.642905605607666
+        ],
+        "sample_us_per_draw_steady": [
+          14.58979382277903,
+          15.843313758523436
+        ]
+      }
     },
     "memory": {
       "config": "memory",
-      "add_group_us_per_rollout": 102.47517276911822,
-      "sample_us_per_draw": 17.541018657993845,
-      "records": 27298
+      "add_group_us_per_rollout": 114.21656058882945,
+      "add_group_us_per_rollout_median_call": 79.46356345200911,
+      "sample_us_per_draw": 16.152802609212813,
+      "sample_us_per_draw_median_call": 15.472984159714542,
+      "records": 27298,
+      "sample_us_per_draw_steady": 15.107730619092763,
+      "spread": {
+        "add_group_us_per_rollout": [
+          97.22953897653497,
+          161.17227603899664
+        ],
+        "add_group_us_per_rollout_median_call": [
+          75.3593776607886,
+          84.34637493337505
+        ],
+        "sample_us_per_draw": [
+          14.846405547359609,
+          17.689449323370354
+        ],
+        "sample_us_per_draw_median_call": [
+          14.418288628803566,
+          15.80827347424929
+        ],
+        "sample_us_per_draw_steady": [
+          14.42576711269794,
+          27.109524858133227
+        ]
+      }
     },
     "file": {
       "config": "file",
-      "add_group_us_per_rollout": 111.50036479921255,
-      "sample_us_per_draw": 18.725510799413314,
+      "add_group_us_per_rollout": 110.0601449070382,
+      "add_group_us_per_rollout_median_call": 81.03124855551869,
+      "sample_us_per_draw": 16.26831633529946,
+      "sample_us_per_draw_median_call": 15.689125120843528,
       "records": 27298,
-      "log_bytes": 12704014,
-      "log_bytes_per_record": 465.3825921312917,
-      "log_bytes_per_rollout_inserted": 794.000875
+      "log_bytes": 12704115,
+      "log_bytes_per_record": 465.3862920360466,
+      "log_bytes_per_rollout_inserted": 794.0071875,
+      "sample_us_per_draw_steady": 15.786461035531829,
+      "spread": {
+        "add_group_us_per_rollout": [
+          104.3121591610543,
+          129.47948991859448
+        ],
+        "add_group_us_per_rollout_median_call": [
+          79.68749923747964,
+          84.02087405556813
+        ],
+        "sample_us_per_draw": [
+          15.541447219220572,
+          28.17747970311757
+        ],
+        "sample_us_per_draw_median_call": [
+          15.112625078472774,
+          16.35188300497248
+        ],
+        "sample_us_per_draw_steady": [
+          15.077857656251581,
+          51.63914389868296
+        ]
+      }
     },
     "file+manifest": {
       "config": "file+manifest",
-      "add_group_us_per_rollout": 186.57696774607757,
-      "sample_us_per_draw": 18.759251397568733,
+      "add_group_us_per_rollout": 236.6416071599815,
+      "add_group_us_per_rollout_median_call": 165.89318693149835,
+      "sample_us_per_draw": 17.053134602065256,
+      "sample_us_per_draw_median_call": 16.21191404410638,
       "records": 27298,
-      "log_bytes": 12704014,
-      "log_bytes_per_record": 465.3825921312917,
-      "log_bytes_per_rollout_inserted": 794.000875,
+      "log_bytes": 12704115,
+      "log_bytes_per_record": 465.3862920360466,
+      "log_bytes_per_rollout_inserted": 794.0071875,
       "manifest_bytes": 26285370,
-      "manifest_bytes_per_rollout_inserted": 1642.835625
+      "manifest_bytes_per_rollout_inserted": 1642.835625,
+      "sample_us_per_draw_steady": 15.681020918236754,
+      "spread": {
+        "add_group_us_per_rollout": [
+          185.93647442685324,
+          242.27125145625905
+        ],
+        "add_group_us_per_rollout_median_call": [
+          161.31243683048524,
+          170.07031055982225
+        ],
+        "sample_us_per_draw": [
+          15.59372348310717,
+          31.296725360334676
+        ],
+        "sample_us_per_draw_median_call": [
+          15.097656159923645,
+          17.55468747433042
+        ],
+        "sample_us_per_draw_steady": [
+          15.020067348814337,
+          17.183472732540395
+        ]
+      }
     }
   },
   "checker": {
-    "records": 27298,
-    "verify_with_manifest_seconds_per_10k_records": 0.3094026881032452,
-    "transcript_seconds_per_10k_records": 0.009608823355858158
+    "records": 27498,
+    "verify_with_manifest_seconds_per_10k_records": 0.4385797756181008,
+    "transcript_seconds_per_10k_records": 0.011949899258032843,
+    "spread": {
+      "verify_with_manifest_seconds_per_10k_records": [
+        0.4165563404663253,
+        0.4981415317535681
+      ],
+      "transcript_seconds_per_10k_records": [
+        0.011316747405651015,
+        0.014437307798639573
+      ]
+    }
   },
-  "note": "cost of attestation and verification only; no training-quality measurement"
+  "note": "cost of attestation and verification only; no training-quality measurement. An unattested buffer computes a group's content digests on the first sample that touches it, an attested one on insert, so that cost sits in different columns"
 }

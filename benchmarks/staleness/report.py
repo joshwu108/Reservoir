@@ -20,19 +20,22 @@ from typing import Any, Optional, Sequence
 AGES: tuple[int, ...] = (8, 32, 128)
 POLICIES: tuple[str, ...] = ("off", "gate", "staleness")
 DEFAULT_MAX_LOG_RATIO = 2.0
-"""Legacy drift gate used as the "policy on" arm until S1's StalenessPolicy lands: a replayed row whose
-absolute sequence log-ratio (sum over completion tokens of current minus stored logprob) exceeds this is
-declined. e^2 is a 7.4x sequence-probability ratio either way; at age 8 it rarely fires, at age 128 it should."""
+"""Legacy drift gate of the ``--policy-on gate`` arms: a replayed row whose absolute log-ratio exceeds this is
+declined. The TRL adapter now measures the log-ratio as the mean over completion tokens of current minus
+stored logprob (it was the sum when this value was chosen), so 2.0 bounds the per-token average: e^2 is a
+7.4x sequence-level ratio either way, and a gate this loose rarely fires at any age in the sweep."""
 
 PER_STEP_KEYS: dict[str, str] = {
     "reward": "reward",
     "dead_group_rate": "frac_reward_zero_std",
     "replaced_rows": "reservoir/replaced_rows",
     "declined_rows": "reservoir/declined_rows",
-    "ess_fraction": "reservoir/ess_fraction",
+    "ess_fraction": "reservoir/sampling_design_ess_fraction",
     "log_ratio_mean_abs": "reservoir/log_ratio_mean_abs",
     "staleness_mean": "reservoir/staleness_mean",
 }
+LEGACY_PER_STEP_KEYS: dict[str, str] = {"reservoir/sampling_design_ess_fraction": "reservoir/ess_fraction"}
+"""Metric names a log written before the sampling-design rename used; read when the new name is absent."""
 SUMMARY_FIELDS: tuple[str, ...] = (
     "train_reward_last_quarter", "eval_accuracy", "dead_group_rate", "replaced_rows", "declined_rows",
     "ess_fraction_mean", "log_ratio_mean_abs_mean", "wall_clock_seconds", "container_seconds", "dollars",
@@ -73,52 +76,30 @@ def arm_by_name(specs: Sequence[ArmSpec], name: str) -> ArmSpec:
 
 STALENESS_ESS_FLOOR = 0.5
 STALENESS_MASS_CAP = 0.25
-"""The ``_on`` arms under ``--policy-on staleness``: the ``conservative`` preset's ESS floor and group-mass cap,
-without its age bound (the sweep's age axis is the buffer's ``max_policy_age``) and without the legacy gate."""
-POLICY_KWARG_NAMES: tuple[str, ...] = ("staleness_policy", "policy")
+"""The ``_on`` arms under ``--policy-on staleness``: the ``conservative`` preset's sampling-design ESS floor and
+group-mass cap, without its age bound (the sweep's age axis is the buffer's ``max_policy_age``) and without the
+legacy gate. ``tests/test_staleness_sweep.py`` pins both to ``PRESET_RULES["conservative"]``."""
 
 
 def staleness_policy():
-    """The ``StalenessPolicy`` the sweep's ``_on`` arms use: ESS floor and mass cap only."""
+    """The ``StalenessPolicy`` the sweep's ``_on`` arms use: sampling-design ESS floor and mass cap only."""
     from reservoir.integrations._trl_staleness import StalenessPolicy
 
     return StalenessPolicy(ess_floor=STALENESS_ESS_FLOOR, mass_cap=STALENESS_MASS_CAP)
 
 
-def policy_kwarg_name(parameter_names: Sequence[str]) -> Optional[str]:
-    """Which of ``ReservoirReplay.__init__``'s parameters takes a ``StalenessPolicy``, if any yet."""
-    for name in POLICY_KWARG_NAMES:
-        if name in parameter_names:
-            return name
-    return None
-
-
 def replay_kwargs(spec: ArmSpec) -> dict:
     """The ``ReservoirReplay`` keyword arguments that turn the arm's policy on.
 
-    ``gate`` is the legacy drift gate shipped in 0.6.0. ``staleness`` is
-    S1's ``StalenessPolicy`` (planning/2026-10-06-staleness-controller.md
-    D1), passed through whichever keyword the adapter accepts for it; until
-    the adapter accepts one, the arm refuses to run rather than silently
-    training with the policy off.
+    ``gate`` is the legacy drift gate shipped in 0.6.0; ``staleness`` passes
+    ``staleness_policy()`` as ``staleness_policy``.
     """
     if spec.policy == "off":
         return {}
     if spec.policy == "gate":
         return {"max_log_ratio": spec.max_log_ratio, "max_declines_per_step": None}
     if spec.policy == "staleness":
-        import inspect
-
-        from reservoir.integrations.trl import ReservoirReplay
-
-        name = policy_kwarg_name(list(inspect.signature(ReservoirReplay.__init__).parameters))
-        if name is None:
-            raise NotImplementedError(
-                "ReservoirReplay does not accept a StalenessPolicy yet (none of "
-                f"{POLICY_KWARG_NAMES} in its signature); update benchmarks.staleness.report.replay_kwargs "
-                "when S1 wires the policy into the adapter, or run with --policy-on gate"
-            )
-        return {name: staleness_policy()}
+        return {"staleness_policy": staleness_policy()}
     raise ValueError(f"unknown policy {spec.policy!r}; expected one of {POLICIES}")
 
 
@@ -152,7 +133,8 @@ def per_step_series(log_history: list[dict]) -> dict[str, list]:
     entries = [e for e in log_history if "step" in e and "reward" in e]
     series: dict[str, list] = {"step": [int(e["step"]) for e in entries]}
     for name, key in PER_STEP_KEYS.items():
-        series[name] = [e.get(key) for e in entries]
+        legacy = LEGACY_PER_STEP_KEYS.get(key)
+        series[name] = [e.get(key, e.get(legacy) if legacy else None) for e in entries]
     return series
 
 
@@ -299,7 +281,9 @@ def build_report(run_dir: Path, policy_on: Optional[str] = None, max_log_ratio: 
         arm["summary"] = {f: mean_std([run.get(f) for run in clean]) for f in SUMMARY_FIELDS}
     first = records[0]
     runs = [run for arm in arms.values() for run in arm["runs"]]
-    return {
+    from benchmarks.provenance import gpu_of, stamped
+
+    return stamped({
         "experiment": "staleness_sweep",
         "generated": _dt.date.today().isoformat(),
         "run_dir": str(run_dir),
@@ -321,7 +305,7 @@ def build_report(run_dir: Path, policy_on: Optional[str] = None, max_log_ratio: 
             "gpu_seconds": sum(run["container_seconds"] for run in runs if run["container_seconds"] is not None),
             "dollars": sum(run["dollars"] for run in runs if run["dollars"] is not None),
         },
-    }
+    }, gpu=gpu_of(first))
 
 
 def _rolling(values: list, window: int) -> list:

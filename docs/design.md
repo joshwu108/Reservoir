@@ -182,6 +182,18 @@ rollout it held at sample time (insert stamps and versions are recorded
 with the sample), so a replay can never bind a witness to a later
 occupant.
 
+New rollout snapshots carry a BLAKE2b-256 digest of their canonical state,
+sequence and epoch; a changed or missing digest refuses to open. Older
+full-state snapshots without a WAL envelope remain readable. A missing
+snapshot with a non-empty WAL or attestation file also refuses to open.
+On reopen, surplus on-disk attestation records produce a warning before the
+file is rebuilt. This warning is intentional: an operation can write several
+attestation records before its WAL commit, and restoring a checkpoint can
+leave an entire abandoned timeline in the file. The same evidence can also
+indicate whole-line WAL deletion, so the warning names the discrepancy for
+investigation. A WAL line from an epoch newer than the snapshot refuses to
+open; older epochs are abandoned timelines and are skipped.
+
 A snapshot (compaction, the first write of a fresh directory, a restore)
 has no operation to apply, so it goes through `durably_snapshot`: the
 intent carries no pre-state (the committed `state.json` is the
@@ -192,25 +204,32 @@ plus two of its own around that rename (`after_snapshot_rename`,
 `after_snapshot_dir_fsync`), and the crash campaign arms all of them;
 recovery keeps the old `state.json` for an intent without a readable
 segment and installs the segment for an intent with one.
-`checkpoint(tag)` compacts and copies the snapshot under
-`checkpoints/<tag>/` with fsyncs of the file and its directory, and
-writes an optional `binding.json` beside it the same way: the TRL and
-verl adapters record there the digest of the trainer's own checkpoint
-directory (`checkpoint-N`, `global_step_N`: every regular file's relative
+`checkpoint(tag)` compacts and copies the snapshot and optional binding into
+`checkpoints/<tag>.tmp/`, fsyncs them, then renames the directory into place.
+For an existing tag it first moves the old directory to `<tag>.old/`;
+recovery restores that copy if the new rename had not completed. It removes
+an old copy after the new directory is installed. The TRL adapter requires
+`save_total_limit >= 2` when durable replay is enabled, keeping a previous
+trainer and buffer checkpoint pair through the trainer's save and rotation
+window. The model checkpoint digest skips symbolic links. The TRL and
+verl adapters record the digest of the trainer's own checkpoint
+directory (`checkpoint-N`, `global_step_N`: every non-symlink regular file's relative
 path, size and bytes under BLAKE2b-256), and `resume_from_checkpoint`
 refuses to rewind when the directory the model restarts from digests
 differently or cannot be found (`check_model_binding`; every rank is
 waited for before the owner digests, and `ReservoirReplay.model_checkpoint`
 names a relocated directory); a buffer checkpoint taken without a trainer
-directory records no digest and is not checked, and a re-taken tag drops
-its old binding before the new state lands, so a crash leaves it unbound
-rather than wrongly bound.
+directory records no digest and is not checked. A failed re-take keeps its
+previous state and binding together.
 `restore_checkpoint(tag)` writes the checkpoint state as a new snapshot
 with a fresh epoch, then resets the log; lines of the abandoned timeline
 left by a crash between the two are ignored on replay whatever their
 `seq`. Cut points: `mid_wal_write`, `after_wal_write`, `after_wal_fsync`,
-the snapshot protocol's seven, `after_snapshot_before_wal_reset` and
-`after_restore_before_wal_reset`.
+the snapshot protocol's seven, `after_snapshot_before_wal_reset`,
+`after_restore_before_wal_reset`, and the three checkpoint staging cuts
+(`after_checkpoint_stage_fsync`, `after_checkpoint_old_rename`,
+`after_checkpoint_new_rename`). The kill campaign currently passes 330/330
+cuts on macOS/APFS; this observes process crashes, not power loss.
 
 ## 4. Attestation Schema
 
@@ -317,7 +336,7 @@ def is_weight(N: int, priority_int: int, root_total: int, beta: float,
 The float-once boundary for IS weights is declared here. All arithmetic after
 the float64 evaluation of `(N·P(i))^(-β)` is exact Fraction arithmetic.
 
-## 7. Age-Decayed Priorities in 64 Bits (Phase 1 design spike)
+## 7. Age-Decayed Priorities in 64 Bits
 
 Status: primitive in `src/reservoir/decay.py`, wired into
 `DecayedPriorityTree` (`decayed_tree.py`), `RolloutBuffer`
@@ -1041,8 +1060,10 @@ The log commits; the manifest opens. A chain-consistent change to an
 insert's `content_digest` or `source` is invisible without the manifest.
 The mutation campaign measures this (`content_limit` in
 `results/mutation_campaign_report.json`): 3 such forgeries survive the
-log-only check and all 3 are rejected with the manifest. The campaign fails
-if that measurement ever changes.
+log-only check and all 3 are rejected with the unedited manifest. The
+campaign fails if that measurement ever changes. A forger who edits the
+log and the manifest together (swapping two inserts' sources in both, say)
+is not detected: the manifest opens the log, it does not attest to it.
 
 The log commits to neither a quarantine record's texts nor the manifest's
 `rewards`. A chain-consistent change to the predicate text or the note, a
@@ -1265,15 +1286,28 @@ by the checker (`reservoir_checker.staleness`).
 ### 13.1 Inputs
 
 Per draw of the sampled batch, all available at `_replay` time: the
-sequence log-ratio `r` (current minus stored behaviour logprobs, summed
-over the completion tokens; one no-grad forward over the replayed rows),
-the exact importance weight `w` from the sample record, the age in model
+log-ratio `r` (one no-grad forward over the replayed rows), the exact
+importance weight `w` from the sample record, the age in model
 versions (recomputed by the checker from the live slots), and the training
 row and group the draw would fill. The log-ratios are measurements; the
 record carries them as `float.hex()` strings (`log_ratios`, one per draw,
 non-finite values included) so the replay is bit-exact and the reported
 `log_ratio_mean_abs` / `log_ratio_max_abs` are now recomputed by the
 checker rather than carried.
+
+The TRL adapter measures `r` as the mean, over the row's completion
+tokens, of current minus stored behaviour logprobs, so `exp(r)` is the
+sequence-level ratio TRL forms under `importance_sampling_level=
+"sequence"` (`exp` of the masked token mean). Logs written before this
+change, and the verl adapter until it follows, record the sum over the
+tokens instead. The checker replays the decisions from whatever `r` the
+record carries, so both kinds of log verify; the record does not say
+which reduction produced its values, and the legacy gate's threshold
+(stage 4) compares against whichever it is.
+
+`w` is the buffer's prioritized-sampling correction `(N·P(i))^-β / w_max`.
+It corrects for the sampling design and does not depend on how stale the
+row is.
 
 ### 13.2 The four stages
 
@@ -1283,9 +1317,12 @@ Applied in this order and nowhere else; a non-finite `r` is declined first
 1. **Age bound.** `age > max_age` declines the row (reason `age`). The
    buffer's `max_policy_age` evicts on `advance`; this makes a tighter
    bound explicit per row.
-2. **ESS floor.** Over the rows still kept, the exact effective sample
-   size `(Σw)²/Σw²` of their importance weights must be at least
-   `ess_floor` times their count. While it is not, the kept row with the
+2. **Sampling-design ESS floor.** Over the rows still kept, the exact
+   Kish effective sample size `(Σw)²/Σw²` of their sampling weights must
+   be at least `ess_floor` times their count. It measures how unevenly
+   the sampler's priorities spread the batch, not how far the policy has
+   moved: a batch with the same priorities has the same value zero or 500
+   steps stale. It is not an effective sample size of policy ratios. While it is not, the kept row with the
    largest `|r|` is declined (reason `ess`; ties go to the lower draw
    position). One row always satisfies the floor, so the loop terminates.
    An `ess` decline does not evict: the batch's weight mix, not the row,
@@ -1299,8 +1336,18 @@ Applied in this order and nowhere else; a non-finite `r` is declined first
    `(1 + mass_cap)` times their count, which is the mass fresh rows in
    those slots would carry (ratio 1, weight 1). When it does, every kept
    row of the group has its advantage multiplied by the exact fraction
-   `cap / mass`. This is the group-mass cap of 2610.01896 applied to
-   replayed rows. `exp(r)` is the one transcendental: it is computed with
+   `cap / mass`. The idea follows the group-mass cap of 2610.01896, which
+   rescales the ratios; this stage rescales the advantages instead.
+   **The loss it assumes** is one whose gradient for a row is linear in
+   `w · exp(r) · advantage`: REINFORCE, or truncated importance sampling
+   with a sequence-level ratio. Under that loss, scaling the advantage by
+   `cap / mass` and scaling the ratio by it are the same. Under a
+   PPO-style clipped loss (TRL's token-level default) they differ,
+   because the clip boundary does not move with the advantage, and there
+   the cap bounds a proxy: the sequence-level ratio of the row, which the
+   per-token ratios the loss clips do not equal. With `r` the token mean
+   (§13.1), `exp(r)` is exactly the ratio TRL applies at sequence level;
+   the sum used before is not a ratio any TRL loss applies. `exp(r)` is the one transcendental: it is computed with
    the `decimal` module at 30 significant digits, which is correctly
    rounded and therefore identical on every platform, after clamping `r`
    to `±700`, and frozen to a `Fraction`; everything after it is exact.
@@ -1363,20 +1410,28 @@ are then declared inputs, like the log-ratios.
 preset name; the legacy `max_log_ratio` and `max_declines_per_step`
 keywords fill stage 4 when the policy does not set it and conflict
 otherwise. Presets: `conservative` (age 16, floor 0.5, cap 0.25), `async`
-(age 64, floor 0.3, cap 0.5), `off` (the 0.6.0 behaviour). Stages 1 to 3
+(age 64, floor 0.3, cap 0.5), `off` (the 0.6.0 behaviour). The numbers
+live in one table, `PRESET_RULES`, which both `StalenessPolicy.preset`
+and `ReservoirReplay.for_grpo(profile=...)` read, so a profile name is
+one rule everywhere; `for_grpo` no longer sets `max_log_ratio` or
+`max_declines_per_step` (its 0.6.0 profiles were the gate at 5.0 with no
+declines allowed, and at 10.0). Stages 1 to 3
 record their decisions in the telemetry record and so require
 `telemetry=True`; the legacy gate alone still runs with telemetry off,
 its declines visible only in the batch witness, as before. The verl
 adapter takes the same arguments and shares the module. Metrics:
-`reservoir/declined_age`, `declined_ess`, `declined_drift`,
-`rescaled_rows`, `mass_scale_min`.
+`reservoir/declined_age`, `declined_sampling_design_ess`,
+`declined_drift`, `rescaled_rows`, `mass_scale_min`, beside
+`reservoir/sampling_design_ess` and `sampling_design_ess_fraction`. The
+log keeps its format-3 names (`ess_floor` in the policy, reason `ess`,
+`ess_num`/`ess_den` in the telemetry record), which the checker reads.
 
 Mutation category `staleness` (`campaigns/mutation_staleness.py`) forges
 each of these fields; the campaign requires every forgery rejected. It
 also measures one limit (`staleness_limit` in the report): a policy
 parameter changed consistently on every record so that no recorded
-decision differs (a decline cap that never bound, an ESS floor looser than
-one that never declined) passes, because the checker verifies that the
+decision differs (a decline cap that never bound, a sampling-design ESS
+floor looser than one that never declined) passes, because the checker verifies that the
 decisions follow the declared policy, not which policy the adapter
 intended; the campaign fails if that measurement changes. What the policy does not claim is in
 `docs/nonclaims.md` §25.

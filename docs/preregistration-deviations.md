@@ -60,6 +60,51 @@ Runtime of the full grid, measured on an Apple Silicon laptop: about 0.01 s
 per workload at capacity 1024, 0.1 s at 16384 and 0.7 s at 131072, so about
 28 CPU-hours for the grid, or 3 to 4 hours on 8 cores with `--jobs 8`.
 
+## Two departures that remain in the code
+
+Found in review on 2026-10-08, after the final committed run, and present
+in that run. Neither is corrected, because the committed report was made
+with them; `tests/test_divergence_campaign.py` pins both as they are.
+
+| preregistered | what the code runs |
+|---|---|
+| update:sample ratios 1:1, 10:1, 100:1, as a workload interleaving updates and draws | `min(10 * r, capacity)` updates, all before the 100 draws (`updates_per_workload`): 10, 100 and 1,000 updates, so 0.1, 1 and 10 updates per draw |
+| workloads independent across cells | a workload's seed is a hash of its capacity, span and index only (`workload_seed`), so the three ratio cells of a (capacity, span) pair start from the same priorities, and the updates of the 1:1 cell are a prefix of those of the 100:1 cell |
+
+The first means the ratio axis tests the number of updates applied to a
+fresh tree, not a history in which updates and draws alternate. The second
+means the three ratio cells of a pair are not independent samples.
+
+## What the grid can detect
+
+The campaign compares a float tree whose leaves are `x^alpha` in float64
+with an exact tree whose leaves are `floor(x^alpha * 2^52)`, both built
+fresh from at most `capacity + 1,000` updates. Every leaf therefore agrees
+to within one part in 2^52, and the committed report's largest
+total-variation distance is 2.2e-16 in every cell, far below the 2^-40
+threshold. The two float idioms give identical numbers in all 27 cells.
+
+A draw diverges only if it lands between a leaf boundary's exact and float
+positions. `python -m campaigns.divergence --power 4` measures that
+probability for four workloads per cell as the summed gap between the
+exact and the float cumulative distributions
+(`campaigns.divergence.cdf_mismatch_mass`; the float descent's own
+subtraction rounding, of the same order, is not included) and writes
+`results/divergence_power.json`:
+
+| capacity | largest per-draw divergence probability measured |
+|---|---|
+| 1024 | 1.2e-13 |
+| 16384 | 2.2e-12 |
+| 131072 | 1.4e-11 |
+
+Times 100 draws per workload, the expected number of divergences is
+1.1e-06 for the committed run (200 workloads per cell) and 5.4e-05 for the
+full preregistered grid (10,000 per cell), for either idiom. The grid as
+preregistered could not be expected to find a divergence even if run in
+full, so a run of it would add little. The preregistration covers neither
+long incremental float histories nor float32 trees.
+
 ## Committed runs
 
 | date | workloads per cell | programs run | verdict |

@@ -1,7 +1,6 @@
 """benchmarks/modal/staleness_sweep.py
 
-The staleness sweep (planning/2026-10-06-staleness-controller.md, D3):
-how far behind the policy may a replayed rollout be before replaying it
+The staleness sweep: how far behind the policy may a replayed rollout be before replaying it
 hurts, and does the staleness policy recover the loss?
 
 Setup
@@ -24,10 +23,10 @@ Arms (``benchmarks/staleness/report.arm_specs``)::
     reservoir_age{8,32,128}_off  ReservoirGRPOTrainer, max_policy_age=N, no policy
     reservoir_age{8,32,128}_on   the same with the policy on
 
-"Policy on" is the 0.6.0 drift gate (``max_log_ratio``, default 2.0,
-uncapped declines) until S1's ``StalenessPolicy`` lands; ``--policy-on
-staleness`` is the one flag that switches, through
-``benchmarks.staleness.report.replay_kwargs``.
+"Policy on" is chosen by ``--policy-on`` through
+``benchmarks.staleness.report.replay_kwargs``: ``gate`` (the default) is the
+0.6.0 drift gate (``max_log_ratio`` 2.0, uncapped declines), ``staleness``
+the conservative preset's sampling-design ESS floor and group-mass cap.
 
 What every run writes
 ---------------------
@@ -250,6 +249,7 @@ def run_arm(
         "arm": spec.name, "replay": spec.replay, "policy": spec.policy, "max_policy_age": spec.max_policy_age,
         "max_log_ratio": spec.max_log_ratio, "seed": seed,
         "model": model.model_id, "model_key": model_key, "gpu": "cpu" if use_cpu else model.gpu,
+        "gpu_name": None if use_cpu or not torch.cuda.is_available() else torch.cuda.get_device_name(0),
         "price_per_hour": 0.0 if use_cpu else model.price_per_hour,
         "device": str(trainer.model.device),
         "config": {
@@ -331,8 +331,10 @@ def write_run(record: dict, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     clean = sanitize(record)
     if clean.get("attestation") is None:
+        from benchmarks.provenance import gpu_of, stamped
+
         path = out_dir / f"{label_for(clean)}.json"
-        path.write_text(json.dumps(clean, indent=2))
+        path.write_text(json.dumps(stamped(clean, gpu=gpu_of(clean)), indent=2))
         return path
     try:
         return write_results(clean, label_for(clean), out_dir)

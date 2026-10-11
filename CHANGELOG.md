@@ -7,6 +7,10 @@ minor bump may change interfaces.
 
 ## [Unreleased]
 
+Entries marked *pending* are being made on other branches and are not in
+this tree yet; they are listed so this section describes the release as a
+whole.
+
 ### Added
 
 - **Staleness sweep harness** (`benchmarks/modal/staleness_sweep.py`,
@@ -16,20 +20,125 @@ minor bump may change interfaces.
   verified by the checker before it is written, a stale-engine check that
   compares vLLM's sampling logprobs with the trainer's forward at no extra
   cost, a greedy held-out evaluation, per-run dollars, and a report and
-  ESS-vs-reward figure rebuilt offline. CPU-smoked only; GPU results
-  pending (`docs/staleness.md`).
+  figure rebuilt offline. No run record is committed and the GPU sweep has
+  not been run (`docs/staleness.md`).
 - **Staleness policy.** `ReservoirReplay(staleness_policy=...)` (TRL and
-  verl) decides per replayed row, from its sequence log-ratio, exact
-  importance weight and age: an age bound, an exact ESS floor that declines
-  the largest-|log-ratio| row first, a per-group importance-mass cap that
-  rescales a group's advantages by an exact fraction, and the 0.6.0
-  `max_log_ratio` gate as the last stage. Presets `conservative`, `async`,
-  `off`. Every decision, the policy and every draw's log-ratio (as a hex
-  float) are written to the telemetry record under log format 3 as
-  optional fields; the checker replays the decisions, recomputes the
+  verl) decides per replayed row, from its log-ratio, exact sampling
+  weight and age: an age bound, an exact sampling-design ESS floor that
+  declines the largest-|log-ratio| row first, a per-group importance-mass
+  cap that rescales a group's advantages by an exact fraction, and the
+  0.6.0 `max_log_ratio` gate as the last stage. Presets `conservative`,
+  `async`, `off`. Every decision, the policy and every draw's log-ratio
+  (as a hex float) are written to the telemetry record under log format 3
+  as optional fields; the checker replays the decisions, recomputes the
   reported log-ratio statistics and cross-checks the batch witness. New
-  eviction reason `age`. Mutation category `staleness` (34 forgeries, one measured limit).
-  `docs/design.md` §13, `docs/nonclaims.md` §25.
+  eviction reason `age`. Mutation category `staleness` (34 forgeries, one
+  measured limit). `docs/design.md` §13, `docs/nonclaims.md` §25.
+- **Benchmark provenance.** Every result JSON written under `benchmarks/`
+  starts with a `provenance` block: Reservoir version, git commit and the
+  tracked files that differed from it, UTC date, Python, machine and GPU
+  name (`benchmarks/provenance.py`); a test fails if a writer omits it.
+- **Divergence power measurement.** `python -m campaigns.divergence
+  --power N` estimates how many divergences the preregistered grid could
+  find (`results/divergence_power.json`: about 5.4e-05 for the full grid).
+  `tests/test_divergence_campaign.py` pins the campaign's grid, workload,
+  draw mapping, distance, verdict rule and its two disclosed deviations.
+- **verl in CI.** A job installs the `verl` extra on Python 3.12 and runs
+  the verl adapter tests against the real package, so the version guard
+  no longer skips.
+
+### Changed
+
+- **The ESS stage is named for what it measures.** Stage 2 of the
+  staleness policy is the *sampling-design* ESS floor: the Kish ESS of the
+  buffer's prioritized-sampling weights, which does not change with
+  staleness and is not an ESS of policy ratios. Metrics renamed:
+  `reservoir/ess` → `reservoir/sampling_design_ess`,
+  `reservoir/ess_fraction` → `reservoir/sampling_design_ess_fraction`,
+  `reservoir/declined_ess` → `reservoir/declined_sampling_design_ess`;
+  `StepTelemetry.ess` → `StepTelemetry.sampling_design_ess`. The log keeps
+  its format-3 names (`ess_floor`, reason `ess`, `ess_num`/`ess_den`), so
+  logs and the checker are unchanged. The sweep report reads either metric
+  name.
+- **The group-mass cap's proxy is the mean log-ratio.** The TRL adapter now
+  measures each replayed row's log-ratio as the mean over its completion
+  tokens, not the sum, so `exp(r)` is the sequence-level ratio TRL applies
+  under `importance_sampling_level="sequence"`. `docs/design.md` §13.2
+  states the loss the cap assumes (gradient linear in `w · exp(r) ·
+  advantage`) and that under a clipped loss it bounds a proxy. This also
+  changes what `max_log_ratio` compares against in the TRL adapter: a
+  threshold chosen for summed log-ratios is far looser on means. The verl
+  adapter still sums (*pending*).
+- **One rule per preset name.** `ReservoirReplay.for_grpo(profile=...)`
+  now applies the staleness preset of the same name from the one table
+  `PRESET_RULES` that `StalenessPolicy.preset` reads. Its 0.6.0 profiles
+  were drift gates instead (`conservative`: `max_log_ratio=5.0` with no
+  declines allowed, so one drifted row ended training; `async`: 10.0);
+  `for_grpo` no longer sets `max_log_ratio` or `max_declines_per_step`.
+- **Overhead benchmarks** warm up, pause the garbage collector during
+  timed loops, interleave configurations, time each call, record their
+  spread over repeats and the machine's load average, and repeat the
+  durable run. Re-run on the current code: `results/attestation_overhead.json`
+  and `results/durable_overhead.json` replace the 0.5.0 numbers.
+- **README guarantees** reworded to match their evidence: the mutation,
+  crash, reproducibility, adapter, sweep, attestation-cost and TLA+ rows.
+  `tests/test_readme_evidence.py` checks the README's numbers against the
+  committed JSON. The mutant total and the crash-campaign count are left
+  as placeholders until the branches that change them land.
+
+### Fixed
+
+- The checker binds a batch witness's and a telemetry record's `step` to
+  the buffer's version, and requires a sample's witness before any
+  telemetry naming it (*pending*).
+- A missing snapshot with a non-empty command log or attestation file
+  refuses to open instead of starting fresh and truncating the
+  attestation log; surplus on-disk attestation records on reopen are
+  reported; a command-log line from a future epoch refuses (*pending*).
+- Replay no longer draws rows inserted in the same step: a declared
+  minimum age, recorded in the sample record and checked by the checker
+  (*pending*).
+- Dead groups are detected from the per-function rewards rather than
+  exact-zero advantages, so float32 residue at group sizes that are not a
+  power of two no longer stores an all-equal group as live (*pending*).
+- `num_items_in_batch` (TRL) and `global_token_num` (verl) are covered by
+  the batch witness's tensor digest (*pending*).
+- A `sample()` that raises no longer advances the draw counter, so the
+  next legitimate sample still verifies; `beta` is bounded at
+  construction (*pending*).
+- The checker caps the draws of one sample record, indexes witnesses by
+  sample so verification is linear in steps, and raises `CheckerError`
+  for an oversized integer field (*pending*).
+- Snapshots carry an integrity digest checked on load; a re-taken
+  checkpoint is staged and renamed so a failure keeps the old state and
+  binding together; durable TRL runs require `save_total_limit >= 2`; the
+  checkpoint digest skips symbolic links. A snapshot written by an earlier
+  release carries no digest: it still opens, with a `RuntimeWarning`, and is
+  sealed at its next compaction (*pending*).
+- Per-record-type key whitelists in the checker; empty samples and
+  zero-row witnesses rejected; the three mutants that were rejected for
+  reasons unrelated to their names re-targeted, rejection reasons
+  asserted, and measured limits added for the chain-consistent forgeries
+  the checker cannot see (*pending*).
+- The TRL adapter refuses `sync_ref_model`, warns when dropout is on
+  without TRL's own old logprobs, refuses per-row tensors it cannot
+  shuffle with the batch, and checks the trainer's instance attributes at
+  construction (*pending*).
+- `docs/preregistration-deviations.md` discloses two remaining departures
+  of the divergence campaign (update:sample ratios run as 0.1, 1 and 10
+  updates per draw, all before the draws; workload seeds shared across the
+  ratio cells) and the power calculation. The README's share of the grid
+  run is corrected from 1% to 2% (5,400 of 270,000).
+- `docs/design.md` §10.12 and `docs/reproducible-training.md` say the
+  content forgeries are rejected with an *unedited* manifest.
+
+### Performance note
+
+- An unattested `RolloutBuffer` computes each group's content digests on
+  the first sample that touches the group, an attested one on insert; the
+  0.5.0 benchmark predates digests in sampled batches, which is why a
+  re-run showed unattested sampling slower than attested. In steady state
+  it is not (`results/attestation_overhead.json`).
 
 ## [0.6.0] - 2026-10-06
 

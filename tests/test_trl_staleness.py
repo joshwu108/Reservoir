@@ -1,7 +1,7 @@
 """Tests for the staleness policy in the TRL adapter's replay path.
 
 ``ReservoirReplay(staleness_policy=...)`` declines replayed rows by age,
-ESS floor or the legacy log-ratio gate and rescales a group's advantages
+sampling-design ESS floor or the legacy log-ratio gate and rescales a group's advantages
 under the mass cap. Every decision reaches the batch (the written
 advantage is ``reward * float(w * scale)``, the dead slot of a declined
 draw stays dead), the batch witness digests what was written, the
@@ -100,8 +100,8 @@ def test_age_bound_declines_evicts_with_reason_age_and_verifies():
 
 
 def test_mass_cap_rescales_the_group_and_the_witness_digests_the_rescaled_advantages():
-    policy = StalenessPolicy(mass_cap=0.25)
-    r, trainer, out = drifted_run(policy, drift=0.5)        # every replayed row has exp(0.5 n) > 1: the group is over mass
+    policy = StalenessPolicy(mass_cap=0.2)
+    r, trainer, out = drifted_run(policy, drift=0.5)        # every replayed row has w * exp(0.5) > 1.2: the group is over mass
     batch = r.last_replay
     point = r.last_telemetry
     assert r.stats["rescaled_rows"] == 2 and r.stats["declined_rows"] == 0 and r.stats["replaced_rows"] == 2
@@ -115,7 +115,7 @@ def test_mass_cap_rescales_the_group_and_the_witness_digests_the_rescaled_advant
     assert metrics[METRIC_PREFIX + "rescaled_rows"][-1] == 2.0
     assert metrics[METRIC_PREFIX + "mass_scale_min"][-1] == pytest.approx(float(scales[0]))
     telemetry = telemetry_of(r)
-    assert telemetry["decisions"][0]["scale_den"] != "1" and telemetry["policy"]["mass_cap"] == (0.25).hex()
+    assert telemetry["decisions"][0]["scale_den"] != "1" and telemetry["policy"]["mass_cap"] == (0.2).hex()
     verify_chain(records_of(r))
     # The same draws without the policy write larger advantages, so the witness's tensor digest differs.
     plain, _, plain_out = drifted_run(StalenessPolicy(), drift=0.5)
@@ -143,7 +143,7 @@ def test_ess_floor_declines_without_evicting():
     assert sorted(reasons, key=str) == ["ess", "None"] or reasons.count("ess") == 1
     declined = reasons.index("ess")
     assert out["advantages"][DEAD_ROWS[declined]].item() == 0.0
-    assert trainer._metrics["train"][METRIC_PREFIX + "declined_ess"][-1] == 1.0
+    assert trainer._metrics["train"][METRIC_PREFIX + "declined_sampling_design_ess"][-1] == 1.0
     verify_chain(records)
 
 

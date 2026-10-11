@@ -197,6 +197,8 @@ class TestFormatAndIsolation:
         state["attestation"] = rechained(state["attestation"])
         snapshot = json.loads((tmp_path / "buf" / "state.json").read_text())
         snapshot["buffer"] = state
+        from reservoir.durable_rollout import _snapshot_digest
+        snapshot["digest"] = _snapshot_digest({k: v for k, v in snapshot.items() if k != "digest"})
         (tmp_path / "buf" / "state.json").write_text(json.dumps(snapshot))
         (tmp_path / "buf" / "wal.jsonl").write_bytes(b"")
         again = open_buf(tmp_path)

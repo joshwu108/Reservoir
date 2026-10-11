@@ -22,7 +22,8 @@ or below it (left by a crash between writing a snapshot and resetting the
 log) are skipped. Restoring a checkpoint starts a new ``epoch``, recorded
 in the snapshot and in every later line, so lines of the abandoned
 timeline (left by a crash between the restore snapshot and the log reset)
-are ignored rather than replayed, whatever their ``seq``.
+are ignored rather than replayed, whatever their ``seq``. A line from a
+future epoch is refused.
 
 Appending is: write the line, flush, full fsync. The operation has already
 been applied in memory and validated by then; the caller returns the
@@ -133,8 +134,9 @@ class CommandLog:
         content, or a well-formed line whose ``seq`` does not follow the
         previous one of its epoch, is not something a crash produces and
         raises ``ValueError`` rather than silently dropping commands. Lines
-        of another epoch (an abandoned timeline) and lines at or below
-        ``after_seq`` (already in the snapshot) are skipped.
+        of an older epoch (an abandoned timeline) and lines at or below
+        ``after_seq`` (already in the snapshot) are skipped. A future epoch
+        is an error.
         """
         if not self.path.exists():
             return [], 0
@@ -153,7 +155,12 @@ class CommandLog:
                                   RuntimeWarning, stacklevel=2)
                 break  # torn tail: the last line is incomplete or damaged
             valid_end = newline + 1
-            if parsed.get("epoch", 0) != epoch:
+            line_epoch = parsed.get("epoch", 0)
+            if isinstance(line_epoch, bool) or not isinstance(line_epoch, int) or line_epoch < 0:
+                raise ValueError(f"{self.path} has an invalid epoch {line_epoch!r}")
+            if line_epoch > epoch:
+                raise ValueError(f"{self.path} has a future epoch {line_epoch} after snapshot epoch {epoch}")
+            if line_epoch != epoch:
                 continue
             seq = parsed["seq"]
             if expected is not None and seq != expected:

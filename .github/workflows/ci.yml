@@ -34,6 +34,29 @@ jobs:
       - name: Forgery campaign
         run: uv run --no-sync python -m campaigns.mutation
 
+  verl:
+    # The verl extra (verl 0.9.1, Python < 3.13) in its own job: the test job installs classic and trl only,
+    # so without this the version guard against the real package runs only on the manual Modal run.
+    name: verl extra (Python 3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install
+        env:
+          UV_TORCH_BACKEND: cpu
+        run: uv sync --extra verl
+      - name: verl is importable, so the guard test cannot skip
+        run: uv run --no-sync python -c "import verl; print('verl', verl.__version__)"
+      - name: verl adapter tests against the installed verl
+        run: >-
+          uv run --no-sync pytest -q -rs
+          tests/test_verl_compat.py tests/test_verl_rows.py tests/test_verl_replay.py
+          tests/test_verl_staleness.py tests/test_verl_results.py
+
   tla:
     name: TLA+ model check
     runs-on: ubuntu-latest

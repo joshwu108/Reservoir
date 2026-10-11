@@ -220,7 +220,10 @@ def handshake(label: str, extra: dict[str, str]) -> dict:
 
 
 @app.function(gpu=GPU, image=vllm_image, volumes={"/hf_cache": hf_cache}, timeout=2400)
-def probe(which: str = "both", round_name: str = "transports") -> list[dict]:
+def probe(which: str = "both", round_name: str = "transports") -> dict:
+    """The probe records, and the container's GPU name for the result file's provenance."""
+    gpu_name = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                              capture_output=True, text=True).stdout.splitlines()[:1]
     results = []
     candidates = CANDIDATES[round_name]
     if which in ("both", "plain"):
@@ -237,14 +240,18 @@ def probe(which: str = "both", round_name: str = "transports") -> list[dict]:
             print(f"handshake/{label}: {'OK' if r['ok'] else 'FAILED'} {r['seconds']}s hung={r['hung']}", flush=True)
             if r["ok"]:
                 break
-    return results
+    return {"gpu_name": gpu_name[0].strip() if gpu_name else None, "results": results}
 
 
 @app.local_entrypoint()
 def main(which: str = "both", round_name: str = "transports"):
-    results = probe.remote(which, round_name)
+    from benchmarks.provenance import stamped
+
+    probed = probe.remote(which, round_name)
+    results = probed["results"]
     out = Path(__file__).parent / "results" / f"nccl_probe_{round_name}.json"
-    out.write_text(json.dumps(results, indent=2))
+    out.write_text(json.dumps(stamped({"round": round_name, "which": which, "results": results},
+                                      gpu=probed["gpu_name"]), indent=2))
     for r in results:
         print(f"== {r['probe']}/{r['label']} env={r['env']} ok={r['ok']} hung={r['hung']} rc={r['returncodes']} {r['seconds']}s")
         for name, tail in r["logs"].items():

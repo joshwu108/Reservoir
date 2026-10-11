@@ -86,33 +86,28 @@ def test_replay_kwargs_off_and_gate():
         replay_kwargs(ArmSpec("x", True, 8, "bogus", None))
 
 
-def test_policy_kwarg_name_prefers_the_explicit_name_and_is_none_until_the_adapter_has_one():
-    assert report.policy_kwarg_name(["capacity", "policy", "staleness_policy"]) == "staleness_policy"
-    assert report.policy_kwarg_name(["capacity", "policy"]) == "policy"
-    assert report.policy_kwarg_name(["capacity", "max_log_ratio"]) is None
-
-
-def test_replay_kwargs_staleness_passes_the_policy_or_refuses_before_the_adapter_takes_it():
-    import inspect
-
+def test_replay_kwargs_staleness_passes_a_policy_the_adapter_accepts():
+    # The adapter's __init__ is wrapped by _trl_presets as (capacity, *args, **kwargs), so a signature probe
+    # cannot see staleness_policy; constructing the replay is the check that the keyword is taken.
     from reservoir.integrations.trl import ReservoirReplay
 
-    spec = ArmSpec("x", True, 8, "staleness", None)
-    name = report.policy_kwarg_name(list(inspect.signature(ReservoirReplay.__init__).parameters))
-    if name is None:
-        with pytest.raises(NotImplementedError, match="replay_kwargs"):
-            replay_kwargs(spec)
-        return
-    kwargs = replay_kwargs(spec)
-    policy = kwargs[name]
+    kwargs = replay_kwargs(ArmSpec("x", True, 8, "staleness", None))
+    policy = kwargs["staleness_policy"]
     assert policy.ess_floor == report.STALENESS_ESS_FLOOR and policy.mass_cap == report.STALENESS_MASS_CAP
     assert policy.max_age is None and policy.max_log_ratio is None, "the age axis is the buffer's, not the policy's"
+    replay = ReservoirReplay(capacity=8, **kwargs)
+    assert replay.policy == policy
+    replay.close()
 
 
 def test_staleness_policy_is_floor_and_cap_only():
     pytest.importorskip("reservoir.integrations._trl_staleness")
+    from reservoir.integrations._trl_staleness import PRESET_RULES
+
     policy = report.staleness_policy()
-    assert (policy.ess_floor, policy.mass_cap, policy.max_age, policy.max_log_ratio) == (0.5, 0.25, None, None)
+    conservative = PRESET_RULES["conservative"]
+    assert (policy.ess_floor, policy.mass_cap) == (conservative["ess_floor"], conservative["mass_cap"])
+    assert (policy.max_age, policy.max_log_ratio) == (None, None)
 
 
 def test_half_life_follows_the_age_bound():
@@ -175,7 +170,7 @@ def _fake_record(arm: str, seed: int, replay: bool, steps: int = 4, stale: bool 
         entry = {"step": step, "reward": 0.1 * step, "frac_reward_zero_std": 0.5 if step % 2 else 0.0}
         if replay:
             entry.update({"reservoir/replaced_rows": 4.0, "reservoir/declined_rows": 1.0 if step == 2 else 0.0,
-                          "reservoir/ess_fraction": 0.8, "reservoir/log_ratio_mean_abs": 0.3,
+                          "reservoir/sampling_design_ess_fraction": 0.8, "reservoir/log_ratio_mean_abs": 0.3,
                           "reservoir/dead_groups": 1.0})
         log_history.append(entry)
     log_history.append({"train_runtime": 10.0, "step": steps})
@@ -202,6 +197,12 @@ def test_per_step_series_reads_trl_and_reservoir_metrics():
     assert series["ess_fraction"] == [0.8] * 4
     plain = report.per_step_series(_fake_record("grpo", 42, False)["log_history"])
     assert plain["ess_fraction"] == [None] * 4 and plain["replaced_rows"] == [None] * 4
+
+
+def test_per_step_series_reads_the_pre_rename_ess_metric():
+    history = [{"step": 1, "reward": 0.0, "reservoir/ess_fraction": 0.7},
+               {"step": 2, "reward": 0.0, "reservoir/sampling_design_ess_fraction": 0.9}]
+    assert report.per_step_series(history)["ess_fraction"] == [0.7, 0.9]
 
 
 def test_summarize_run_reports_reward_tail_dead_rate_rows_ess_and_dollars():

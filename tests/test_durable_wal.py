@@ -50,6 +50,69 @@ def open_buf(tmp_path: Path, **kw) -> DurableRolloutBuffer:
 
 
 class TestReplay:
+    def test_edited_snapshot_state_refused(self, tmp_path):
+        buf = open_buf(tmp_path)
+        drive(buf, range(1))
+        buf.compact()
+        buf.close()
+        path = tmp_path / "buf" / "state.json"
+        snapshot = json.loads(path.read_text())
+        snapshot["buffer"]["op_counter"] += 1
+        path.write_text(json.dumps(snapshot))
+        with pytest.raises(ValueError, match="snapshot digest"):
+            open_buf(tmp_path)
+
+    def test_snapshot_without_digest_opens_with_a_warning(self, tmp_path):
+        """A 0.6.0 snapshot carries no digest; it still opens, warns once, and is re-sealed on the next compaction."""
+        buf = open_buf(tmp_path)
+        drive(buf, range(1))
+        buf.compact()
+        expected = buf.buffer.state_dict()
+        buf.close()
+        path = tmp_path / "buf" / "state.json"
+        snapshot = json.loads(path.read_text())
+        del snapshot["digest"]
+        path.write_text(json.dumps(snapshot))
+        with pytest.warns(RuntimeWarning, match="no digest"):
+            again = open_buf(tmp_path)
+        assert again.buffer.state_dict() == expected
+        again.compact()
+        again.close()
+        assert "digest" in json.loads(path.read_text())
+        open_buf(tmp_path).close()                      # sealed now: no warning path
+
+    def test_missing_snapshot_with_wal_refuses_fresh_start(self, tmp_path):
+        buf = open_buf(tmp_path, compact_every=1000)
+        drive(buf, range(1))
+        buf.close()
+        (tmp_path / "buf" / "state.json").unlink()
+        before = (tmp_path / "attest.jsonl").read_bytes()
+        with pytest.raises(ValueError, match="missing snapshot"):
+            open_buf(tmp_path, compact_every=1000)
+        assert (tmp_path / "attest.jsonl").read_bytes() == before
+
+    def test_missing_snapshot_with_attest_refuses_fresh_start(self, tmp_path):
+        (tmp_path / "attest.jsonl").write_text("evidence\n")
+        with pytest.raises(ValueError, match="missing snapshot"):
+            open_buf(tmp_path)
+        assert (tmp_path / "attest.jsonl").read_text() == "evidence\n"
+
+    def test_deleted_wal_lines_warn_before_attest_rewrite(self, tmp_path):
+        buf = open_buf(tmp_path, compact_every=1000)
+        drive(buf, range(1))
+        buf.close()
+        wal = tmp_path / "buf" / WAL_FILE
+        wal.write_text("\n".join(wal.read_text().splitlines()[:-2]) + "\n")
+        with pytest.warns(RuntimeWarning, match="surplus attestation"):
+            open_buf(tmp_path, compact_every=1000).close()
+
+    def test_future_epoch_line_refused(self, tmp_path):
+        buf = open_buf(tmp_path)
+        buf.close()
+        CommandLog(tmp_path / "buf").append(1, "advance", {"current_version": 1}, epoch=1)
+        with pytest.raises(ValueError, match="future epoch"):
+            open_buf(tmp_path)
+
     def test_reopen_replays_the_log_onto_the_snapshot(self, tmp_path):
         buf = open_buf(tmp_path, compact_every=1000)
         drive(buf, range(7))
@@ -298,7 +361,8 @@ class TestCommandLogUnit:
         log.append(1, "advance", {"current_version": 9}, epoch=1)
         commands, end = log.read_commands(after_seq=0, epoch=1)
         assert [c["seq"] for c in commands] == [1] and end == log.size_bytes()
-        assert [c["seq"] for c in log.read_commands(after_seq=0, epoch=0)[0]] == [1, 2, 3]
+        with pytest.raises(ValueError, match="future epoch"):
+            log.read_commands(after_seq=0, epoch=0)
 
 
 class TestWitnessReplayBinding:
@@ -364,28 +428,30 @@ class TestCheckpointBinding:
             buf.checkpoint_binding("a")
         buf.close()
 
-    def test_a_retaken_tag_never_keeps_the_old_binding(self, tmp_path, monkeypatch):
+    def test_a_failed_retake_keeps_the_old_binding(self, tmp_path, monkeypatch):
         buf = open_buf(tmp_path, compact_every=1000)
         drive(buf, range(1))
         buf.checkpoint("a", binding={"v": 1})
         target = tmp_path / "buf" / "checkpoints" / "a"
-        order = []
-        real_copy = buf._write_binding
-
-        def record(target_dir, binding):
-            order.append(("binding", binding, (target_dir / "state.json.tmp").exists()))
-            real_copy(target_dir, binding)
-
-        monkeypatch.setattr(buf, "_write_binding", record)
-        buf.checkpoint("a", binding={"v": 2})
-        # The stale binding is removed before the new state is staged; the new one is written after it.
-        assert order == [("binding", None, False), ("binding", {"v": 2}, False)]
-        assert buf.checkpoint_binding("a") == {"v": 2}
-        monkeypatch.undo()
-        # A crash after the state was replaced but before the new binding: the checkpoint is unbound.
         monkeypatch.setattr(buf, "_write_binding",
-                            lambda t, b: real_copy(t, b) if b is None else (_ for _ in ()).throw(OSError("crash")))
+                            lambda t, b: (_ for _ in ()).throw(OSError("crash")))
         with pytest.raises(OSError):
-            buf.checkpoint("a", binding={"v": 3})
-        assert buf.checkpoint_binding("a") is None and (target / "state.json").exists()
+            buf.checkpoint("a", binding={"v": 2})
+        assert buf.checkpoint_binding("a") == {"v": 1}
+        assert (target / "state.json").exists()
+        buf.close()
+
+    def test_staging_names_are_not_checkpoints(self, tmp_path):
+        buf = open_buf(tmp_path)
+        with pytest.raises(ValueError, match="checkpoint tag"):
+            buf.checkpoint("a.tmp")
+        with pytest.raises(ValueError, match="checkpoint tag"):
+            buf.checkpoint("a.old")
+        buf.checkpoint("a", binding={"v": 1})
+        stage = tmp_path / "buf" / "checkpoints" / "a.tmp"
+        stage.mkdir()
+        (stage / "state.json").write_text("staged")
+        assert buf.checkpoints() == ["a"]
+        assert buf.prune_checkpoints({"a"}) == []
+        assert stage.exists()
         buf.close()

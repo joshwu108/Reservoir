@@ -309,7 +309,7 @@ def test_reservoir_metrics_ride_on_the_actor_output():
     metrics = trainer._update_actor(mixed_batch()).meta_info["metrics"]
     assert metrics["actor/pg_loss"] == 0.1
     assert metrics["reservoir/replaced_rows"] == 2.0 and metrics["reservoir/replay_fraction"] == 0.5
-    assert metrics["reservoir/dead_groups"] == 1.0 and "reservoir/ess" in metrics
+    assert metrics["reservoir/dead_groups"] == 1.0 and "reservoir/sampling_design_ess" in metrics
     assert metrics["reservoir/log_ratio_mean_abs"] >= 0.0
 
 

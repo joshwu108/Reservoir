@@ -74,7 +74,7 @@ class TestRecoveryWindows:
         buf.compact()
         old = _state_file(tmp_path / "buf")
         drive(buf, range(1, 3))
-        new = {"buffer": buf.buffer.state_dict(), "wal_seq": buf._seq, "wal_epoch": buf._epoch}
+        new = buf._snapshot_of(buf.buffer, buf._seq)
         buf.close()
         return tmp_path / "buf", old, new
 

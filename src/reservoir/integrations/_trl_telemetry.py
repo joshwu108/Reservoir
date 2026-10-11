@@ -5,21 +5,25 @@ What an engineer watching a replayed GRPO run wants to see, every step:
 
 - how much of the batch was replayed (``reservoir/replay_fraction``), how
   many groups were dead or near-dead;
-- the effective sample size of the replayed rows (``reservoir/ess``, from
-  the exact importance weights) and its fraction of the replayed count;
+- the sampling-design effective sample size of the replayed rows
+  (``reservoir/sampling_design_ess``, the Kish ESS of the buffer's exact
+  prioritized-sampling weights) and its fraction of the replayed count
+  (``reservoir/sampling_design_ess_fraction``). It describes the sampler's
+  priorities, not policy drift: it is the same at any staleness;
 - how stale the replayed rows are (``reservoir/staleness_mean`` and
   ``_max``, in optimizer steps behind);
 - how far the stored behavior logprobs have drifted from the current
   policy on the replayed tokens (``reservoir/log_ratio_mean_abs`` and
-  ``_max_abs``, per-sequence sums of ``current - behavior``). This needs
-  one no-grad forward over the replayed rows only;
+  ``_max_abs``, over per-row means of ``current - behavior`` across the
+  completion tokens, so ``exp`` of one is TRL's sequence-level ratio).
+  This needs one no-grad forward over the replayed rows only;
 - what the staleness policy did (``reservoir/declined_age``,
-  ``declined_ess``, ``declined_drift``, ``rescaled_rows`` and the smallest
-  ``mass_scale`` applied), when one is on.
+  ``declined_sampling_design_ess``, ``declined_drift``, ``rescaled_rows``
+  and the smallest ``mass_scale`` applied), when one is on.
 
 The numbers go to TRL's metrics (so wandb and TensorBoard show them) and
 into a ``telemetry`` record of the attestation log, where the checker
-recomputes the ESS and the staleness, recomputes the log-ratio statistics
+recomputes the sampling-design ESS and the staleness, recomputes the log-ratio statistics
 from the per-draw log-ratios the record carries as hex floats, and replays
 every policy decision (``_trl_staleness``).
 """
@@ -38,6 +42,9 @@ from reservoir.rollout_buffer import RolloutBatch
 
 METRIC_PREFIX = "reservoir/"
 
+REASON_METRIC_NAMES = {"drift": "drift", "age": "age", "ess": "sampling_design_ess"}
+"""Metric suffix of each decline reason; the log keeps the short reason strings of format 3."""
+
 
 @dataclass(frozen=True)
 class StepTelemetry:
@@ -48,7 +55,7 @@ class StepTelemetry:
     declined_rows: int
     dead_groups: int
     near_dead_groups: int
-    ess: Optional[float] = None
+    sampling_design_ess: Optional[float] = None       # Kish ESS of the sampling weights
     staleness_mean: Optional[float] = None
     staleness_max: Optional[int] = None
     log_ratio_mean_abs: Optional[float] = None
@@ -85,15 +92,15 @@ class StepTelemetry:
             "dead_groups": float(self.dead_groups),
             "near_dead_groups": float(self.near_dead_groups),
         }
-        for name in ("ess", "staleness_mean", "staleness_max", "log_ratio_mean_abs", "log_ratio_max_abs"):
+        for name in ("sampling_design_ess", "staleness_mean", "staleness_max", "log_ratio_mean_abs", "log_ratio_max_abs"):
             value = getattr(self, name)
             if value is not None:
                 out[name] = float(value)
-        if self.ess is not None and self.replaced_rows:
-            out["ess_fraction"] = self.ess / self.replaced_rows
+        if self.sampling_design_ess is not None and self.replaced_rows:
+            out["sampling_design_ess_fraction"] = self.sampling_design_ess / self.replaced_rows
         if self.decisions:
             for reason, count in self.declined_by_reason().items():
-                out[f"declined_{reason}"] = float(count)
+                out[f"declined_{REASON_METRIC_NAMES[reason]}"] = float(count)
             scales = [d.scale for d in self.decisions if d.kept]
             out["rescaled_rows"] = float(sum(1 for s in scales if s != 1))
             out["mass_scale_min"] = float(min(scales)) if scales else 1.0
@@ -101,7 +108,13 @@ class StepTelemetry:
 
 
 def sequence_log_ratios(output: dict, rows: list[int], trainer: Any) -> list[float]:
-    """``sum over masked tokens of (current - behavior)`` for each of ``rows``; one no-grad forward."""
+    """``mean over masked tokens of (current - behavior)`` for each of ``rows``; one no-grad forward.
+
+    The mean, not the sum: ``exp`` of it is the sequence-level ratio TRL's
+    ``importance_sampling_level="sequence"`` applies, which is what the
+    group-mass cap stands in for. A row with no completion tokens divides
+    by one, as TRL does, and gets 0.
+    """
     if not rows:
         return []
     idx = torch.tensor(rows, device=output["completion_ids"].device)
@@ -117,7 +130,8 @@ def sequence_log_ratios(output: dict, rows: list[int], trainer: Any) -> list[flo
     mask = output["completion_mask"][idx].bool()
     # where(), not multiply: a NaN at a masked position would otherwise poison the whole row.
     diff = current.to(behavior.dtype) - behavior
-    ratios = torch.where(mask, diff, torch.zeros_like(diff)).sum(dim=1)
+    totals = torch.where(mask, diff, torch.zeros_like(diff)).sum(dim=1)
+    ratios = totals / mask.sum(dim=1).clamp(min=1).to(totals.dtype)
     return [float(x) for x in ratios.detach().cpu().tolist()]
 
 
@@ -135,7 +149,7 @@ def summarize(batch: Optional[RolloutBatch], current_version: int, ratios: list[
               decisions: tuple[RowDecision, ...] = (), policy: Optional[StalenessPolicy] = None) -> StepTelemetry:
     """Fold a step's measurements into a ``StepTelemetry``.
 
-    The effective sample size, the staleness and the log-ratio statistics
+    The sampling-design ESS, the staleness and the log-ratio statistics
     describe the whole sampled batch, declined draws included: that is
     what the sampler produced and what the checker recomputes from the
     sample record. ``replaced_rows`` counts the draws that were placed.
@@ -152,7 +166,7 @@ def summarize(batch: Optional[RolloutBatch], current_version: int, ratios: list[
     return StepTelemetry(
         batch_rows=batch_rows, replaced_rows=len(kept), declined_rows=declined,
         dead_groups=dead_groups, near_dead_groups=near_dead_groups,
-        ess=ess, staleness_mean=sum(ages) / len(ages), staleness_max=max(ages),
+        sampling_design_ess=ess, staleness_mean=sum(ages) / len(ages), staleness_max=max(ages),
         log_ratio_mean_abs=(sum(magnitudes) / len(magnitudes)) if magnitudes else None,
         log_ratio_max_abs=max(magnitudes) if magnitudes else None,
         log_ratios=tuple(ratios), decisions=tuple(decisions), policy=policy if decisions else None,
