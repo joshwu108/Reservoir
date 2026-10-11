@@ -80,7 +80,7 @@ from typing import Optional
 
 from reservoir_checker.content import CommittedInsert, ResolvedSample, WitnessedRow, load_manifest
 from reservoir_checker.decay_replay import CheckerError
-from reservoir_checker.verify import VerifiedLog, verify_chain
+from reservoir_checker.verify import VerifiedLog, parse_json_lines, verify_chain
 
 TOOL = "reservoir-replay-offline"
 MIN_FORMAT = 2
@@ -101,7 +101,10 @@ def log_format(records: list[dict]) -> int:
     value = records[0].get("format", "1")
     if not isinstance(value, str) or not (value.isascii() and value.isdigit()):
         raise CheckerError(f"Record 0: decay_config format must be a decimal string, got {value!r}")
-    return int(value)
+    try:
+        return int(value)
+    except ValueError as exc:   # past the interpreter's digit limit
+        raise CheckerError(f"Record 0: decay_config format has {len(value)} digits") from exc
 
 
 def require_replayable(records: list[dict], manifest: Optional[list[dict]]) -> int:
@@ -236,8 +239,7 @@ def replay(records: list[dict], manifest: Optional[list[dict]]) -> list[dict]:
 
 def replay_json_lines(data: str, manifest: str) -> list[dict]:
     """``replay`` over the two files' texts."""
-    records = [json.loads(line) for line in data.split("\n") if line.strip()]
-    return replay(records, load_manifest(manifest))
+    return replay(parse_json_lines(data), load_manifest(manifest))
 
 
 def render(lines: list[dict]) -> str:

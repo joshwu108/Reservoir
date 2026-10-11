@@ -181,7 +181,10 @@ def _int_field(record: dict, name: str, idx: int) -> int:
             f"Record {idx}: {name} must be a non-negative integer encoded as a decimal "
             f"string, got {value!r}"
         )
-    return int(value)
+    try:
+        return int(value)
+    except ValueError as exc:   # past the interpreter's digit limit
+        raise CheckerError(f"Record {idx}: {name} has {len(value)} digits, more than any field can hold") from exc
 
 
 def parse_config(record: dict, idx: int) -> dict:
@@ -308,6 +311,8 @@ class DecayState:
         self.evicts_in_run = 0
         self.inserts_after_run = 0
         self.draw_counter = 0   # rollouts drawn so far; keys the next draw when seed is recorded
+        self.min_entry_age: Optional[int] = None   # the run's declared minimum, once a sample declares one
+        self.undeclared_samples = 0                # samples seen without a minimum
 
     # -- protocol guards ---------------------------------------------------
 

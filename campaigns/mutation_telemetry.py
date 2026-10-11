@@ -6,14 +6,16 @@ effective sample size and staleness of the sampled rows, which the checker
 recomputes from the sample record and the replayed state. These mutants
 re-chain the log and change one claim: the ESS, the staleness, a counter
 that no longer matches the draws, a reported float that is not listed, a
-telemetry record for the wrong sample or in a format-1 log. Every one must
-be rejected.
+telemetry record for the wrong sample or in a format-1 log, a telemetry
+record moved ahead of its batch witness, a step that is not the buffer
+version. Every one must be rejected.
 """
 
 from __future__ import annotations
 
 import copy
 
+from campaigns.mutation_reasons import rejection, tally
 from reservoir_checker.verify import CheckerError, verify_chain
 
 Mutant = tuple[list[dict], str]
@@ -55,9 +57,24 @@ def _edited(records: list[dict], idx: int, edit) -> list[dict]:
     return _rechain(m, idx)
 
 
+def _swapped(records: list[dict], first: int) -> list[dict]:
+    m = copy.deepcopy(records)
+    m[first], m[first + 1] = m[first + 1], m[first]
+    return _rechain(m, first)
+
+
+def _edited_pair(records: list[dict], first: int, edit) -> list[dict]:
+    m = copy.deepcopy(records)
+    edit(m[first])
+    edit(m[first + 1])
+    return _rechain(m, first)
+
+
 def telemetry_mutants(base: list[dict]) -> list[Mutant]:
     idxs = [i for i, r in enumerate(base) if r["op"] == "telemetry"]
     i, j = idxs[0], idxs[-1]
+    # Without its witnesses the log still verifies; the telemetry rules then fire on the telemetry record itself.
+    unwitnessed = _rechain([r for r in base if r["op"] != "batch"], 0)
     mutants: list[Mutant] = [
         (_edited(base, i, lambda r: r.update(ess_num=str(int(r["ess_num"]) + 1))), "telemetry_ess_changed"),
         (_edited(base, i, lambda r: r.update(ess_den=str(int(r["ess_den"]) * 2))), "telemetry_ess_denominator_changed"),
@@ -75,9 +92,12 @@ def telemetry_mutants(base: list[dict]) -> list[Mutant]:
         (_edited(base, i, lambda r: r.update(log_ratio_mean_abs="0x1p-2")), "telemetry_reported_not_canonical"),
         (_edited(base, i, lambda r: r.update(log_ratio_mean_abs=float("nan").hex())), "telemetry_reported_nan"),
         (_edited(base, i, lambda r: r.update(reported=[])), "telemetry_reported_list_dropped"),
-        (_edited(base, 0, lambda r: r.update(format="1")), "telemetry_in_format_1_log"),
+        (_edited(unwitnessed, 0, lambda r: r.update(format="1")), "telemetry_in_format_1_log"),
+        (_edited(unwitnessed, len(unwitnessed) - 1, lambda r: r.update(step="99")), "telemetry_step_forged_without_witness"),
     ]
-    stripped = copy.deepcopy(base)
+    mutants.append((_swapped(base, j - 1), "telemetry_before_witness"))
+    mutants.append((_edited_pair(base, j - 1, lambda r: r.update(step="99")), "telemetry_and_witness_step_forged"))
+    stripped = copy.deepcopy(unwitnessed)
     for r in stripped:
         r.pop("content_digest", None)
         r.pop("source", None)
@@ -96,12 +116,5 @@ def rejected(records: list[dict]) -> bool:
 def run_telemetry_category(results: dict) -> None:
     """Append the ``telemetry`` category to ``results``."""
     mutants = telemetry_mutants(build_telemetry_chain())
-    count = 0
-    for records, description in mutants:
-        results["total_mutants"] += 1
-        if rejected(records):
-            results["rejected"] += 1
-            count += 1
-        else:
-            results["survived"].append(description)
-    results["details"].append(("telemetry", len(mutants), count))
+    tally(results, "telemetry", [(description, rejection(lambda r=records: verify_chain(r)))
+                              for records, description in mutants])

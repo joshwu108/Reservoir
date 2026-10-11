@@ -57,6 +57,7 @@ from fractions import Fraction
 from typing import Optional
 
 from reservoir_checker.decay_replay import CheckerError
+from reservoir_checker.record_keys import WITNESS_ROW_KEYS, check_keys
 
 _PERSON = b"rollout-content\x00"
 _DIGEST_LENGTH = 64
@@ -298,12 +299,17 @@ class ContentState:
     telemetry: list = field(default_factory=list)                 # TelemetryPoint per telemetry record
     quarantines: list[QuarantinedSlot] = field(default_factory=list)
     _samples_by_op: dict[int, list[ResolvedSample]] = field(default_factory=dict)
-    _witnessed_ops: set[int] = field(default_factory=set)
+    witness_by_op: dict[int, dict] = field(default_factory=dict)                     # sample op_counter -> witness
+    witnessed_rows_by_op: dict[int, list[WitnessedRow]] = field(default_factory=dict)
     last_sample_op: Optional[int] = None    # op_counter of the latest sample record; they must increase
     # Once a replayed telemetry record carries log_ratios (or a policy), every later one must too, and the
     # policy must not change: a record cannot opt out of the stronger checks (reservoir_checker.telemetry).
     staleness_log_ratios_seen: bool = False
     staleness_policy: Optional[dict] = None
+    # The first sample whose telemetry came with no batch witness; legal only while the log carries no witness.
+    unwitnessed_telemetry: Optional[tuple[int, int]] = None      # (record index, sample op_counter)
+    # The witnessed sample no telemetry record has named yet; the next telemetry record must name it.
+    witness_awaiting_telemetry: Optional[int] = None
 
     def on_mutation(self, record: dict, idx: int) -> None:
         """Called after verify.py accepted the mutation's tree effect (so ``index`` is valid)."""
@@ -371,6 +377,8 @@ class ContentState:
         samples = record.get("samples")
         if not isinstance(samples, list):
             raise CheckerError(f"{where}: samples must be a list")
+        if len(samples) > MAX_SAMPLE_DRAWS:
+            raise CheckerError(f"{where}: {len(samples)} draws exceeds the checker's limit of {MAX_SAMPLE_DRAWS}")
         for k, s in enumerate(samples):
             at = f"{where}, sample {k}"
             if not isinstance(s, dict):
@@ -405,13 +413,21 @@ class ContentState:
         op = _strict_int(record, "sample_op_counter", where)
         if op != self.last_sample_op:
             raise CheckerError(f"{where}: batch witness names sample {op} but the latest sample is {self.last_sample_op}")
-        if op in self._witnessed_ops:
+        if op in self.witness_by_op:
             raise CheckerError(f"{where}: sample {op} already has a batch witness")
+        if self.unwitnessed_telemetry is not None:
+            record_index, sample = self.unwitnessed_telemetry
+            raise CheckerError(
+                f"{where}: batch witness of sample {op}, but record {record_index}'s telemetry of sample {sample} "
+                "came without one; a witness must precede the telemetry naming its sample"
+            )
         draws = self._samples_by_op[op]
         step = _int_field(record, "step", where)
         if not isinstance(record.get("step"), str):
             raise CheckerError(f"{where}: step must be a decimal string")
         batch_rows = _strict_int(record, "batch_rows", where)
+        if batch_rows < 1:
+            raise CheckerError(f"{where}: batch_rows must be at least 1, got {batch_rows}")
         if batch_rows > MAX_BATCH_ROWS:
             raise CheckerError(f"{where}: batch_rows {batch_rows} exceeds the checker's limit of {MAX_BATCH_ROWS}")
         replaced, declined = _witness_lists(record, where, len(draws), op)
@@ -419,19 +435,24 @@ class ContentState:
             raise CheckerError(f"{where}: tensor_digest must be {_DIGEST_LENGTH} lowercase hex characters")
         rows_seen: set[int] = set()
         draws_seen: set[int] = set(declined)
+        rows: list[WitnessedRow] = []
         for k, entry in enumerate(replaced):
             row, draw = self._check_witness_entry(entry, f"{where}, replaced {k}", batch_rows, draws, rows_seen, draws_seen)
-            self.witnessed_rows.append(WitnessedRow(idx, step, op, row, draw, draws[draw].content_digest))
-        self._witnessed_ops.add(op)
-        self.witnesses.append({"record_index": idx, "step": step, "sample_op_counter": op,
-                               "batch_rows": batch_rows, "replaced": len(replaced), "declined": list(declined),
-                               "tensor_digest": record["tensor_digest"]})
+            rows.append(WitnessedRow(idx, step, op, row, draw, draws[draw].content_digest))
+        witness = {"record_index": idx, "step": step, "sample_op_counter": op, "batch_rows": batch_rows,
+                   "replaced": len(replaced), "declined": list(declined), "tensor_digest": record["tensor_digest"]}
+        self.witnessed_rows.extend(rows)
+        self.witnessed_rows_by_op[op] = rows
+        self.witnesses.append(witness)
+        self.witness_by_op[op] = witness
+        self.witness_awaiting_telemetry = op
 
     @staticmethod
     def _check_witness_entry(entry: object, at: str, batch_rows: int, draws: list, rows_seen: set,
                              draws_seen: set) -> tuple[int, int]:
         if not isinstance(entry, dict):
             raise CheckerError(f"{at}: not an object")
+        check_keys(entry, WITNESS_ROW_KEYS, at)
         row = _strict_int(entry, "row", at)
         draw = _strict_int(entry, "draw", at)
         if row >= batch_rows:
@@ -523,6 +544,9 @@ def _match_line(line: dict, insert: CommittedInsert, i: int) -> None:
 
 MAX_BATCH_ROWS = 1 << 20
 """Largest training batch a witness may declare; bounds the memory ``replay`` and ``transcript`` spend on one record."""
+
+MAX_SAMPLE_DRAWS = 1 << 20
+"""Most draws one ``sample`` record may hold; checked before any per-draw work so one line cannot stall the checker."""
 
 
 def _strict_int(record: dict, name: str, where: str) -> int:

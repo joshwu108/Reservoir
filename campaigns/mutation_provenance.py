@@ -21,20 +21,21 @@ from __future__ import annotations
 import copy
 from typing import Optional
 
+from campaigns.mutation_reasons import rejection, tally
 from reservoir_checker.verify import CheckerError, verify_chain
 
 Mutant = tuple[list[dict], Optional[list[dict]], str]   # records, manifest (None: log only), description
 
 
 def build_provenance_run(seed: int = 5) -> tuple[list[dict], list[dict]]:
-    """Inserts with per-reward-function values, witnessed samples, a capacity evict, one quarantine."""
+    """Inserts with per-reward-function values, witnessed samples, capacity and stale evicts, one quarantine."""
     from reservoir.attest import AttestationLog
     from reservoir.rollout import Rollout
     from reservoir.rollout_buffer import RolloutBuffer
     from reservoir.rollout_manifest import ManifestWriter
 
     manifest = ManifestWriter()
-    buf = RolloutBuffer(capacity=8, half_life=1, max_policy_age=3, seed=seed, attest=AttestationLog(),
+    buf = RolloutBuffer(capacity=8, half_life=1, max_policy_age=2, seed=seed, attest=AttestationLog(),
                         manifest=manifest)
     for v in range(4):
         buf.add_group(f"g{v}", v, [
@@ -48,8 +49,8 @@ def build_provenance_run(seed: int = 5) -> tuple[list[dict], list[dict]]:
     records = [dict(r) for r in buf.attestation_log.records]
     lines = manifest.records
     verify_chain(records, manifest=lines)
-    if not any(r.get("reason") == "capacity" for r in records):
-        raise RuntimeError("the baseline has no capacity evict; change the seed or the sizes")
+    if not any(r.get("reason") == "capacity" for r in records) or not any(r.get("reason") == "stale" for r in records):
+        raise RuntimeError("the baseline needs a capacity and a stale evict; change the seed or the sizes")
     return records, lines
 
 
@@ -77,6 +78,17 @@ def _manifest_edited(manifest: list[dict], idx: int, edit) -> list[dict]:
     return m
 
 
+def _empty_slot(records: list[dict], idx: int) -> int:
+    """A slot that holds no entry at record ``idx``: never filled, or emptied and not refilled."""
+    live: set[int] = set()
+    for r in records[:idx]:
+        if r["op"] == "insert":
+            live.add(r["index"])
+        elif r["op"] == "evict":
+            live.discard(r["index"])
+    return min(set(range(8)) - live)
+
+
 def log_mutants(base: list[dict]) -> list[Mutant]:
     """Quarantine-record forgeries; checked from the log alone."""
     quarantines = [i for i, r in enumerate(base) if r.get("reason") == "quarantine"]
@@ -97,16 +109,21 @@ def log_mutants(base: list[dict]) -> list[Mutant]:
         (_edited(base, capacity, lambda r: r.update(**texts)), None, "quarantine_texts_on_a_capacity_evict"),
         (_edited(base, insert, lambda r: r.update(**texts)), None, "quarantine_texts_on_an_insert"),
         (_edited(base, 0, lambda r: r.update(format="2")), None, "quarantine_in_a_format_2_log"),
-        (_edited(base, q2, lambda r: r.update(index=base[q]["index"])), None, "quarantine_of_an_empty_slot"),
+        (_edited(base, q2, lambda r: r.update(index=_empty_slot(base, q2), old_priority_int="0")), None,
+         "quarantine_of_an_empty_slot"),
         (_edited(base, q, lambda r: r.update(new_priority_int=r["old_priority_int"])), None,
          "quarantine_keeps_the_leaf"),
     ]
     dup = copy.deepcopy(base)
     dup.insert(q + 1, copy.deepcopy(base[q]))
     mutants.append((_rechain(dup, q + 1), None, "quarantine_duplicated"))
-    adv = next(k for k, r in enumerate(base) if r["op"] == "advance_version" and base[k + 1]["op"] == "evict")
+    # Quarantine the first slot the advance left pending, with its true leaf, ahead of its stale evict:
+    # every field is right but the order, so only the pending-eviction rule can reject it.
+    adv = next(k for k, r in enumerate(base)
+               if r["op"] == "advance_version" and base[k + 1]["op"] == "evict" and base[k + 1]["reason"] == "stale")
+    early = dict(copy.deepcopy(base[adv + 1]), reason="quarantine", **texts)
     moved = copy.deepcopy(base)
-    moved.insert(adv + 1, copy.deepcopy(base[q]))
+    moved.insert(adv + 1, early)
     mutants.append((_rechain(moved, adv + 1), None, "quarantine_between_advance_and_pending_evicts"))
     return mutants
 
@@ -155,15 +172,8 @@ def run_provenance_category(results: dict) -> None:
     """
     base, manifest = build_provenance_run()
     mutants = log_mutants(base) + manifest_mutants(base, manifest)
-    count = 0
-    for records, lines, description in mutants:
-        results["total_mutants"] += 1
-        if rejected(records, lines):
-            results["rejected"] += 1
-            count += 1
-        else:
-            results["survived"].append(description)
-    results["details"].append(("provenance", len(mutants), count))
+    tally(results, "provenance", [(description, rejection(lambda r=records, m=lines: verify_chain(r, manifest=m)))
+                                  for records, lines, description in mutants])
 
     limits = limit_mutants(base, manifest)
     survive = [name for records, lines, name in limits if not rejected(records, lines)]

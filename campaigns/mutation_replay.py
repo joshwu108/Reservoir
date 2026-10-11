@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import copy
 
+from campaigns.mutation_reasons import rejection, tally
 from reservoir_checker.replay import render, replay
 from reservoir_checker.verify import CheckerError, verify_chain
 
@@ -179,15 +180,8 @@ def run_replay_category(results: dict) -> None:
     base = replay(records, manifest)
     replayed, generated = _replayed_and_generated_lines(base, len(manifest))
     mutants = breaking_mutants(manifest, replayed)
-    count = 0
-    for lines, description in mutants:
-        results["total_mutants"] += 1
-        if broke(records, lines):
-            results["rejected"] += 1
-            count += 1
-        else:
-            results["survived"].append(description)
-    results["details"].append(("replay_manifest", len(mutants), count))
+    tally(results, "replay_manifest", [(description, rejection(lambda m=lines: replay(records, m)))
+                                       for lines, description in mutants])
 
     changing = changing_mutants(manifest, replayed, generated)
     changed = [name for lines, name in changing if changed_only_rewards(records, lines, base)]

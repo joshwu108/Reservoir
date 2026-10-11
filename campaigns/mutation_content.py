@@ -40,6 +40,7 @@ import copy
 import json
 from typing import Callable, Optional
 
+from campaigns.mutation_reasons import rejection, tally
 from checker.verify import CheckerError, verify_chain
 
 Mutant = tuple[list[dict], Optional[list[dict]], str]
@@ -185,15 +186,8 @@ def run_content_categories(results: dict) -> None:
     with_manifest = manifest_mutants(base, manifest) + limit_mutants
 
     def run(name: str, mutants: list[Mutant]) -> None:
-        count = 0
-        for records, lines, description in mutants:
-            results["total_mutants"] += 1
-            if rejected(records, lines):
-                results["rejected"] += 1
-                count += 1
-            else:
-                results["survived"].append(description)
-        results["details"].append((name, len(mutants), count))
+        tally(results, name, [(description, rejection(lambda r=records, m=lines: verify_chain(r, manifest=m)))
+                              for records, lines, description in mutants])
 
     run("content", log_only)
     run("content_manifest", with_manifest)

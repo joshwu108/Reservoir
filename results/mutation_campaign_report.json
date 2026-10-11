@@ -1,8 +1,9 @@
 {
   "campaign": "T4_mutation",
-  "total_mutants": 255,
-  "rejected": 255,
+  "total_mutants": 279,
+  "rejected": 279,
   "survived": [],
+  "wrong_reason": [],
   "categories": [
     {
       "name": "digest_bitflip",
@@ -61,13 +62,13 @@
     },
     {
       "name": "batch",
-      "total": 14,
-      "rejected": 14
+      "total": 15,
+      "rejected": 15
     },
     {
       "name": "telemetry",
-      "total": 18,
-      "rejected": 18
+      "total": 21,
+      "rejected": 21
     },
     {
       "name": "provenance",
@@ -83,6 +84,16 @@
       "name": "staleness",
       "total": 34,
       "rejected": 34
+    },
+    {
+      "name": "schema",
+      "total": 13,
+      "rejected": 13
+    },
+    {
+      "name": "entry_age",
+      "total": 7,
+      "rejected": 7
     }
   ],
   "content_limit": {
@@ -155,6 +166,25 @@
       "staleness_policy_ess_floor_loosened_nothing_declined_for_ess"
     ],
     "statement": "a policy parameter changed so that no recorded decision differs passes: the checker verifies that the decisions follow the declared policy from the recorded inputs, not which policy the adapter intended"
+  },
+  "consistency_limit": {
+    "mutants": [
+      "source_swapped_in_log_and_manifest",
+      "drift_decline_hidden_by_a_recorded_log_ratio",
+      "drift_evict_of_a_slot_never_declined",
+      "beta_and_every_weight_rewritten_without_draw_config",
+      "content_digests_swapped_with_openings_and_witness_rows",
+      "every_batch_witness_dropped"
+    ],
+    "pass": [
+      "source_swapped_in_log_and_manifest",
+      "drift_decline_hidden_by_a_recorded_log_ratio",
+      "drift_evict_of_a_slot_never_declined",
+      "beta_and_every_weight_rewritten_without_draw_config",
+      "content_digests_swapped_with_openings_and_witness_rows",
+      "every_batch_witness_dropped"
+    ],
+    "statement": "a re-chained log (with its manifest edited in step) that changes only what the log records as a statement, such as sources, log-ratios, drift evictions, beta without the draw configuration, which digest an insert committed to, or whether witnesses were written, verifies: the chain is unkeyed and these are not quantities the checker can recompute"
   },
   "pass": true
 }
