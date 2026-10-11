@@ -49,7 +49,8 @@ Call structure
         rebase if the shift budget is hit (right-shift every node)
     draw_uniform_below(total, ...)      -> draw.py, one keyed draw per rollout
     tree.prefix_sum_locate(draw)        -> sumtree.py, walk root to leaf
-    _is_weight(leaf, total, minimum, n) -> the only float on this path
+    _max_weight, then _is_weight        -> the only floats on this path; the
+                                           first runs before any counter moves
     attester.record_sample(...)         -> attest.py append_sample
 
 ``add_group(prompt_id, model_version, rollouts)``:
@@ -88,7 +89,8 @@ from typing import Any, Callable, NamedTuple, Optional, Sequence
 from reservoir.decay import DecayParams, is_expired, quantize_priority, version_after_update
 from reservoir.decayed_tree import AdvanceResult, DecayedPriorityTree
 from reservoir.draw import draw_uniform_below
-from reservoir.priorities import AdvantagePriority, PriorityStrategy, validated_score
+from reservoir.priorities import PriorityStrategy, validated_score
+from reservoir.rollout_args import validate_exponent, validate_min_entry_age, validate_priority
 from reservoir.rollout import Rollout, RolloutGroup, default_is_success
 from reservoir.rollout_attest import AttestTarget, DrawConfig, ManifestTarget, RolloutAttester
 from reservoir.rollout_quarantine import QuarantinePredicate, apply_quarantine, run_quarantine
@@ -120,30 +122,11 @@ class RolloutBatch(NamedTuple):
         return tuple(float(w) for w in self.is_weights)
 
 
-def _validate_priority(priority: Optional[PriorityStrategy]) -> PriorityStrategy:
-    """Default to AdvantagePriority; anything that is not a strategy is a TypeError."""
-    if priority is None:
-        return AdvantagePriority()
-    if not isinstance(priority, PriorityStrategy):
-        raise TypeError(f"priority must be a PriorityStrategy, got {type(priority).__name__}")
-    return priority
-
-
-def _validate_exponent(value: object, name: str, minimum_exclusive: Optional[float]) -> float:
-    """Validate alpha or beta.
-
-    Both must be finite real numbers (bool excluded). With
-    ``minimum_exclusive=0.0`` the value must be strictly positive (alpha:
-    ``raw ** 0`` would flatten every priority to 1); with ``None`` it only
-    has to be non-negative (beta: 0 means no importance correction).
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        raise ValueError(f"{name} must be a finite number, got {value!r}")
-    if minimum_exclusive is not None and value <= minimum_exclusive:
-        raise ValueError(f"{name} must be > {minimum_exclusive}, got {value!r}")
-    if minimum_exclusive is None and value < 0:
-        raise ValueError(f"{name} must be >= 0, got {value!r}")
-    return float(value)
+_EMPTY_BATCH = RolloutBatch(
+    indices=(), rollouts=(), groups=(), logprobs=(), model_versions=(), rewards=(), is_weights=(),
+    priorities=(), draw_integers=(), root_total=0, min_priority_int=0,
+)
+"""What ``sample`` returns when ``min_entry_age`` rules every draw out; ``op_counter`` -1 cannot be witnessed."""
 
 
 class RolloutBuffer:
@@ -164,7 +147,7 @@ class RolloutBuffer:
         (advantage magnitudes are used as-is in the replay-for-GRPO
         papers); classic PER uses 0.6.
     beta : float
-        Importance-sampling exponent. Default 0.4.
+        Importance-sampling exponent in ``[0, 1]``. Default 0.4.
     seed, buffer_id : int
         Key material for the deterministic draw.
     attest : AttestationLog | path | None
@@ -181,6 +164,13 @@ class RolloutBuffer:
         version; by default age is measured from collection.
     priority_bits, priority_frac_bits, rebase_slack : int
         Passed to ``DecayParams``; see ``decay.py``.
+    min_entry_age : int
+        Declared minimum age, in versions, of every drawn entry. Default 0
+        (an entry inserted at the current version can be drawn). Draws are
+        keyed over the whole tree, so with ``min_entry_age > 0`` a sample
+        while any live entry is younger is empty and writes nothing; sample
+        before inserting the current version's groups. Recorded on every
+        sample record, with each drawn slot's ``entry_version``.
     attest_overwrite : bool
         Replace an existing attestation file instead of refusing it. Only
         the durable buffer sets this; it rewrites the file from recovered
@@ -212,10 +202,11 @@ class RolloutBuffer:
         rebase_slack: int = 0,
         attest_overwrite: bool = False,
         manifest: ManifestTarget = None,
+        min_entry_age: int = 0,
     ) -> None:
-        self.priority = _validate_priority(priority)
-        self.alpha = _validate_exponent(alpha, "alpha", minimum_exclusive=0.0)
-        self.beta = _validate_exponent(beta, "beta", minimum_exclusive=None)
+        self.priority = validate_priority(priority)
+        self.alpha = validate_exponent(alpha, "alpha", minimum_exclusive=0.0)
+        self.beta = validate_exponent(beta, "beta", minimum_exclusive=None, maximum=1.0)
         self.seed = seed
         self.buffer_id = buffer_id
         self.reset_age_on_update = bool(reset_age_on_update)
@@ -228,6 +219,7 @@ class RolloutBuffer:
             priority_frac_bits=priority_frac_bits,
             rebase_slack=rebase_slack,
         )
+        self.min_entry_age = validate_min_entry_age(min_entry_age, self._params.max_policy_age)
         self._tree = DecayedPriorityTree(self._params)
         n = self._tree.capacity
         self._rollouts: list[Optional[Rollout]] = [None] * n
@@ -443,12 +435,17 @@ class RolloutBuffer:
         Sampling is with replacement, so ``batch_size`` may exceed the
         number of live entries; a small buffer can still fill a large
         batch. The only requirement is at least one entry with positive
-        weight.
+        weight. While a live entry is younger than ``min_entry_age`` the
+        batch is empty (test ``batch.indices``; the tuple itself is always
+        truthy), nothing is recorded or counted, and ``last_batch`` becomes
+        None.
 
         Raises
         ------
         ValueError
-            ``batch_size < 1`` or a non-monotone ``current_version``.
+            ``batch_size < 1``, a non-monotone ``current_version``, or an
+            importance weight that overflows a double (raised before any
+            counter moves).
         RuntimeError
             No live entries, or every live entry has zero weight.
         """
@@ -460,6 +457,9 @@ class RolloutBuffer:
         n = self.size
         if n == 0:
             raise RuntimeError("cannot sample: buffer has no live rollouts")
+        if self._has_young_entries():
+            self._last_sample = None
+            return _EMPTY_BATCH
         root_total = self.total
         if root_total == 0:
             raise RuntimeError("cannot sample: total priority is zero")
@@ -467,15 +467,19 @@ class RolloutBuffer:
         if min_priority >= ExactMinTree.INFINITY:
             raise RuntimeError("cannot sample: no positive priorities")
 
+        # The one float step that can fail runs before anything changes.
+        w_max = self._max_weight(root_total, min_priority, n)
         # Two counters: op_counter numbers batches and is what the log
         # records; draw_counter numbers individual draws and keys them.
         self._op_counter += 1
         batch_op = self._op_counter
         draws, indices = self._draw_indices(batch_size, root_total)
-        batch = self._build_batch(indices, draws, root_total, min_priority, n)
+        batch = self._batch_of(indices, draws, tuple(self._tree.leaf(i) for i in indices),
+                               tuple(self._tree.entry(i)[1] for i in indices), root_total, min_priority, n,
+                               batch_op, w_max)
         self._attester.record_sample(
             batch_op, root_total, batch.indices, batch.draw_integers,
-            batch.priorities, batch.is_weights,
+            batch.priorities, batch.is_weights, batch.model_versions, self.min_entry_age,
         )
         self._last_sample = {"indices": list(indices), "draws": [str(d) for d in draws],
                              "root_total": str(root_total), "min_priority": str(min_priority),
@@ -501,22 +505,17 @@ class RolloutBuffer:
         if any(self._rollouts[i] is None or self._inserted[i] != stamp
                for i, stamp in zip(indices, raw["inserted"])):
             return None
-        priorities = tuple(int(p) for p in raw["priorities"])
         root_total, min_priority, n = int(raw["root_total"]), int(raw["min_priority"]), raw["n"]
-        rollouts = tuple(self._rollouts[i] for i in indices)
-        groups = tuple(self._groups[i] for i in indices)
-        return RolloutBatch(
-            indices=indices, rollouts=rollouts, groups=groups,  # type: ignore[arg-type]
-            logprobs=tuple(r.logprobs for r in rollouts),  # type: ignore[union-attr]
-            model_versions=tuple(raw["versions"]),
-            rewards=tuple(r.reward for r in rollouts),  # type: ignore[union-attr]
-            is_weights=tuple(self._is_weight(p, root_total, min_priority, n) for p in priorities),
-            priorities=priorities, draw_integers=tuple(int(d) for d in raw["draws"]),
-            root_total=root_total, min_priority_int=min_priority, op_counter=raw["op_counter"],
-            content_digests=tuple(
-                g.content_digests[next(k for k, m in enumerate(g.rollouts) if m is r)]  # type: ignore[union-attr]
-                for r, g in zip(rollouts, groups)),
+        return self._batch_of(
+            indices, tuple(int(d) for d in raw["draws"]), tuple(int(p) for p in raw["priorities"]),
+            tuple(raw["versions"]), root_total, min_priority, n, raw["op_counter"],
+            self._max_weight(root_total, min_priority, n),
         )
+
+    def _has_young_entries(self) -> bool:
+        """True when some live entry is younger than ``min_entry_age`` versions."""
+        newest = self.current_version - self.min_entry_age
+        return self.min_entry_age > 0 and any(v > newest for _, v in self._tree.entries.values())
 
     def _draw_indices(
         self, batch_size: int, root_total: int
@@ -533,36 +532,25 @@ class RolloutBuffer:
         indices = tuple(self._tree.prefix_sum_locate(d) for d in draws)
         return draws, indices
 
-    def _build_batch(
-        self,
-        indices: tuple[int, ...],
-        draws: tuple[int, ...],
-        root_total: int,
-        min_priority: int,
-        n: int,
+    def _batch_of(
+        self, indices: tuple[int, ...], draws: tuple[int, ...], priorities: tuple[int, ...],
+        versions: tuple[int, ...], root_total: int, min_priority: int, n: int, op_counter: int,
+        w_max: Fraction,
     ) -> RolloutBatch:
         """Gather the stored data for the sampled slots into an immutable batch."""
         rollouts = tuple(self._rollouts[i] for i in indices)
         groups = tuple(self._groups[i] for i in indices)
-        priorities = tuple(self._tree.leaf(i) for i in indices)
-        digests = tuple(
-            g.content_digests[next(k for k, member in enumerate(g.rollouts) if member is r)]  # type: ignore[union-attr]
-            for r, g in zip(rollouts, groups)
-        )
         return RolloutBatch(
-            indices=indices,
-            rollouts=rollouts,  # type: ignore[arg-type]
-            groups=groups,  # type: ignore[arg-type]
+            indices=indices, rollouts=rollouts, groups=groups,  # type: ignore[arg-type]
             logprobs=tuple(r.logprobs for r in rollouts),  # type: ignore[union-attr]
-            model_versions=tuple(self._tree.entry(i)[1] for i in indices),
+            model_versions=versions,
             rewards=tuple(r.reward for r in rollouts),  # type: ignore[union-attr]
-            is_weights=tuple(self._is_weight(p, root_total, min_priority, n) for p in priorities),
-            priorities=priorities,
-            draw_integers=draws,
-            root_total=root_total,
-            min_priority_int=min_priority,
-            op_counter=self._op_counter,
-            content_digests=digests,
+            is_weights=tuple(self._is_weight(p, root_total, n, w_max) for p in priorities),
+            priorities=priorities, draw_integers=draws, root_total=root_total,
+            min_priority_int=min_priority, op_counter=op_counter,
+            content_digests=tuple(
+                g.content_digests[next(k for k, m in enumerate(g.rollouts) if m is r)]  # type: ignore[union-attr]
+                for r, g in zip(rollouts, groups)),
         )
 
     def witness_batch(
@@ -743,18 +731,26 @@ class RolloutBuffer:
         except ValueError as exc:
             raise ValueError(f"{context}: {exc}") from exc
 
-    def _is_weight(self, priority: int, root_total: int, min_priority: int, n: int) -> Fraction:
+    def _max_weight(self, root_total: int, min_priority: int, n: int) -> Fraction:
+        """``(N * P_min) ** -beta``, the smallest positive leaf's weight; ``ValueError`` if not a finite
+        double. ``sample`` calls it before touching any counter, so a failed sample changes nothing."""
+        try:
+            return Fraction((n * min_priority / root_total) ** (-self.beta))
+        except (OverflowError, ZeroDivisionError) as exc:
+            raise ValueError(
+                f"importance weight overflows a double for beta={self.beta} with leaves from {min_priority} "
+                f"to a total of {root_total}"
+            ) from exc
+
+    def _is_weight(self, priority: int, root_total: int, n: int, w_max: Fraction) -> Fraction:
         """Normalised importance-sampling weight for one sampled slot.
 
-        ``w_i = (N * P(i)) ** -beta``, divided by the largest possible
-        weight (the one the smallest positive leaf would get) so every
-        weight lies in (0, 1]. The two ``** -beta`` calls are the declared
-        float boundary; the division is an exact Fraction. Same formula as
-        ``ExactPERBuffer``.
+        ``w_i = (N * P(i)) ** -beta``, divided by ``w_max`` (``_max_weight``)
+        so every weight lies in (0, 1]; the division is an exact Fraction.
+        Same formula as ``ExactPERBuffer``. ``P(i) >= P_min``, so this cannot
+        overflow once ``w_max`` did not.
         """
-        w_i = Fraction((n * priority / root_total) ** (-self.beta))
-        w_max = Fraction((n * min_priority / root_total) ** (-self.beta))
-        return Fraction(w_i, w_max)
+        return Fraction(Fraction((n * priority / root_total) ** (-self.beta)), w_max)
 
     def _oldest_live(self, count: int) -> list[int]:
         """The ``count`` live positions with the lowest (version, insertion order).

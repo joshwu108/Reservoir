@@ -73,7 +73,7 @@ def make_batch(
     scores_t = torch.zeros((b, lr), dtype=torch.float32)
     for r, c in enumerate(responses):
         if c:
-            scores_t[r, len(c) - 1] = (scores or [1.0] * b)[r]
+            scores_t[r, len(c) - 1] = (scores if scores is not None else advantages)[r]
 
     def per_token(rows):
         t = torch.zeros((b, lr), dtype=torch.float32)
@@ -227,10 +227,25 @@ def test_empty_responses_are_skipped_in_live_groups_and_count_as_zero_in_dead_on
     assert conv.dead_rows == (2, 3) and conv.dead_groups == 1
 
 
-def test_near_dead_groups_are_counted_but_stored():
+def test_near_dead_groups_are_counted_and_their_negligible_rows_not_stored():
     batch, uids = make_batch(prompts=[[1], [1]], responses=[[5], [6]], advantages=[1e-5, -1e-5])
     conv = rows_to_groups(batch, uids, step=0)
-    assert conv.near_dead_groups == 1 and len(conv.groups) == 1 and conv.dead_rows == ()
+    assert conv.near_dead_groups == 1 and conv.groups == () and conv.dead_rows == ()
+    assert conv.negligible_rows == 2
+
+
+def test_a_live_row_with_a_negligible_advantage_is_not_stored():
+    batch, uids = make_batch(prompts=[[1]] * 3, responses=[[5], [6], [7]], advantages=[1.0, 0.0, -1.0],
+                             uids=["g"] * 3)
+    conv = rows_to_groups(batch, uids, step=0)
+    assert conv.groups[0].rows == (0, 2) and conv.negligible_rows == 1
+
+
+def test_a_single_response_group_is_live_whatever_its_score():
+    # verl gives a lone response mean 0 and std 1, so its advantage is its score.
+    batch, uids = make_batch(prompts=[[1]], responses=[[5]], advantages=[1.0], scores=[1.0], uids=["g"])
+    conv = rows_to_groups(batch, uids, step=0)
+    assert conv.dead_groups == 0 and len(conv.groups) == 1
 
 
 def grpo_advantages(scores: list[float]) -> list[float]:
@@ -239,17 +254,17 @@ def grpo_advantages(scores: list[float]) -> list[float]:
     return ((t - t.mean()) / (t.std() + 1e-6)).tolist()
 
 
-def test_equal_non_dyadic_scores_leave_a_residue_that_is_counted_as_near_dead():
+def test_equal_non_dyadic_scores_are_dead_despite_the_float32_residue():
     # 0.3 six times: verl's float32 mean carries a rounding residue, the std is of that order and
-    # the quotient is a few hundredths. verl trains on those rows, so the adapter stores the group
-    # (the criterion is zero gradient, not equal scores) and counts it.
+    # the quotient is a few hundredths. The scores are equal, so the group carries no signal: it is
+    # dead and its rows are replaced, and nothing of it is stored.
     advs = grpo_advantages([0.3] * 6)
     assert any(a != 0.0 for a in advs) and max(abs(a) for a in advs) > 1e-3
     batch, uids = make_batch(
         prompts=[[1]] * 6, responses=[[2], [3], [4], [5], [6], [7]], advantages=advs, scores=[0.3] * 6, uids=["g"] * 6,
     )
     conv = rows_to_groups(batch, uids, step=0)
-    assert conv.dead_groups == 0 and conv.near_dead_groups == 1 and len(conv.groups[0].rollouts) == 6
+    assert conv.dead_groups == 1 and conv.dead_rows == tuple(range(6)) and conv.groups == ()
     # Exactly representable equal scores are exactly dead.
     advs = grpo_advantages([1.0] * 6)
     assert advs == [0.0] * 6
@@ -410,19 +425,23 @@ def test_dummy_tensor_passes_through_unchanged():
 # Digest and meta
 # ---------------------------------------------------------------------------
 
+def digest(t: dict) -> str:
+    return tensor_digest(t, token_nums=global_token_num(t["attention_mask"]))
+
+
 def test_tensor_digest_depends_on_consumed_values_only():
     a, _ = two_groups()
     b = copy.deepcopy(a)
-    assert tensor_digest(a) == tensor_digest(b)
+    assert digest(a) == digest(b)
     b["old_log_probs"][0, 1] = -7.0  # outside the response mask of row 0
     b["position_ids"][2, 0] = 5      # a left-pad position of row 2
-    assert tensor_digest(a) == tensor_digest(b)
+    assert digest(a) == digest(b)
     b["responses"][0, 0] += 1
     b["input_ids"] = torch.cat([b["prompts"], b["responses"]], dim=1)
-    assert tensor_digest(a) != tensor_digest(b)
+    assert digest(a) != digest(b)
     c = copy.deepcopy(a)
     c["advantages"] = c["advantages"].to(torch.float64)
-    assert tensor_digest(a) == tensor_digest(c)
+    assert digest(a) == digest(c)
 
 
 def test_global_token_num_counts_valid_tokens_per_row():

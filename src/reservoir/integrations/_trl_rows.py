@@ -84,14 +84,26 @@ class GroupSpec(NamedTuple):
 
 
 NEAR_DEAD_ADVANTAGE: Final[float] = 1e-3
-"""A live group whose every |advantage| is below this is counted as near-dead.
+"""Rows whose |advantage| is below this are not stored; a live group made only of such rows is near-dead.
 
-A group is replaced only when its advantages are exactly zero, which is
-exactly when it contributes no gradient. TRL computes advantages in
-float32, and for a non-power-of-two group size with equal non-integer
-rewards the mean can carry a rounding residue that TRL then trains on;
-such a group is live for the loss and is therefore kept, but it is
-counted so the condition is visible in the adapter's statistics.
+A group is dead, and its rows are replaced, when its advantages are all
+exactly zero or when every row got the same per-function reward tuple
+(``rewards_per_func``, compared exactly, an abstention matching only an
+abstention). The second test matters because TRL computes advantages in
+float32: for a non-power-of-two group size with equal non-dyadic rewards
+the group mean carries a rounding residue that TRL divides by
+``std + 1e-4`` and would train on (0.9 seven times gives -5.96e-4 per
+row). The tuple test assumes TRL's default ``sum_then_normalize``, where
+each group is centred on its own mean; under ``normalize_then_sum`` the sum
+is re-centred over the batch, equal tuples do not mean zero advantage, and
+only the first test applies, as it does without reward provenance. A group
+left live that way with only tiny rows stays in the batch, stores nothing,
+and is counted near-dead so the condition is visible in the statistics.
+
+The cut is absolute. With ``scale_rewards="none"`` advantages are raw
+reward differences, and rows of a reward scale below 1e-3 carry real
+signal that is not stored for replay (the batch itself is unchanged);
+``negligible_rows`` counts them.
 """
 
 
@@ -104,6 +116,7 @@ class RowConversion(NamedTuple):
     skipped_rows: int            # rows of live groups with an empty completion mask
     clamped_logprobs: int        # tiny positive logprobs clamped to 0
     near_dead_groups: int = 0    # live groups with every |advantage| below NEAR_DEAD_ADVANTAGE
+    negligible_rows: int = 0     # rows of live groups not stored: |advantage| below NEAR_DEAD_ADVANTAGE
 
 
 # ---------------------------------------------------------------------------
@@ -256,14 +269,34 @@ def _columns(
     )
 
 
+def _reward_key(values: Sequence[float]) -> tuple[Optional[float], ...]:
+    """A row's per-function rewards for exact comparison; an abstention (NaN) becomes None."""
+    return tuple(None if math.isnan(v) else float(v) for v in values)
+
+
+def _is_dead(cols: _Columns, rows: range, equal_rewards_are_dead: bool) -> bool:
+    """Zero gradient by construction: all advantages exactly zero, or one reward tuple for every row.
+
+    The second test holds only when TRL centres each group on its own mean
+    (``multi_objective_aggregation="sum_then_normalize"``); under
+    ``"normalize_then_sum"`` the sum is re-centred over the whole batch and
+    an equal-tuple group gets a nonzero advantage, so the caller turns it off.
+    """
+    if all(cols.advantages[r] == 0.0 for r in rows):
+        return True
+    if not equal_rewards_are_dead or cols.rewards is None or len(rows) < 2:
+        return False
+    return len({_reward_key(cols.rewards[r]) for r in rows}) == 1
+
+
 def _group_rollouts(
     cols: _Columns, rows: range, group_index: int, step: int
-) -> tuple[list[Rollout], list[int], int, int]:
-    """Rollouts of one live group: ``(rollouts, kept_rows, skipped, clamped)``."""
+) -> tuple[list[Rollout], list[int], int, int, int]:
+    """Rollouts of one live group: ``(rollouts, kept_rows, skipped, clamped, negligible)``."""
     rollouts: list[Rollout] = []
     kept: list[int] = []
     prompt = cols.prompts[rows.start]
-    skipped = clamped = 0
+    skipped = clamped = negligible = 0
     for r in rows:
         if cols.prompts[r] != prompt:
             raise ValueError(
@@ -273,6 +306,9 @@ def _group_rollouts(
         n = cols.lengths[r]
         if n == 0:
             skipped += 1
+            continue
+        if abs(cols.advantages[r]) < NEAR_DEAD_ADVANTAGE:
+            negligible += 1
             continue
         lp, n_clamped = clamp_logprobs(cols.logprobs[r][:n], row=r)
         clamped += n_clamped
@@ -285,23 +321,27 @@ def _group_rollouts(
             Rollout(tokens=cols.completions[r][:n], logprobs=lp, reward=cols.advantages[r], metadata=metadata)
         )
         kept.append(r)
-    return rollouts, kept, skipped, clamped
+    return rollouts, kept, skipped, clamped, negligible
 
 
 def rows_to_groups(
     output: dict, *, num_generations: int, step: int, logprobs: torch.Tensor,
     reward_names: Optional[Sequence[str]] = None, rewards_per_func: Optional[torch.Tensor] = None,
+    equal_rewards_are_dead: bool = True,
 ) -> RowConversion:
     """Turn a TRL output dict into ``Rollout`` groups ready for ``add_group``.
 
     ``logprobs`` are the behavior logprobs for every row (TRL's
     ``old_per_token_logps`` or ones computed by the caller), shape
-    ``(B, Lc)``. Zero-variance groups and rows with an empty completion
-    mask are left out and counted; the rows of zero-variance groups are
-    returned so the caller can replace them. ``reward_names`` and
+    ``(B, Lc)``. Dead groups (see ``NEAR_DEAD_ADVANTAGE``), rows with an
+    empty completion mask and rows with a negligible advantage are left out
+    and counted; the rows of dead groups are returned so the caller can
+    replace them. ``reward_names`` and
     ``rewards_per_func`` (``(B, F)``, given together or not at all) attach
     each row's per-reward-function values to its metadata; see the module
-    docstring.
+    docstring. ``equal_rewards_are_dead`` enables the equal-reward-tuple
+    test of ``_is_dead``; pass False unless TRL aggregates with
+    ``sum_then_normalize``.
 
     Raises
     ------
@@ -320,21 +360,22 @@ def rows_to_groups(
     cols = _columns(output, logprobs, reward_names, rewards_per_func)
     groups: list[GroupSpec] = []
     dead_rows: list[int] = []
-    skipped = clamped = near_dead = 0
+    skipped = clamped = near_dead = negligible = 0
     for g in range(batch // num_generations):
         rows = range(g * num_generations, (g + 1) * num_generations)
-        if all(cols.advantages[r] == 0.0 for r in rows):
+        if _is_dead(cols, rows, equal_rewards_are_dead):
             dead_rows.extend(rows)
             continue
         if all(abs(cols.advantages[r]) < NEAR_DEAD_ADVANTAGE for r in rows):
             near_dead += 1
-        rollouts, kept, n_skipped, n_clamped = _group_rollouts(cols, rows, g, step)
+        rollouts, kept, n_skipped, n_clamped, n_negligible = _group_rollouts(cols, rows, g, step)
         skipped += n_skipped
         clamped += n_clamped
+        negligible += n_negligible
         if rollouts:
             groups.append(GroupSpec(prompt_id_of(cols.prompts[rows.start]), tuple(rollouts), tuple(kept)))
     return RowConversion(
-        tuple(groups), tuple(dead_rows), len(dead_rows) // num_generations, skipped, clamped, near_dead
+        tuple(groups), tuple(dead_rows), len(dead_rows) // num_generations, skipped, clamped, near_dead, negligible
     )
 
 
@@ -511,8 +552,47 @@ def verify_written_rows(output: dict, rows: Sequence[int], rollouts: Sequence[Ro
             raise ValueError(f"row {r}: written advantage {float(output['advantages'][r])} is not {adv}")
 
 
+PER_TOKEN_LOGPROB_KEYS: Final[tuple[str, ...]] = ("old_per_token_logps", "ref_per_token_logps")
+"""Digested under the completion mask; see ``tensor_digest``."""
+
+TENSOR_DIGEST_KEYS: Final[tuple[str, ...]] = (
+    "prompt_ids", "prompt_mask", "completion_ids", "completion_mask", "advantages", "old_per_token_logps",
+)
+
+
+def tensor_digest(output: dict) -> str:
+    """BLAKE2b-256 over the final batch tensors the loss consumes.
+
+    Each tensor in ``TENSOR_DIGEST_KEYS`` that the batch has (and
+    ``ref_per_token_logps`` and the loss normaliser ``num_items_in_batch``
+    when present, the latter a 0-d tensor or an int) is fed as ``name|shape|kind`` followed by its values in a
+    fixed-width little-endian encoding: integer tensors as int64, float
+    tensors as float64. The per-token logprob tensors are zeroed outside
+    the completion mask first: the loss never reads those positions and
+    what sits there is padding, which differs between a forward over the
+    whole batch and per-rank forwards padded together. The digest
+    therefore depends on the values the loss consumes and the padded
+    shape, not on dtype, device or padding garbage, and a holder of the
+    batch can recompute it without this package.
+    """
+    h = hashlib.blake2b(digest_size=32, person=b"batch-tensors\x00\x00")
+    keys = [k for k in TENSOR_DIGEST_KEYS + ("ref_per_token_logps", "num_items_in_batch") if k in output]
+    mask = output["completion_mask"].detach().cpu()
+    for key in keys:
+        t = torch.as_tensor(output[key]).detach().cpu().contiguous()
+        if key in PER_TOKEN_LOGPROB_KEYS:
+            t = t.masked_fill(mask == 0, 0.0)  # a fill, not a multiply: -0.5 * 0 is -0.0, a different byte pattern
+        kind = "f64" if t.is_floating_point() else "i64"
+        h.update(f"{key}|{'x'.join(str(d) for d in t.shape)}|{kind}\n".encode())
+        t = t.to(torch.float64) if t.is_floating_point() else t.to(torch.int64)
+        h.update(t.numpy().astype("<f8" if kind == "f64" else "<i8", copy=False).tobytes())
+    return h.hexdigest()
+
+
 __all__ = [
     "MAX_POSITIVE_LOGPROB",
+    "PER_TOKEN_LOGPROB_KEYS",
+    "TENSOR_DIGEST_KEYS",
     "GroupSpec",
     "RowConversion",
     "clamp_logprobs",
@@ -520,6 +600,7 @@ __all__ = [
     "prefix_mask_lengths",
     "prompt_id_of",
     "rows_to_groups",
+    "tensor_digest",
     "suffix_mask_lengths",
     "verify_written_rows",
     "write_rows",

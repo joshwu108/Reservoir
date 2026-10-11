@@ -63,23 +63,25 @@ Per training step:
 
 1. Behavior logprobs are verl's ``old_log_probs``, which ``fit`` computes
    on every batch before the update, so no extra forward is needed.
-2. Store: every row of a live group becomes a ``Rollout`` (``reward`` =
-   the row's advantage, the value the loss consumes) and each group one
-   ``add_group(prompt_id, model_version=global_steps, ...)``.
-3. Replay: with ``d`` dead rows, ``sample(d, current_version=global_steps)``
-   draws rollouts and writes them into the dead rows, each advantage
+2. Replay: with ``d`` dead rows, ``sample(d, current_version=global_steps)``
+   draws rollouts stored at earlier steps (the buffer's ``min_entry_age``
+   is 1) and writes them into the dead rows, each advantage
    multiplied by its importance-sampling weight (exact for every loss
    mode that is positively homogeneous in the advantage: ``vanilla``,
    ``gspo``, ``gpg``, ``geo_mean``; ``clip_cov`` and ``kl_cov`` rank
    tokens by covariance with the advantage and are refused with
    ``beta > 0``). The batch is padded if a replayed sequence is longer
    than the current width.
-4. Every replaced row is re-read and checked against the sampled rollout
+3. Every replaced row is re-read and checked against the sampled rollout
    (``verify_written_rows``), a batch witness naming which row holds
    which draw is written, replay health is measured (one
    ``_compute_old_log_prob`` call over the replayed rows for the
    log-ratios) and logged under ``reservoir/*`` next to ``actor/*``, and
    the optional drift gate declines rows whose log-ratio is too large.
+4. Store: every row of a live group becomes a ``Rollout`` (``reward`` =
+   the row's advantage, the value the loss consumes) and each group one
+   ``add_group(prompt_id, model_version=global_steps, ...)``, after the
+   replay, so no replayed row duplicates a row of the same batch.
 
 A step with no dead groups, or an empty buffer, hands the original
 ``_update_actor`` the very ``DataProto`` ``fit`` built. Versions,
@@ -134,7 +136,12 @@ from reservoir.integrations._verl_rows import (
     verify_written_rows,
     write_rows,
 )
-from reservoir.integrations.trl import StoredAdvantagePriority, _validated_gate
+from reservoir.integrations._replay_common import (
+    StoredAdvantagePriority,
+    _validated_floor,
+    _validated_gate,
+    rescore_placed,
+)
 from reservoir.priorities import PriorityStrategy, ReplaySignal, validated_rescore
 from reservoir.rollout_attest import AttestTarget
 from reservoir.rollout_buffer import RolloutBatch, RolloutBuffer
@@ -161,7 +168,7 @@ NON_HOMOGENEOUS_LOSS_MODES: Final[tuple[str, ...]] = ("clip_cov", "kl_cov")
 STAT_NAMES: Final[tuple[str, ...]] = (
     "hook_calls", "ingested_rows", "ingested_groups", "dead_groups", "skipped_rows", "clamped_logprobs",
     "replaced_rows", "near_dead_groups", "declined_rows", "telemetry_forwards", "rescored_rows", "rescaled_rows",
-    "dropped_rollout_logprobs",
+    "dropped_rollout_logprobs", "age_floor_skips", "negligible_rows",
 )
 
 CHECKPOINT_DIR_PREFIX: Final[str] = "global_step_"
@@ -227,7 +234,10 @@ class ReservoirReplay:
     ``staleness_policy`` (a ``StalenessPolicy`` or preset name; its
     decisions go to the telemetry record), ``max_log_ratio`` and
     ``max_declines_per_step`` (the legacy drift gate, off
-    by default).
+    by default) and ``min_entry_age`` (0 or 1, default 1: dead rows are replaced
+    before the step's live groups are stored, and nothing stored at the
+    current step is drawn; a sample emptied by that floor is counted in
+    ``stats["age_floor_skips"]``).
 
     Attributes
     ----------
@@ -261,6 +271,7 @@ class ReservoirReplay:
         staleness_policy: Union[StalenessPolicy, str, None] = None,
         max_log_ratio: Optional[float] = None,
         max_declines_per_step: Optional[int] = None,
+        min_entry_age: int = 1,
         **rollout_buffer_kwargs: Any,
     ) -> None:
         if manifest is not None and attest is None:
@@ -268,7 +279,7 @@ class ReservoirReplay:
         kwargs = dict(
             capacity=capacity, priority=priority if priority is not None else StoredAdvantagePriority(),
             half_life=half_life, max_policy_age=max_policy_age, beta=beta, seed=seed, attest=attest,
-            manifest=manifest, **rollout_buffer_kwargs,
+            manifest=manifest, min_entry_age=_validated_floor(min_entry_age), **rollout_buffer_kwargs,
         )
         self.buffer: Union[RolloutBuffer, DurableRolloutBuffer] = (
             RolloutBuffer(**kwargs) if directory is None else DurableRolloutBuffer(directory, **kwargs)
@@ -294,10 +305,11 @@ class ReservoirReplay:
         ``global_steps``, ``config``, ``tokenizer`` and
         ``_compute_old_log_prob``). Returns ``data`` itself when nothing was
         replaced, otherwise a new ``DataProto``; the tensors of ``data`` are
-        never modified. Order matters: groups are stored, the buffer is
-        advanced to ``global_steps`` (evicting entries older than
-        ``max_policy_age``), and only then are dead rows replaced from
-        whatever is still live. If the buffer raises while groups are
+        never modified. Order matters: the buffer is advanced to
+        ``global_steps`` (evicting entries older than ``max_policy_age``),
+        dead rows are replaced from whatever is still live, and only then
+        are this step's live groups stored, so a replayed row is never one
+        the batch already holds. If the buffer raises while groups are
         being stored, the groups stored before it stay stored and the
         counters are not updated.
         """
@@ -309,18 +321,24 @@ class ReservoirReplay:
         conversion = rows_to_groups(tensors, uids, step=step)
         self.last_replay = None
         self.stats["hook_calls"] += 1
+        if step > self.buffer.current_version:
+            self.buffer.advance(step)
+        new = None
+        if conversion.dead_rows and self.buffer.size and self.buffer.total:
+            new = self._replay(data, tensors, uids, trainer, step, conversion)
+        if new is None:
+            self._telemetry(step, None, [], [], len(uids), conversion, 0)
+        self._ingest(conversion, step)
+        return data if new is None else new
+
+    def _ingest(self, conversion, step: int) -> None:
+        """Add every live group of the step to the buffer, after its dead rows were replaced."""
         for group in conversion.groups:
             self.buffer.add_group(group.prompt_id, step, group.rollouts, source=self.source)
         self.stats["ingested_rows"] += sum(len(g.rollouts) for g in conversion.groups)
         self.stats["ingested_groups"] += len(conversion.groups)
-        for name in ("dead_groups", "near_dead_groups", "skipped_rows", "clamped_logprobs"):
+        for name in ("dead_groups", "near_dead_groups", "skipped_rows", "clamped_logprobs", "negligible_rows"):
             self.stats[name] += getattr(conversion, name)
-        if step > self.buffer.current_version:
-            self.buffer.advance(step)
-        if not conversion.dead_rows or self.buffer.size == 0 or self.buffer.total == 0:
-            self._telemetry(step, None, [], [], len(uids), conversion, 0)
-            return data
-        return self._replay(data, tensors, uids, trainer, step, conversion)
 
     def _check_version(self, step: int) -> None:
         if step < self.buffer.current_version:
@@ -369,9 +387,15 @@ class ReservoirReplay:
             )
 
     def _replay(self, data: Any, tensors: dict, uids: list[str], trainer: Any, step: int, conversion) -> Any:
-        """Sample one rollout per dead row, write them in, gate, verify, witness, measure."""
+        """Sample one rollout per dead row, write them in, gate, verify, witness, measure.
+
+        Returns None when the sample is empty (a live entry is younger than ``min_entry_age``).
+        """
         dead_rows = list(conversion.dead_rows)
         batch = self.buffer.sample(len(dead_rows), current_version=step)
+        if not batch.indices:
+            self.stats["age_floor_skips"] += 1
+            return None
         rewards = [r.reward for r in batch.rollouts]
         unit = place(rewards, batch.is_weights, ()).weighted           # importance-weighted, before the policy
         pad = _pad_token_id(trainer)
@@ -392,8 +416,9 @@ class ReservoirReplay:
             new = provisional
         rows = [dead_rows[k] for k in kept]
         verify_written_rows(new, rows, [batch.rollouts[k] for k in kept], weighted)
-        self.buffer.witness_batch(batch, step=step, batch_rows=len(uids), rows=rows,
-                                  tensor_digest=tensor_digest(new), declined=declined)
+        meta_info = {**data.meta_info, "global_token_num": global_token_num(new["attention_mask"])}
+        self.buffer.witness_batch(batch, step=step, batch_rows=len(uids), rows=rows, declined=declined,
+                                  tensor_digest=tensor_digest(new, token_nums=meta_info["global_token_num"]))
         # Telemetry describes the sampled batch and is recomputed by the checker from the live
         # slots, so it is written before any declined entry is evicted.
         self._telemetry(step, batch, ratios, kept, len(uids), conversion, len(declined), decisions)
@@ -409,8 +434,6 @@ class ReservoirReplay:
         new_uids = list(uids)
         for k in kept:
             new_uids[dead_rows[k]] = str(batch.rollouts[k].metadata.get("uid", batch.groups[k].prompt_id))
-        meta_info = dict(data.meta_info)
-        meta_info["global_token_num"] = global_token_num(new["attention_mask"])
         return type(data).from_dict(
             tensors=new, non_tensors={"uid": np.array(new_uids, dtype=object)}, meta_info=meta_info,
         )
@@ -457,28 +480,8 @@ class ReservoirReplay:
         return [float(x) for x in ratios.detach().cpu().tolist()]
 
     def _rescore(self, batch: RolloutBatch, kept: list[int], weighted: list[float], ratios: list[float], step: int) -> None:
-        """Ask the strategy for new priorities of the placed rollouts; a slot drawn twice is rescored once."""
-        indices: list[int] = []
-        scores: list[float] = []
-        seen: set[int] = set()
-        for position, k in enumerate(kept):
-            slot = batch.indices[k]
-            if slot in seen:
-                continue
-            seen.add(slot)
-            ratio = ratios[k] if ratios else None
-            signal = ReplaySignal(
-                advantage=weighted[position], is_weight=float(batch.is_weights[k]),
-                log_ratio=ratio if ratio is not None and math.isfinite(ratio) else None,
-                age=self.buffer.current_version - batch.model_versions[k], step=step,
-            )
-            value = validated_rescore(self.buffer.priority, batch.rollouts[k], batch.groups[k], signal)
-            if value is not None:
-                indices.append(slot)
-                scores.append(value)
-        if indices:
-            self.buffer.update_priorities(indices, scores)
-            self.stats["rescored_rows"] += len(indices)
+        """New priorities for the placed rollouts; see ``rescore_placed``."""
+        self.stats["rescored_rows"] += rescore_placed(self.buffer, batch, kept, weighted, ratios, step)
 
     def _telemetry(self, step: int, batch: Optional[RolloutBatch], ratios: list[float], kept: list[int],
                    batch_rows: int, conversion, declined: int, decisions: tuple[RowDecision, ...] = ()) -> None:

@@ -16,7 +16,7 @@ from fractions import Fraction
 
 import pytest
 
-from checker.verify import CheckerError, verify_json_lines
+from checker.verify import CheckerError, verify_chain, verify_json_lines
 from reservoir.attest import AttestationLog
 from reservoir.decay import DecayParams, inflated_priority, quantize_priority
 from reservoir.priorities import AdvantagePriority, PassRateVariance, PriorityStrategy
@@ -565,3 +565,37 @@ class TestContentCommitment:
         buf = make_buffer(attest=AttestationLog())
         buf.add_group("p", 0, rollouts([1.0]))
         assert not buf.has_manifest and buf.manifest_records == []
+
+
+# ---------------------------------------------------------------------------
+# A failed sample changes nothing
+# ---------------------------------------------------------------------------
+
+class _RawPriority(PriorityStrategy):
+    """The reward itself, so leaves can be set exactly."""
+
+    def score(self, rollout: Rollout, group: RolloutGroup) -> float:
+        return rollout.reward
+
+
+class TestFailedSample:
+    @pytest.mark.parametrize("bad", [1.0000001, 2.0, 100.0])
+    def test_beta_above_one_is_refused_at_construction(self, bad: float) -> None:
+        with pytest.raises(ValueError, match="beta"):
+            make_buffer(beta=bad)
+        assert make_buffer(beta=1.0).beta == 1.0
+
+    def test_an_overflowing_weight_raises_before_any_counter_moves(self) -> None:
+        log = AttestationLog()
+        buf = make_buffer(priority=_RawPriority(), attest=log)
+        buf.add_group("p", 0, rollouts([1.0, 32767.0]))
+        assert sorted(buf.leaf(p) for p in buf.live_positions()) == [65536, 2147418112]
+        buf.beta = 100.0              # past the construction bound, so the weight overflows a double
+        with pytest.raises(ValueError, match="beta"):
+            buf.sample(2)
+        assert buf._draw_counter == 0 and buf._op_counter == 0
+        assert not any(r["op"] == "sample" for r in log.records)
+        verify_chain(log.records)
+        buf.beta = 0.4                # back to the logged value: the next draw is counter 0 and verifies
+        buf.sample(2)
+        verify_chain(log.records)

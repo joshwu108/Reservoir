@@ -560,7 +560,8 @@ buffer built on §7. Its rules, each tested in `tests/test_rollout_buffer.py`:
 | Capacity | Freed slots reused lowest-index first; when short, the lowest-version entries are evicted (ties: insertion order). A group never displaces entries newer than itself: `add_group` raises | A late group must not push out fresher data |
 | Age on update | Kept, unless `reset_age_on_update=True` | §7.4 |
 | Sampling | With replacement; `batch_size` may exceed the live count. Draws keyed on a per-rollout counter, so no two draws share a key whatever batch sizes are used | `ExactPERBuffer`'s `batch * batch_size + k` keys collide when batch sizes vary |
-| IS weights | `(N·P(i))^-β / (N·P_min)^-β`, `P(i)` from the decayed leaf, min over positive leaves | Same formula as §6; zero-weight entries are live but excluded from the minimum |
+| Minimum entry age | `min_entry_age` (default 0) at construction, at most `max_policy_age`. Draws stay keyed over the whole tree, so while any live entry has `current_version - entry_version < min_entry_age` a `sample` returns an empty batch and records and counts nothing. Every sample record carries `min_entry_age` and every drawn slot its `entry_version`, both decimal strings | A floor enforced by filtering the draw would change `root_total` and the descent the checker replays; refusing keeps both. The recorded fields are there for a checker to confirm each draw's age (not yet checked by this repository's checker; nonclaims §13) |
+| IS weights | `(N·P(i))^-β / (N·P_min)^-β`, `P(i)` from the decayed leaf, min over positive leaves; `β ∈ [0, 1]` at construction, and `(N·P_min)^-β` is computed before any counter moves, so a weight that overflows a double raises `ValueError` with the op and draw counters unmoved and no sample record (an `advance` to a newer `current_version` stays applied and logged) | Same formula as §6; zero-weight entries are live but excluded from the minimum. A counter bumped by a failed sample would make the checker reject the next legitimate draw |
 | Errors | All validation before any mutation; a bad group, score or index leaves the buffer unchanged | Lets the durable wrapper treat an exception as "nothing happened" |
 
 `DurableRolloutBuffer` (`durable_rollout.py`) appends each operation's inputs
@@ -644,9 +645,21 @@ survived truncation.
    `trainer._get_per_token_logps_and_entropies`. Values in `(0, 10⁻³]` are
    clamped to 0 and counted; larger or non-finite values raise naming the
    row.
-3. Store: `add_group(prompt_id, global_step, rollouts)` for every live group.
-   Dead groups (all advantages `0.0`) and rows with an empty mask are
-   skipped and counted.
+3. Convert: live groups become `Rollout`s. A group is dead when all its
+   advantages are exactly `0.0` or, with reward provenance (the mixin
+   captures `rewards_per_func` from `_calculate_rewards`), when every row
+   has the same per-function reward tuple, compared exactly with an
+   abstention (NaN) matching only an abstention. The second test catches
+   TRL's float32 residue: equal rewards of 0.9 in a group of 7 leave
+   `-5.96e-4` in every row (`tests/test_trl_rows.py`). It applies only
+   under TRL's default `multi_objective_aggregation="sum_then_normalize"`;
+   `normalize_then_sum` re-centres over the whole batch, where equal tuples
+   get a nonzero advantage. Dead groups, rows with an empty mask and rows
+   with `|advantage| < 1e-3` are left out and counted (`dead_groups`,
+   `skipped_rows`, `negligible_rows`); a live group made only of such small
+   rows is also counted in `near_dead_groups`. The cut is absolute: under
+   `scale_rewards="none"` with rewards below that scale it drops real rows
+   from the store (not from the batch).
 4. Advance the buffer to `global_step` (stale eviction, rebase if due).
 5. Replay: with `d` dead rows and a non-empty buffer,
    `sample(d, current_version=global_step)`; each sampled rollout is written
@@ -655,7 +668,14 @@ survived truncation.
    first if a replayed sequence is longer than the current width, and
    `num_items_in_batch` is recomputed from the final mask. A row in one dead
    slot may come from any prompt; the loss does not need group contiguity.
-6. A step with nothing to replay returns the dict TRL produced, unchanged
+   The adapter builds its buffer with `min_entry_age=1` (§8) and nothing of
+   this step has been stored yet, so no replayed row is a copy of a row the
+   batch already holds. When TRL generates more than once per optimizer
+   step, a later generation finds the earlier one's groups at age 0, the
+   sample is empty, its dead rows stay dead and `stats["age_floor_skips"]`
+   counts it. `min_entry_age=0` lifts the floor.
+6. Store: `add_group(prompt_id, global_step, rollouts)` for every live group.
+7. A step with nothing to replay returns the dict TRL produced, unchanged
    (the extra forward of step 2 may still have run; nonclaims §14).
 
 Every function in `_trl_rows.py` returns new tensors; TRL's own tensors are
@@ -899,7 +919,7 @@ writes one `batch` record (`RolloutBuffer.witness_batch`):
 {"op": "batch", "step": "<trainer step>", "sample_op_counter": <op_counter of the sample record>,
  "batch_rows": <rows in the training batch>,
  "replaced": [{"row": <int>, "draw": <position in the sample record>, "content_digest": "<hex>"}, ...],
- "tensor_digest": "<BLAKE2b-256 of canonical JSON of the final prompt ids, completion ids and advantages>"}
+ "tensor_digest": "<BLAKE2b-256 over the final batch tensors and loss normaliser; see below>"}
 ```
 
 An optional `declined` list names draw positions the adapter refused to
@@ -916,10 +936,16 @@ every draw is placed or declined exactly once, every row is inside the
 batch and replaced at most once, each row's digest equals the digest the
 draw resolved to, sample `op_counter` values increase, and no sample is
 witnessed twice. `reservoir-transcript --explain STEP ROW` answers why a
-row holds what it holds. The tensor digest (prompt ids, masks, completion
-ids, advantages and behavior logprobs, the per-token logprobs zeroed outside
-the completion mask, in a fixed-width encoding) is a
-commitment the log cannot open; a holder of the batch can. The `format`
+row holds what it holds. The tensor digest (in this order: prompt ids and
+mask, completion ids and mask, advantages, behavior logprobs, reference
+logprobs when present, the per-token logprobs zeroed outside the
+completion mask, then `num_items_in_batch` when present, the normaliser
+the `dapo`, `cispo` and `vespo` losses divide by; each as
+`name|shape|kind` and fixed-width little-endian values, int64 for integer
+and bool tensors and float64 for floating ones, so a recomputation must
+keep each value's dtype and shape) is a
+commitment the log cannot open; a holder of the batch can. Changing the
+normaliser changes the digest (`tests/test_witness_normaliser.py`). The `format`
 field of `decay_config` is `"2"` for logs that may carry witnesses and
 telemetry and `"3"` for logs that may also carry quarantine evictions
 (§10.10); the checker reads formats 1 to 3 and refuses each record kind in
@@ -1118,10 +1144,17 @@ overrides `_update_actor`: it hands the batch to `ReservoirReplay.mix` and
 passes the result to the original. It also wraps `_compute_old_log_prob`
 (the hook-ran check runs there, once per step before the update),
 `_save_checkpoint` and `_load_checkpoint` (checkpoint binding) and `fit`
-(final hook-ran check). No verl method body is copied. The dead-group
-criterion is exact: `compute_grpo_outcome_advantage` computes
-`(score - mean) / (std + eps)` per uid and an all-equal group has a zero
-numerator, so every row of such a group is `0.0` in every response token.
+(final hook-ran check). No verl method body is copied. A group is
+dead when every row's advantage is exactly `0.0` or when two or more rows
+share one score (`token_level_scores` summed, compared exactly):
+`compute_grpo_outcome_advantage` computes `(score - mean) / (std + 1e-6)`
+per uid in float32, and equal non-dyadic scores leave a rounding residue
+of a few hundredths (0.3 six times, `tests/test_verl_rows.py`). A lone
+response is never dead by its score, since verl gives it mean 0 and std 1.
+Scores stand for the rewards the advantage is computed from because
+KL-in-reward is refused (§12.4 step 1). Rows with `|advantage| < 1e-3` are
+not stored, as in §9.4, with the same caveat for
+`norm_adv_by_std_in_grpo=False`.
 
 ### 12.3 Field mapping
 
@@ -1168,12 +1201,13 @@ wrong for a replayed row) and the original `meta_info` with
    KL-in-reward (`token_level_rewards != token_level_scores`), 3-D position
    ids, a response mask that is not a prefix mask (multi-turn tool output
    masked in the middle), advantages that vary over a row's tokens.
-2. Store: `add_group(prompt_id, global_steps, rollouts)` for every live
-   uid. Dead groups and rows with an empty response are skipped and
-   counted.
+2. Convert: live uids become `Rollout`s; dead groups and rows with an
+   empty response are left out and counted.
 3. Advance the buffer to `global_steps`.
 4. Replay: with `d` dead rows and a non-empty buffer,
-   `sample(d, current_version=global_steps)`; the rows are rewritten as in
+   `sample(d, current_version=global_steps)` under the buffer's
+   `min_entry_age=1`, before this step's groups are stored (§9.4 step 5,
+   counter `age_floor_skips`); the rows are rewritten as in
    §12.3, the batch padded first if a replayed sequence is longer than the
    current width, every replaced row re-read against its rollout, the
    batch witness written with the tensor digest of §12.5, and telemetry
@@ -1181,7 +1215,9 @@ wrong for a replayed row) and the original `meta_info` with
    `_compute_old_log_prob` call over the replayed rows. The telemetry goes
    into the actor output's `meta_info["metrics"]` under `reservoir/*`,
    which `fit` reduces and logs next to `actor/*`.
-5. A step with nothing to replay hands the original `_update_actor` the
+5. Store: `add_group(prompt_id, global_steps, rollouts)` for every live
+   uid.
+6. A step with nothing to replay hands the original `_update_actor` the
    `DataProto` `fit` built.
 
 Importance weights fold into the advantage as in §9.5: verl's `vanilla`,
@@ -1196,8 +1232,13 @@ BLAKE2b-256 (personalisation `verl-batch`) over `input_ids`,
 `old_log_probs` and `ref_log_prob` when present, as `name|shape|kind`
 followed by the values in fixed-width little-endian encoding (int64 or
 float64), with per-token tensors zeroed outside `response_mask` and
-`position_ids` zeroed outside `attention_mask`, so the digest depends on
-what the model and the loss consume and the padded shape only.
+`position_ids` zeroed outside `attention_mask`, then
+`global_token_num|<rows>|i64` and the `meta_info["global_token_num"]`
+handed to the actor as little-endian int64. That value is derived from
+`attention_mask`, so the term binds the meta value to the mask rather than
+adding a new quantity; whether a given verl release's loss reads it is not
+checked here (verl is not installed in this repository's test environment).
+The digest depends on what the model consumes and the padded shape only.
 
 ### 12.6 Checkpoints
 
