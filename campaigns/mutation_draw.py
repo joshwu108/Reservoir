@@ -24,6 +24,7 @@ from __future__ import annotations
 import copy
 from fractions import Fraction
 
+from campaigns.mutation_reasons import rejection, tally
 from checker.verify import CheckerError, verify_chain
 
 Mutant = tuple[list[dict], str]
@@ -135,15 +136,8 @@ def run_draw_category(results: dict) -> None:
     """Append the ``draw`` category and the ``draw_limit`` measurement to ``results``."""
     base = build_seeded_chain()
     mutants = draw_mutants(base)
-    count = 0
-    for records, description in mutants:
-        results["total_mutants"] += 1
-        if rejected(records):
-            results["rejected"] += 1
-            count += 1
-        else:
-            results["survived"].append(description)
-    results["details"].append(("draw", len(mutants), count))
+    tally(results, "draw", [(description, rejection(lambda r=records: verify_chain(r)))
+                              for records, description in mutants])
 
     # Measured limit of a log without the draw configuration: a draw moved
     # inside its leaf, or a reweighted sample, can survive the range and

@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import copy
 import math
+from typing import Optional
 
+from campaigns.mutation_reasons import rejection, tally
 from reservoir_checker.verify import CheckerError, verify_chain
 
 Mutant = tuple[list[dict], str]
@@ -32,7 +34,8 @@ GROUP_SIZE = 2
 RATIOS = [0.0, math.log(8.0), float("nan"), 3.0]
 
 
-def build_staleness_chain(seed: int = 3) -> list[dict]:
+def build_staleness_chain(seed: int = 3, last_step_ratios: Optional[list[float]] = None) -> list[dict]:
+    """Three steps with every policy stage exercised; ``last_step_ratios`` replaces the last step's log-ratios."""
     from reservoir.attest import AttestationLog
     from reservoir.integrations._trl_staleness import StalenessPolicy, decide, evictions_for
     from reservoir.rollout import Rollout
@@ -45,20 +48,21 @@ def build_staleness_chain(seed: int = 3) -> list[dict]:
                                          for i, r in enumerate((1.0, 0.8, 0.5))], source="s")
         if step > buf.current_version:
             buf.advance(step)
-        batch = buf.sample(len(RATIOS), current_version=step)
+        ratios = last_step_ratios if last_step_ratios is not None and step == 2 else RATIOS
+        batch = buf.sample(len(ratios), current_version=step)
         ages = [buf.current_version - v for v in batch.model_versions]
-        rows = list(range(4, 4 + len(RATIOS)))
-        decisions = decide(policy, ratios=RATIOS, is_weights=batch.is_weights, ages=ages, rows=rows,
+        rows = list(range(4, 4 + len(ratios)))
+        decisions = decide(policy, ratios=ratios, is_weights=batch.is_weights, ages=ages, rows=rows,
                            groups=[r // GROUP_SIZE for r in rows])
         kept = [d for d in decisions if d.kept]
         buf.witness_batch(batch, step=step, batch_rows=8, rows=[d.row for d in kept], tensor_digest="ab" * 32,
                           declined=[d.draw for d in decisions if not d.kept])
-        finite = [abs(r) for r in RATIOS if math.isfinite(r)]
+        finite = [abs(r) for r in ratios if math.isfinite(r)]
         buf.record_telemetry(
             step, dict(batch_rows=8, replaced_rows=len(kept), declined_rows=len(decisions) - len(kept), dead_groups=2,
                        near_dead_groups=0),
             batch, {"log_ratio_mean_abs": sum(finite) / len(finite), "log_ratio_max_abs": max(finite)},
-            log_ratios=RATIOS, policy=policy.to_record(GROUP_SIZE), decisions=[d.to_record() for d in decisions],
+            log_ratios=ratios, policy=policy.to_record(GROUP_SIZE), decisions=[d.to_record() for d in decisions],
         )
         for slot, reason in evictions_for(batch.indices, decisions):
             buf.evict(slot, reason)
@@ -190,15 +194,8 @@ def run_staleness_category(results: dict) -> None:
     """Append the ``staleness`` category to ``results`` and measure ``staleness_limit``."""
     base = build_staleness_chain()
     mutants = staleness_mutants(base)
-    count = 0
-    for records, description in mutants:
-        results["total_mutants"] += 1
-        if rejected(records):
-            results["rejected"] += 1
-            count += 1
-        else:
-            results["survived"].append(description)
-    results["details"].append(("staleness", len(mutants), count))
+    tally(results, "staleness", [(description, rejection(lambda r=records: verify_chain(r)))
+                              for records, description in mutants])
     consistent = consistent_parameter_changes(base)
     passing = [description for records, description in consistent if not rejected(records)]
     results["staleness_limit"] = {

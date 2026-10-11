@@ -31,7 +31,10 @@ What it verifies:
    replayed step are recomputed from the sample record and the replayed
    state; counters are cross-checked against the draws; carried float
    measurements are listed under "reported" (reservoir_checker/telemetry.py).
-12. Content commitments: insert records carry a well-formed content_digest
+12. Entry ages: a sample that declares ``min_entry_age`` draws only slots
+   at least that old, and every draw's ``entry_version`` is the slot's
+   replayed version (reservoir_checker/entry_age.py).
+13. Content commitments: insert records carry a well-formed content_digest
    (all of them or none) and an optional source; every sampled slot holds
    a committed example; with ``--manifest``, the manifest opens exactly the
    log's commitments (see checker/content.py).
@@ -65,9 +68,11 @@ from fractions import Fraction
 from math import gcd
 from typing import Optional
 
-from reservoir_checker.content import ContentState, load_manifest, quarantine_fields
+from reservoir_checker.content import MAX_SAMPLE_DRAWS, ContentState, load_manifest, quarantine_fields
 from reservoir_checker.decay_replay import CheckerError, DecayState, has_decay_fields, parse_config
 from reservoir_checker.draw import draw_uniform_below
+from reservoir_checker.entry_age import has_entry_age_fields, verify_entry_ages
+from reservoir_checker.record_keys import DRAW_KEYS, check_keys, check_record_keys
 from reservoir_checker.telemetry import verify_telemetry
 
 # Domain separator — must match attest.py exactly
@@ -295,6 +300,7 @@ def _verify_record(
 ) -> None:
     """Semantic checks for one record (digest and chain linkage already passed)."""
     op = record.get("op")
+    check_record_keys(record, idx)
     if decay is not None:
         decay.note_record(op, record.get("reason"), idx)
 
@@ -303,37 +309,23 @@ def _verify_record(
             raise CheckerError(f"Record {idx}: decay_config must be the first record")
 
     elif op in ("insert", "update", "evict"):
-        _verify_mutation(record, idx, tree, priorities)
-        if quarantine_fields(record, idx) is not None:
-            _require_format(decay, idx, 3, "quarantine evictions")
-        if has_decay_fields(record):
-            _require_decay(decay, idx, op)
-            _guard_pending(decay, record, idx)
-            decay.on_mutation(record, idx, tree)  # type: ignore[union-attr]
-        elif decay is not None:
-            raise CheckerError(f"Record {idx}: {op} without decay fields in a decayed log")
-        elif "reason" in record:
-            raise CheckerError(f"Record {idx}: reason requires the decay fields")
-        content.on_mutation(record, idx)
+        _verify_mutation_record(record, idx, tree, priorities, decay, content)
 
     elif op == "sample":
-        if decay is not None:
-            decay.require_no_pending(idx, "sample")
-        _verify_sample(record, idx, tree, priorities)
-        if decay is not None:
-            _verify_declared_draws(record, idx, tree, decay)
-        content.on_sample(idx, record)
+        _verify_sample_record(record, idx, tree, priorities, decay, content)
 
     elif op == "batch":
         _require_format(decay, idx, 2, "batch witnesses")
         decay.require_no_pending(idx, op)  # type: ignore[union-attr]
         content.on_batch(idx, record)
+        _require_step_is_version(content.witnesses[-1]["step"], decay, idx, "batch witness")
 
     elif op == "telemetry":
         _require_format(decay, idx, 2, "telemetry records")
         decay.require_no_pending(idx, op)  # type: ignore[union-attr]
-        versions = {pos: version for pos, (_, version) in decay.entries.items()}  # type: ignore[union-attr]
-        content.telemetry.append(verify_telemetry(record, idx, content, versions, decay.current_version))  # type: ignore[union-attr]
+        point = verify_telemetry(record, idx, content, decay.entries, decay.current_version)  # type: ignore[union-attr]
+        _require_step_is_version(point.step, decay, idx, "telemetry")
+        content.telemetry.append(point)
 
     elif op == "advance_version":
         _require_decay(decay, idx, op)
@@ -347,6 +339,38 @@ def _verify_record(
 
     else:
         raise CheckerError(f"Record {idx}: unknown op {op!r}")
+
+
+def _verify_mutation_record(record: dict, idx: int, tree: _SumTree, priorities: dict[int, int],
+                            decay: Optional[DecayState], content: ContentState) -> None:
+    """An insert, update or evict: tree effect, decay replay, quarantine texts, content commitments."""
+    op = record["op"]
+    _verify_mutation(record, idx, tree, priorities)
+    if quarantine_fields(record, idx) is not None:
+        _require_format(decay, idx, 3, "quarantine evictions")
+    if has_decay_fields(record):
+        _require_decay(decay, idx, op)
+        _guard_pending(decay, record, idx)
+        decay.on_mutation(record, idx, tree)  # type: ignore[union-attr]
+    elif decay is not None:
+        raise CheckerError(f"Record {idx}: {op} without decay fields in a decayed log")
+    elif "reason" in record:
+        raise CheckerError(f"Record {idx}: reason requires the decay fields")
+    content.on_mutation(record, idx)
+
+
+def _verify_sample_record(record: dict, idx: int, tree: _SumTree, priorities: dict[int, int],
+                          decay: Optional[DecayState], content: ContentState) -> None:
+    """A sample: draws against the replayed tree, keyed draws and weights, entry ages, resolved content."""
+    if decay is not None:
+        decay.require_no_pending(idx, "sample")
+    _verify_sample(record, idx, tree, priorities)
+    if decay is not None:
+        _verify_declared_draws(record, idx, tree, decay)
+        verify_entry_ages(record, idx, decay)
+    elif has_entry_age_fields(record):
+        raise CheckerError(f"Record {idx}: min_entry_age and entry_version need a log with decay fields")
+    content.on_sample(idx, record)
 
 
 def _decay_state(first: dict, capacity: Optional[int]) -> Optional[DecayState]:
@@ -375,6 +399,14 @@ def _require_format(decay: Optional[DecayState], idx: int, minimum: int, what: s
     if int(decay.cfg["format"]) < minimum:  # type: ignore[union-attr]
         raise CheckerError(
             f"Record {idx}: {what} need a format-{minimum} log or later (decay_config format \"{minimum}\")"
+        )
+
+
+def _require_step_is_version(step: int, decay: Optional[DecayState], idx: int, what: str) -> None:
+    """A witness or telemetry ``step`` is the model version the buffer was at, not a free label."""
+    if step != decay.current_version:  # type: ignore[union-attr]
+        raise CheckerError(
+            f"Record {idx}: {what} step {step} is not the buffer version {decay.current_version}"  # type: ignore[union-attr]
         )
 
 
@@ -439,6 +471,12 @@ def _verify_sample(
         samples = record["samples"]
     except (KeyError, ValueError) as e:
         raise CheckerError(f"Record {idx}: malformed sample record: {e}") from e
+    if not isinstance(samples, list):
+        raise CheckerError(f"Record {idx}: samples must be a list")
+    if not samples:
+        raise CheckerError(f"Record {idx}: the sample record draws nothing; the buffer never writes an empty sample")
+    if len(samples) > MAX_SAMPLE_DRAWS:
+        raise CheckerError(f"Record {idx}: {len(samples)} draws exceeds the checker's limit of {MAX_SAMPLE_DRAWS}")
 
     # 1. root_total must match replayed tree
     actual_total = tree.total
@@ -449,67 +487,47 @@ def _verify_sample(
         )
 
     for k, s in enumerate(samples):
-        try:
-            leaf_index = s["leaf_index"]
-            draw_int = _strict_int_value(s, "draw_int", idx)
-            prob_num = _strict_int_value(s, "prob_num", idx)
-            prob_den = _strict_int_value(s, "prob_den", idx)
-            is_w_num = _strict_int_value(s, "is_weight_num", idx)
-            is_w_den = _strict_int_value(s, "is_weight_den", idx)
-        except (KeyError, ValueError) as e:
-            raise CheckerError(
-                f"Record {idx}, sample {k}: malformed entry: {e}"
-            ) from e
+        _verify_draw(s, k, idx, tree, declared_root_total)
 
-        # 2. draw_int must be in [0, root_total)
-        if not (0 <= draw_int < declared_root_total):
-            raise CheckerError(
-                f"Record {idx}, sample {k}: draw_int={draw_int} "
-                f"not in [0, {declared_root_total})"
-            )
 
-        # 3. prefix_sum_locate(draw_int) must equal leaf_index
-        located = tree.prefix_sum_locate(draw_int)
-        if located != leaf_index:
-            raise CheckerError(
-                f"Record {idx}, sample {k}: draw_int={draw_int} maps to "
-                f"position {located}, but declared leaf_index={leaf_index}"
-            )
+def _verify_draw(s: dict, k: int, idx: int, tree: _SumTree, declared_root_total: int) -> None:
+    """One draw of a sample record: in range, located at its leaf, exact reduced probability and weight."""
+    at = f"Record {idx}, sample {k}"
+    check_keys(s, DRAW_KEYS, at)
+    try:
+        leaf_index = s["leaf_index"]
+        draw_int = _strict_int_value(s, "draw_int", idx)
+        prob_num = _strict_int_value(s, "prob_num", idx)
+        prob_den = _strict_int_value(s, "prob_den", idx)
+        is_w_num = _strict_int_value(s, "is_weight_num", idx)
+        is_w_den = _strict_int_value(s, "is_weight_den", idx)
+    except (KeyError, ValueError) as e:
+        raise CheckerError(f"{at}: malformed entry: {e}") from e
 
-        # 4. declared probability = priority_int / root_total
-        priority_int = tree.get(leaf_index)
-        declared_prob = Fraction(prob_num, prob_den)
-        actual_prob = Fraction(priority_int, declared_root_total)
-        if declared_prob != actual_prob:
-            raise CheckerError(
-                f"Record {idx}, sample {k}: "
-                f"declared prob={prob_num}/{prob_den}, "
-                f"but actual prob={priority_int}/{declared_root_total} "
-                f"(reduced: {actual_prob})"
-            )
+    # draw_int must be in [0, root_total) and locate the declared leaf
+    if not (0 <= draw_int < declared_root_total):
+        raise CheckerError(f"{at}: draw_int={draw_int} not in [0, {declared_root_total})")
+    located = tree.prefix_sum_locate(draw_int)
+    if located != leaf_index:
+        raise CheckerError(f"{at}: draw_int={draw_int} maps to position {located}, but declared leaf_index={leaf_index}")
 
-        # 5. prob_num/prob_den must be in reduced form
-        if gcd(abs(prob_num), abs(prob_den)) != 1:
-            raise CheckerError(
-                f"Record {idx}, sample {k}: prob {prob_num}/{prob_den} "
-                f"is not in reduced form"
-            )
+    # declared probability = priority_int / root_total, in reduced form
+    priority_int = tree.get(leaf_index)
+    actual_prob = Fraction(priority_int, declared_root_total)
+    if Fraction(prob_num, prob_den) != actual_prob:
+        raise CheckerError(f"{at}: declared prob={prob_num}/{prob_den}, but actual prob={priority_int}/"
+                           f"{declared_root_total} (reduced: {actual_prob})")
+    if gcd(abs(prob_num), abs(prob_den)) != 1:
+        raise CheckerError(f"{at}: prob {prob_num}/{prob_den} is not in reduced form")
 
-        # 6. is_weight_num/is_weight_den must be in reduced form
-        if is_w_den == 0:
-            raise CheckerError(f"Record {idx}, sample {k}: is_weight denominator is 0")
-        if gcd(abs(is_w_num), abs(is_w_den)) != 1:
-            raise CheckerError(
-                f"Record {idx}, sample {k}: IS weight {is_w_num}/{is_w_den} "
-                f"is not in reduced form"
-            )
-
-        # 7. IS weight must be in (0, 1] — negative or >1 weights are invalid
-        is_w = Fraction(is_w_num, is_w_den)
-        if not (Fraction(0) < is_w <= Fraction(1)):
-            raise CheckerError(
-                f"Record {idx}, sample {k}: IS weight {is_w} not in (0, 1]"
-            )
+    # the IS weight is a reduced fraction in (0, 1]
+    if is_w_den == 0:
+        raise CheckerError(f"{at}: is_weight denominator is 0")
+    if gcd(abs(is_w_num), abs(is_w_den)) != 1:
+        raise CheckerError(f"{at}: IS weight {is_w_num}/{is_w_den} is not in reduced form")
+    is_w = Fraction(is_w_num, is_w_den)
+    if not (Fraction(0) < is_w <= Fraction(1)):
+        raise CheckerError(f"{at}: IS weight {is_w} not in (0, 1]")
 
 
 def _verify_declared_draws(record: dict, idx: int, tree: _SumTree, decay: DecayState) -> None:
@@ -564,6 +582,19 @@ def _declared_weight(n: int, leaf: int, min_leaf: int, root_total: int, beta: fl
         ) from exc
 
 
+def parse_json_lines(data: str) -> list:
+    """One JSON value per non-empty line; a line the parser refuses is a CheckerError naming it (from 1)."""
+    records = []
+    for lineno, line in enumerate(data.split("\n"), start=1):
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except (ValueError, RecursionError) as exc:   # includes integer literals past the digit limit
+            raise CheckerError(f"log line {lineno}: not valid JSON: {exc}") from exc
+    return records
+
+
 def verify_json_lines(
     data: str,
     capacity: Optional[int] = None,
@@ -586,11 +617,7 @@ def verify_json_lines(
     CheckerError
         If any check fails.
     """
-    records = []
-    for line in data.strip().split("\n"):
-        if not line:
-            continue
-        records.append(json.loads(line))
+    records = parse_json_lines(data)
     lines = load_manifest(manifest) if manifest is not None else None
     return verify_chain(records, capacity, allow_truncated, manifest=lines)
 
