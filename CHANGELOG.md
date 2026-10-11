@@ -68,7 +68,7 @@ whole.
   advantage`) and that under a clipped loss it bounds a proxy. This also
   changes what `max_log_ratio` compares against in the TRL adapter: a
   threshold chosen for summed log-ratios is far looser on means. The verl
-  adapter still sums (*pending*).
+  adapter still sums.
 - **One rule per preset name.** `ReservoirReplay.for_grpo(profile=...)`
   now applies the staleness preset of the same name from the one table
   `PRESET_RULES` that `StalenessPolicy.preset` reads. Its 0.6.0 profiles
@@ -90,40 +90,40 @@ whole.
 
 - The checker binds a batch witness's and a telemetry record's `step` to
   the buffer's version, and requires a sample's witness before any
-  telemetry naming it (*pending*).
+  telemetry naming it.
 - A missing snapshot with a non-empty command log or attestation file
   refuses to open instead of starting fresh and truncating the
   attestation log; surplus on-disk attestation records on reopen are
-  reported; a command-log line from a future epoch refuses (*pending*).
+  reported; a command-log line from a future epoch refuses.
 - Replay no longer draws rows inserted in the same step: a declared
   minimum age, recorded in the sample record and checked by the checker
-  (*pending*).
+ .
 - Dead groups are detected from the per-function rewards rather than
   exact-zero advantages, so float32 residue at group sizes that are not a
-  power of two no longer stores an all-equal group as live (*pending*).
+  power of two no longer stores an all-equal group as live.
 - `num_items_in_batch` (TRL) and `global_token_num` (verl) are covered by
-  the batch witness's tensor digest (*pending*).
+  the batch witness's tensor digest.
 - A `sample()` that raises no longer advances the draw counter, so the
   next legitimate sample still verifies; `beta` is bounded at
-  construction (*pending*).
+  construction.
 - The checker caps the draws of one sample record, indexes witnesses by
   sample so verification is linear in steps, and raises `CheckerError`
-  for an oversized integer field (*pending*).
+  for an oversized integer field.
 - Snapshots carry an integrity digest checked on load; a re-taken
   checkpoint is staged and renamed so a failure keeps the old state and
   binding together; durable TRL runs require `save_total_limit >= 2`; the
   checkpoint digest skips symbolic links. A snapshot written by an earlier
   release carries no digest: it still opens, with a `RuntimeWarning`, and is
-  sealed at its next compaction (*pending*).
+  sealed at its next compaction.
 - Per-record-type key whitelists in the checker; empty samples and
   zero-row witnesses rejected; the three mutants that were rejected for
   reasons unrelated to their names re-targeted, rejection reasons
   asserted, and measured limits added for the chain-consistent forgeries
-  the checker cannot see (*pending*).
+  the checker cannot see.
 - The TRL adapter refuses `sync_ref_model`, warns when dropout is on
   without TRL's own old logprobs, refuses per-row tensors it cannot
   shuffle with the batch, and checks the trainer's instance attributes at
-  construction (*pending*).
+  construction.
 - `docs/preregistration-deviations.md` discloses two remaining departures
   of the divergence campaign (update:sample ratios run as 0.1, 1 and 10
   updates per draw, all before the draws; workload seeds shared across the
