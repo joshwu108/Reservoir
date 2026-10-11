@@ -45,6 +45,7 @@ def telemetry_run(steps: int = 4):
         batch = buf.sample(3, current_version=step)
         buf.witness_batch(batch, step=step, batch_rows=8, rows=[5, 6, 7], tensor_digest="ab" * 32)
         buf.record_telemetry(step, COUNTS, batch, {"log_ratio_mean_abs": 0.125, "log_ratio_max_abs": 0.5})
+    buf.advance(steps)   # the adapters advance to the step before they write its telemetry
     buf.record_telemetry(steps, dict(COUNTS, replaced_rows=0), None, {})
     return [dict(r) for r in buf.attestation_log.records], buf
 
@@ -157,3 +158,109 @@ class TestRejects:
         assert len(verify_chain(run(evict_first=False)).content.telemetry) == 1
         with pytest.raises(CheckerError, match="no longer holds the example"):
             verify_chain(run(evict_first=True))
+
+
+def swapped(records, first):
+    """Swap records ``first`` and ``first + 1`` and re-chain from there."""
+    m = copy.deepcopy(records)
+    m[first], m[first + 1] = m[first + 1], m[first]
+    return rechain(m, first)
+
+
+class TestStepAndOrder:
+    """``step`` is the buffer version the batch was built at, and a witness precedes its telemetry."""
+
+    def _last_pair(self, records):
+        b = max(i for i, r in enumerate(records) if r["op"] == "batch")
+        assert records[b + 1]["op"] == "telemetry"
+        return b, b + 1
+
+    def test_witness_step_forged(self):
+        records, _ = telemetry_run()
+        b, _ = self._last_pair(records)
+        m = copy.deepcopy(records)
+        m[b]["step"] = "99"
+        with pytest.raises(CheckerError, match="buffer version"):
+            verify_chain(rechain(m, b))
+
+    def test_witness_and_telemetry_step_forged_together(self):
+        records, _ = telemetry_run()
+        b, t = self._last_pair(records)
+        m = copy.deepcopy(records)
+        m[b]["step"] = m[t]["step"] = "99"
+        with pytest.raises(CheckerError, match="buffer version"):
+            verify_chain(rechain(m, b))
+
+    def test_telemetry_without_sample_step_forged(self):
+        records, _ = telemetry_run()
+        t = telemetry_indices(records)[-1]
+        m = copy.deepcopy(records)
+        m[t]["step"] = str(int(m[t]["step"]) + 1)
+        with pytest.raises(CheckerError, match="buffer version"):
+            verify_chain(rechain(m, t))
+
+    def test_telemetry_before_its_witness_is_rejected(self):
+        records, _ = telemetry_run()
+        b, _ = self._last_pair(records)
+        with pytest.raises(CheckerError, match="has no batch witness"):
+            verify_chain(swapped(records, b))
+
+    def test_telemetry_before_the_first_witness_is_rejected(self):
+        records, _ = telemetry_run()
+        b = next(i for i, r in enumerate(records) if r["op"] == "batch")
+        with pytest.raises(CheckerError, match="came without one"):
+            verify_chain(swapped(records, b))
+
+    def test_swap_and_rechain_with_disagreeing_decisions(self):
+        # The forgery: the witness places a kept draw in a row the decisions do not name, and the
+        # telemetry record is moved ahead of the witness so no cross-check sees both.
+        from campaigns.mutation_staleness import build_staleness_chain
+
+        records = build_staleness_chain()
+        t = max(i for i, r in enumerate(records) if r["op"] == "telemetry")
+        b = t - 1
+        assert records[b]["op"] == "batch" and records[b]["replaced"]
+        m = copy.deepcopy(records)
+        m[b]["replaced"][0]["row"] = 0   # rows 4.. are the dead rows the decisions name
+        with pytest.raises(CheckerError, match="disagree with the batch witness"):
+            verify_chain(rechain(m, b))
+        with pytest.raises(CheckerError, match="has no batch witness"):
+            verify_chain(swapped(m, b))
+
+    def test_telemetry_without_any_witness_still_verifies(self):
+        # A log that never carries witnesses keeps verifying: the rule binds logs that do.
+        buf = RolloutBuffer(capacity=8, attest=AttestationLog())
+        buf.add_group("g", 0, rollouts([1.0, 0.0]), source="s")
+        batch = buf.sample(2)
+        buf.record_telemetry(0, dict(COUNTS, batch_rows=4, replaced_rows=2), batch, {})
+        assert len(verify_chain(buf.attestation_log.records).content.telemetry) == 1
+
+    def test_witnessed_log_cannot_drop_a_later_witness(self):
+        records, _ = telemetry_run()
+        b, _ = self._last_pair(records)
+        m = copy.deepcopy(records)
+        del m[b]
+        with pytest.raises(CheckerError, match="has no batch witness"):
+            verify_chain(rechain(m, b))
+
+    def test_witnessed_step_cannot_hide_behind_sample_less_telemetry(self):
+        # Rewriting a replayed step's telemetry as a step without replay would drop its ESS and staleness.
+        records, _ = telemetry_run()
+        _, t = self._last_pair(records)
+        m = copy.deepcopy(records)
+        for name in ("sample_op_counter", "ess_num", "ess_den", "staleness_max", "staleness_sum"):
+            m[t].pop(name)
+        m[t]["replaced_rows"] = 0
+        with pytest.raises(CheckerError, match="must name the witnessed sample"):
+            verify_chain(rechain(m, t))
+
+
+class TestContentRequirement:
+    def test_replayed_step_telemetry_needs_content_digests(self):
+        records, _ = telemetry_run()
+        stripped = [dict(r) for r in records if r["op"] != "batch"]
+        for r in stripped:
+            r.pop("content_digest", None)
+            r.pop("source", None)
+        with pytest.raises(CheckerError, match="telemetry of a replayed step needs content digests"):
+            verify_chain(rechain(stripped))

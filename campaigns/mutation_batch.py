@@ -5,15 +5,17 @@ A ``batch`` record claims which training-batch row holds which draw of a
 sample record and the content digest of the example in it. These mutants
 re-chain the log and change one claim: a row pointed at the wrong draw, a
 digest swapped, a draw placed twice, a row replaced twice, a row outside
-the batch, a nonexistent draw, a witness for the wrong or a nonexistent
-sample, a duplicated witness, a witness placed between an advance and its
-pending evictions. Every one must be rejected by the checker.
+the batch, a nonexistent draw, a step that is not the buffer version, a
+witness for the wrong or a nonexistent sample, a duplicated witness, a
+witness placed between an advance and its pending evictions. Every one
+must be rejected by the checker.
 """
 
 from __future__ import annotations
 
 import copy
 
+from campaigns.mutation_reasons import rejection, tally
 from reservoir_checker.verify import CheckerError, verify_chain
 
 Mutant = tuple[list[dict], str]
@@ -81,11 +83,13 @@ def batch_mutants(base: list[dict]) -> list[Mutant]:
         (_edited(base, j, lambda r: r.update(sample_op_counter=99)), "witness_names_a_nonexistent_sample"),
         (_edited(base, i, lambda r: r.update(tensor_digest="not-hex")), "witness_tensor_digest_malformed"),
         (_edited(base, i, lambda r: r.update(batch_rows=0)), "witness_batch_rows_zero"),
+        (_edited(base, j, lambda r: r.update(step="99")), "batch_step_forged"),
     ]
     dup = copy.deepcopy(base)
     dup.insert(i + 1, copy.deepcopy(base[i]))
     mutants.append((_rechain(dup, i + 1), "witness_duplicated"))
-    adv = next(k for k, r in enumerate(base) if r["op"] == "advance_version" and base[k + 1]["op"] == "evict")
+    adv = next(k for k, r in enumerate(base)
+               if r["op"] == "advance_version" and base[k + 1]["op"] == "evict" and base[k + 1]["reason"] == "stale")
     moved = copy.deepcopy(base)
     moved.insert(adv + 1, copy.deepcopy(base[idxs[0]]))
     mutants.append((_rechain(moved, adv + 1), "witness_between_advance_and_pending_evicts"))
@@ -108,12 +112,5 @@ def rejected(records: list[dict]) -> bool:
 def run_batch_category(results: dict) -> None:
     """Append the ``batch`` category to ``results``."""
     mutants = batch_mutants(build_witnessed_chain())
-    count = 0
-    for records, description in mutants:
-        results["total_mutants"] += 1
-        if rejected(records):
-            results["rejected"] += 1
-            count += 1
-        else:
-            results["survived"].append(description)
-    results["details"].append(("batch", len(mutants), count))
+    tally(results, "batch", [(description, rejection(lambda r=records: verify_chain(r)))
+                              for records, description in mutants])

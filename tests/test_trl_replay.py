@@ -175,9 +175,9 @@ def test_hook_stores_every_live_row_at_the_global_step():
 
     out = trainer.generate(step=3)
 
-    # The live group is stored first and is already eligible, so the dead
-    # group of the same step is replayed from it.
-    assert out is not batch
+    # The dead group is replaced before the live group is stored, and the
+    # buffer was empty then, so nothing of this step is replayed into it.
+    assert out is batch
     assert r.buffer.size == 2
     assert r.buffer.current_version == 3
     stored = {r.buffer.entry(p)[0].metadata["row"]: r.buffer.entry(p) for p in r.buffer.live_positions()}
@@ -189,10 +189,9 @@ def test_hook_stores_every_live_row_at_the_global_step():
     assert r.stats["hook_calls"] == 1
     assert r.stats["ingested_rows"] == 2 and r.stats["ingested_groups"] == 1
     assert r.stats["dead_groups"] == 1
-    # TRL supplied old_per_token_logps, so no behavior-logprob forward ran; the one
-    # forward the fake saw measures the replayed rows' drift for telemetry.
-    assert r.stats["logprob_forwards"] == 0 and r.stats["telemetry_forwards"] == 1
-    assert len(trainer.logps_calls) == 1
+    # TRL supplied old_per_token_logps and nothing was replayed, so no forward ran.
+    assert r.stats["logprob_forwards"] == 0 and r.stats["telemetry_forwards"] == 0
+    assert trainer.logps_calls == []
 
 
 def test_hook_computes_behavior_logprobs_once_when_trl_omits_them():
@@ -288,10 +287,10 @@ def reference_run(seed: int, batches: list[tuple[int, dict]], **kwargs) -> tuple
         if logps is None:
             logps = torch.full_like(output["completion_ids"], LOGP, dtype=torch.float32)
         conv = rows_to_groups(output, num_generations=G, step=step, logprobs=logps)
+        if conv.dead_rows and buf.size:
+            sampled = buf.sample(len(conv.dead_rows), current_version=step)
         for group in conv.groups:
             buf.add_group(group.prompt_id, step, group.rollouts)
-        if conv.dead_rows:
-            sampled = buf.sample(len(conv.dead_rows), current_version=step)
     return buf, sampled
 
 
@@ -448,16 +447,18 @@ def test_beta_zero_replays_the_stored_advantage_unscaled():
 def test_importance_weights_with_beta_one_give_a_hand_computed_advantage():
     """With beta=1 and priority=|advantage|, w_i = leaf_min / leaf_i, so every
     replayed advantage has magnitude min|advantage| and keeps its sign. Both
-    batches arrive at the same step so no age decay enters the leaves."""
-    r = replay(beta=1.0, priority=StoredAdvantagePriority(epsilon=0.0))
+    batches arrive at the same step so no age decay enters the leaves; the
+    floor is lowered to 0 so the second generation can draw the first's rows.
+    The second batch's live group (|advantage| 0.25) is stored after the draw."""
+    r = replay(beta=1.0, priority=StoredAdvantagePriority(epsilon=0.0), min_entry_age=0)
     trainer = FakeTrainer(r, [live_batch(), mixed_batch()])
     trainer.generate(step=0)
 
     out = trainer.generate(step=0)
 
     rewards = [ro.reward for ro in r.last_replay.rollouts]
-    assert set(abs(x) for x in rewards) <= {1.0, 0.5, 0.25}
-    assert out["advantages"][2:].tolist() == [0.25 if x > 0 else -0.25 for x in rewards]
+    assert set(abs(x) for x in rewards) <= {1.0, 0.5}
+    assert out["advantages"][2:].tolist() == [0.5 if x > 0 else -0.5 for x in rewards]
 
 
 def test_importance_weights_scale_the_replayed_advantage():

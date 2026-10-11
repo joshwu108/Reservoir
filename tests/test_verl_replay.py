@@ -239,21 +239,24 @@ def test_config_value_reads_namespaces_and_mappings():
 # Ingest and the seam
 # ---------------------------------------------------------------------------
 
-def test_update_actor_stores_live_rows_and_replays_the_dead_group():
+def test_update_actor_replays_the_dead_group_from_earlier_steps_then_stores_live_rows():
     r = replay()
     batch = mixed_batch()
     trainer = FakeTrainer(r, [])
+    trainer.step(live_batch(), step=2)
 
     out = trainer.step(batch, step=3)
 
     assert out is not batch
-    assert r.buffer.size == 2 and r.buffer.current_version == 3
-    stored = {r.buffer.entry(p)[0].metadata["row"]: r.buffer.entry(p) for p in r.buffer.live_positions()}
+    assert r.buffer.size == 6 and r.buffer.current_version == 3
+    stored = {r.buffer.entry(p)[0].metadata["row"]: r.buffer.entry(p) for p in r.buffer.live_positions()
+              if r.buffer.entry_version(p) == 3}
     rollout0, group0 = stored[0]
     assert rollout0.tokens == (3,) and list(rollout0.logprobs) == f32([-0.1]) and rollout0.reward == 0.25
     assert rollout0.metadata["uid"] == "u0" and rollout0.metadata["global_step"] == 3
     assert group0.model_version == 3 and group0.size == 2
-    assert r.stats["hook_calls"] == 1 and r.stats["ingested_rows"] == 2 and r.stats["dead_groups"] == 1
+    assert all(v == 2 for v in r.last_replay.model_versions)
+    assert r.stats["hook_calls"] == 2 and r.stats["ingested_rows"] == 6 and r.stats["dead_groups"] == 1
     assert r.stats["replaced_rows"] == 2 and r.stats["telemetry_forwards"] == 1
     # The telemetry forward saw exactly the two replayed rows, with the keys the converter asserts.
     (call,) = trainer.logprob_calls
@@ -302,6 +305,7 @@ def test_reservoir_metrics_ride_on_the_actor_output():
     trainer = FakeTrainer(r, [])
     trainer.step(live_batch(), step=1)
     trainer.step(mixed_batch(), step=2)
+    trainer.global_steps = 3
     metrics = trainer._update_actor(mixed_batch()).meta_info["metrics"]
     assert metrics["actor/pg_loss"] == 0.1
     assert metrics["reservoir/replaced_rows"] == 2.0 and metrics["reservoir/replay_fraction"] == 0.5
@@ -460,10 +464,10 @@ def reference_run(seed: int, batches: list[tuple[int, FakeDataProto]], **kwargs)
     sampled = None
     for step, data in batches:
         conv = rows_to_groups(data.batch, list(data.non_tensor_batch["uid"]), step=step)
+        if conv.dead_rows and buf.size:
+            sampled = buf.sample(len(conv.dead_rows), current_version=step)
         for group in conv.groups:
             buf.add_group(group.prompt_id, step, group.rollouts)
-        if conv.dead_rows:
-            sampled = buf.sample(len(conv.dead_rows), current_version=step)
     return buf, sampled
 
 
@@ -626,7 +630,8 @@ def test_same_seed_and_inputs_give_identical_logs_and_batches():
     outs_b = run_scripted(3, log_b)
     assert log_a.to_json_lines() == log_b.to_json_lines()
     for a, b in zip(outs_a, outs_b):
-        assert tensor_digest(a.batch) == tensor_digest(b.batch)
+        assert tensor_digest(a.batch, token_nums=a.meta_info["global_token_num"]) == tensor_digest(
+            b.batch, token_nums=b.meta_info["global_token_num"])
 
 
 def test_a_different_seed_changes_the_replay():
@@ -663,7 +668,7 @@ def test_replay_writes_a_batch_witness_that_matches_the_rows(tmp_path):
     (w,) = [rec for rec in records if rec["op"] == "batch"]
     assert w["step"] == "2" and w["batch_rows"] == 4
     assert [e["row"] for e in w["replaced"]] == [2, 3]
-    assert w["tensor_digest"] == tensor_digest(out.batch)
+    assert w["tensor_digest"] == tensor_digest(out.batch, token_nums=out.meta_info["global_token_num"])
     telemetry = [rec for rec in records if rec["op"] == "telemetry"]
     assert len(telemetry) == 2 and telemetry[-1]["replaced_rows"] == 2 and telemetry[0]["replaced_rows"] == 0
 

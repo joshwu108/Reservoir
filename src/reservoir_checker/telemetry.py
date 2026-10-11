@@ -136,12 +136,12 @@ def _check_staleness(record: dict, where: str, draws: list, ages: list[int], cou
     return ratios, policy, tuple(decisions)
 
 
-def verify_telemetry(record: dict, idx: int, content: ContentState, versions: dict[int, int],
+def verify_telemetry(record: dict, idx: int, content: ContentState, entries: dict[int, tuple[int, int]],
                      current_version: int) -> TelemetryPoint:
     """Check one telemetry record against the sample it names; return the verified point.
 
-    ``versions`` maps live slot -> entry version (the replayed decay
-    state) and ``current_version`` is the buffer's version, so the ages of
+    ``entries`` maps live slot -> ``(q, entry version)`` (the replayed
+    decay state) and ``current_version`` is the buffer's version, so the ages of
     the replayed rows can be recomputed.
     """
     where = f"Record {idx}"
@@ -149,6 +149,40 @@ def verify_telemetry(record: dict, idx: int, content: ContentState, versions: di
     counts = {name: _int_field(record, name, where) for name in COUNTERS}
     if counts["replaced_rows"] + counts["declined_rows"] > counts["batch_rows"]:
         raise CheckerError(f"{where}: more replaced and declined rows than the batch has")
+    reported = _reported(record, where)
+    awaiting, content.witness_awaiting_telemetry = content.witness_awaiting_telemetry, None
+    if "sample_op_counter" not in record:
+        _require_awaited(awaiting, None, where)
+        if counts["replaced_rows"] or counts["declined_rows"]:
+            raise CheckerError(f"{where}: rows were replaced or declined but no sample is named")
+        if any(name in record for name in STALENESS_FIELDS):
+            raise CheckerError(f"{where}: log_ratios, policy and decisions need the sample they describe")
+        return TelemetryPoint(idx, step, counts, None, None, None, None, reported)
+
+    op = _int_field(record, "sample_op_counter", where)
+    if not content.has_content:
+        raise CheckerError(f"{where}: telemetry of a replayed step needs content digests on the log's inserts, "
+                           "so the checker can tell its rows' slots still hold the drawn examples")
+    draws = content._samples_by_op.get(op)
+    if draws is None or op != content.last_sample_op:
+        raise CheckerError(f"{where}: telemetry names sample {op}, which is not the latest sample record")
+    _require_awaited(awaiting, op, where)
+    if counts["replaced_rows"] + counts["declined_rows"] != len(draws):
+        raise CheckerError(
+            f"{where}: replaced {counts['replaced_rows']} + declined {counts['declined_rows']} rows but sample "
+            f"{op} drew {len(draws)} rollouts"
+        )
+    ess = _check_ess(record, draws, where)
+    ages = _replayed_ages(record, draws, content, entries, current_version, op, where)
+    _check_against_witness(content, op, idx, step, counts, where)
+    ratios, policy, decisions = _check_staleness(record, where, draws, ages, counts, _witness_rows(content, op), reported,
+                                                 content)
+    return TelemetryPoint(idx, step, counts, op, ess, max(ages), Fraction(sum(ages), len(ages)), reported,
+                          ratios, policy, decisions)
+
+
+def _reported(record: dict, where: str) -> dict:
+    """The carried float measurements: every extra field, listed sorted and unique under ``reported``."""
     reported_names = record.get("reported")
     if not isinstance(reported_names, list) or any(not isinstance(n, str) for n in reported_names):
         raise CheckerError(f"{where}: reported must be a list of field names")
@@ -157,56 +191,67 @@ def verify_telemetry(record: dict, idx: int, content: ContentState, versions: di
     extra = set(record) - RESERVED
     if extra != set(reported_names):
         raise CheckerError(f"{where}: reported {sorted(reported_names)} does not match the extra fields {sorted(extra)}")
-    reported = {name: _hex_float(record, name, where) for name in reported_names}
+    return {name: _hex_float(record, name, where) for name in reported_names}
 
-    if "sample_op_counter" not in record:
-        if counts["replaced_rows"] or counts["declined_rows"]:
-            raise CheckerError(f"{where}: rows were replaced or declined but no sample is named")
-        if any(name in record for name in STALENESS_FIELDS):
-            raise CheckerError(f"{where}: log_ratios, policy and decisions need the sample they describe")
-        return TelemetryPoint(idx, step, counts, None, None, None, None, reported)
 
-    op = _int_field(record, "sample_op_counter", where)
-    draws = content._samples_by_op.get(op)
-    if draws is None or op != content.last_sample_op:
-        raise CheckerError(f"{where}: telemetry names sample {op}, which is not the latest sample record")
-    if counts["replaced_rows"] + counts["declined_rows"] != len(draws):
-        raise CheckerError(
-            f"{where}: replaced {counts['replaced_rows']} + declined {counts['declined_rows']} rows but sample "
-            f"{op} drew {len(draws)} rollouts"
-        )
+def _check_ess(record: dict, draws: list, where: str) -> Fraction:
+    """The declared effective sample size must be ``(sum w)^2 / sum w^2`` of the sample's weights."""
     total = sum((d.is_weight for d in draws), Fraction(0))
     squares = sum((d.is_weight * d.is_weight for d in draws), Fraction(0))
     ess = total * total / squares
     declared = Fraction(_int_field(record, "ess_num", where), _int_field(record, "ess_den", where))
     if declared != ess:
         raise CheckerError(f"{where}: ess {declared} but the sample's weights give {ess}")
+    return ess
+
+
+def _replayed_ages(record: dict, draws: list, content: ContentState, entries: dict[int, tuple[int, int]],
+                   current_version: int, op: int, where: str) -> list[int]:
+    """The drawn slots' ages, from the live slots, which must still hold the drawn examples."""
     for d in draws:
-        if d.leaf_index not in versions or content.slots.get(d.leaf_index, (None,))[0] != d.content_digest:
+        if d.leaf_index not in entries or content.slots.get(d.leaf_index, (None,))[0] != d.content_digest:
             raise CheckerError(
                 f"{where}: slot {d.leaf_index} no longer holds the example sample {op} drew; telemetry must "
                 "precede evictions or refills of its rows"
             )
-    ages = [current_version - versions[d.leaf_index] for d in draws]
-    witness = next((w for w in content.witnesses if w["sample_op_counter"] == op), None)
-    if witness is not None and (
-        witness["step"] != step or witness["batch_rows"] != counts["batch_rows"]
-        or witness["replaced"] != counts["replaced_rows"] or len(witness["declined"]) != counts["declined_rows"]
-    ):
-        raise CheckerError(f"{where}: telemetry counters disagree with the batch witness of sample {op}")
+    ages = [current_version - entries[d.leaf_index][1] for d in draws]
     if _int_field(record, "staleness_max", where) != max(ages) or _int_field(record, "staleness_sum", where) != sum(ages):
         raise CheckerError(f"{where}: staleness max/sum {record['staleness_max']}/{record['staleness_sum']} but "
                            f"the replayed rows give {max(ages)}/{sum(ages)}")
-    ratios, policy, decisions = _check_staleness(record, where, draws, ages, counts, _witness_rows(content, op), reported,
-                                                 content)
-    return TelemetryPoint(idx, step, counts, op, ess, max(ages), Fraction(sum(ages), len(ages)), reported,
-                          ratios, policy, decisions)
+    return ages
+
+
+def _check_against_witness(content: ContentState, op: int, idx: int, step: int, counts: dict, where: str) -> None:
+    """Counters must match the sample's witness; a sample with none is legal only in a log without witnesses."""
+    witness = content.witness_by_op.get(op)
+    if witness is None:
+        _note_unwitnessed(content, op, idx)
+        return
+    if (witness["step"] != step or witness["batch_rows"] != counts["batch_rows"]
+            or witness["replaced"] != counts["replaced_rows"] or len(witness["declined"]) != counts["declined_rows"]):
+        raise CheckerError(f"{where}: telemetry counters disagree with the batch witness of sample {op}")
+
+
+def _require_awaited(awaiting: Optional[int], named: Optional[int], where: str) -> None:
+    """After a witness, the next telemetry record describes that step: it names the witnessed sample."""
+    if awaiting is not None and named != awaiting:
+        raise CheckerError(f"{where}: sample {awaiting} was witnessed; the next telemetry record must name the "
+                           "witnessed sample")
+
+
+def _note_unwitnessed(content: ContentState, op: int, idx: int) -> None:
+    """A replayed step without a witness is legal only in a log that carries no witnesses."""
+    if content.witnesses:
+        raise CheckerError(f"Record {idx}: telemetry names sample {op}, which has no batch witness in a log that carries "
+                           "witnesses; a witness must precede the telemetry naming its sample")
+    if content.unwitnessed_telemetry is None:
+        content.unwitnessed_telemetry = (idx, op)
 
 
 def _witness_rows(content: ContentState, op: int) -> Optional[dict]:
     """The witness of sample ``op`` with its row/draw pairs and declined draws, or None without one."""
-    witness = next((w for w in content.witnesses if w["sample_op_counter"] == op), None)
+    witness = content.witness_by_op.get(op)
     if witness is None:
         return None
-    rows = [{"row": w.row, "draw": w.draw} for w in content.witnessed_rows if w.sample_op_counter == op]
+    rows = [{"row": w.row, "draw": w.draw} for w in content.witnessed_rows_by_op[op]]
     return {"replaced": rows, "declined": list(witness["declined"])}

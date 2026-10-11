@@ -18,6 +18,9 @@ class TestMutationCampaign:
             f"Surviving mutants (checker bugs): {results['survived']}"
         )
 
+    def test_every_mutant_rejected_for_its_stated_reason(self, results):
+        assert results.get("wrong_reason", []) == [], results.get("wrong_reason")
+
     def test_at_least_60_mutants(self, results):
         assert results["total_mutants"] >= 60, (
             f"Only {results['total_mutants']} mutants generated, need >= 60"
@@ -47,6 +50,8 @@ class TestMutationCampaign:
             "provenance",
             "replay_manifest",
             "staleness",
+            "schema",
+            "entry_age",
         }
         assert required.issubset(category_names), (
             f"Missing categories: {required - category_names}"
@@ -147,5 +152,51 @@ class TestStalenessCampaign:
         limit = results["staleness_limit"]
         assert set(limit["pass"]) == set(limit["mutants"]) == {"staleness_policy_decline_cap_added_never_binding",
                                                                "staleness_policy_ess_floor_loosened_nothing_declined_for_ess"}
+        assert limit["statement"]
+        assert results["survived"] == []
+
+
+class TestRejectionReasons:
+    def test_wrong_reason_is_not_counted_as_rejected(self):
+        from campaigns.mutation_reasons import tally
+
+        out: dict = {"total_mutants": 0, "rejected": 0, "survived": [], "details": []}
+        tally(out, "probe", [("witness_duplicated", "Record 3: digest mismatch"),
+                             ("witness_duplicated", "Record 6: sample 1 already has a batch witness"),
+                             ("witness_duplicated", None)])
+        assert out["details"] == [("probe", 3, 1)]
+        assert out["rejected"] == 1 and out["survived"] == ["witness_duplicated"]
+        assert len(out["wrong_reason"]) == 1 and "digest mismatch" in out["wrong_reason"][0]
+
+    def test_a_mutant_without_an_expected_reason_is_an_error(self):
+        from campaigns.mutation_reasons import expected_reason
+
+        with pytest.raises(KeyError):
+            expected_reason("a_mutant_nobody_described")
+
+
+class TestSchemaCampaign:
+    def test_schema_category_fully_rejected(self, results):
+        cat = next(d for d in results["details"] if d[0] == "schema")
+        assert cat[1] >= 13 and cat[1] == cat[2]
+
+
+class TestEntryAgeCampaign:
+    def test_entry_age_category_fully_rejected(self, results):
+        cat = next(d for d in results["details"] if d[0] == "entry_age")
+        assert cat[1] >= 7 and cat[1] == cat[2]
+
+
+class TestConsistencyLimits:
+    def test_chain_consistent_forgeries_of_statements_are_measured(self, results):
+        limit = results["consistency_limit"]
+        assert set(limit["pass"]) == set(limit["mutants"]) == {
+            "source_swapped_in_log_and_manifest",
+            "drift_decline_hidden_by_a_recorded_log_ratio",
+            "drift_evict_of_a_slot_never_declined",
+            "beta_and_every_weight_rewritten_without_draw_config",
+            "content_digests_swapped_with_openings_and_witness_rows",
+            "every_batch_witness_dropped",
+        }
         assert limit["statement"]
         assert results["survived"] == []

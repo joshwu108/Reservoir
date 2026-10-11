@@ -16,7 +16,7 @@ Categories (per spec):
   5. Deleted mutation records
   6. Reordered records
   7. Replayed stale suffixes
-  8. Age-decay protocol forgeries (checker/decay_replay.py)
+  8. Age-decay protocol forgeries (campaigns/mutation_decay.py)
   9. Content-commitment forgeries, from the log alone and with the manifest
      (campaigns/mutation_content.py). The report also states the one
      documented limit: a chain-consistent swap of an insert's content
@@ -42,6 +42,16 @@ Categories (per spec):
      decision's reason or scale changed, a log-ratio or policy parameter
      changed, a group label or row moved, the fields dropped, the reported
      statistics disagreeing with the recorded log-ratios.
+ 16. Record-shape forgeries (campaigns/mutation_schema.py): a field no
+     record type defines, provenance fields on a sample, an empty sample.
+ 17. Entry-age forgeries (campaigns/mutation_entry_age.py): a draw of a
+     slot the current step stored under a declared minimum age, a declared
+     slot version that is not the replayed one, the minimum dropped or
+     changed.
+
+Every mutant must be rejected for the reason its name states
+(campaigns/mutation_reasons.py); a rejection by an unrelated check fails
+the campaign like a survivor.
 
 Run with: python -m campaigns.mutation
 Prints a report with exact counts.
@@ -60,6 +70,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.reservoir.attest import AttestationLog, make_sample_entry
 from src.reservoir.buffer import ExactPERBuffer, Transition
 from src.reservoir.sumtree import ExactSumTree
+from typing import Optional
+
+from campaigns.mutation_decay import decay_mutants
+from campaigns.mutation_limits import run_consistency_limits
+from campaigns.mutation_reasons import rejection, tally
 from checker.verify import CheckerError, verify_chain, verify_json_lines
 
 
@@ -70,58 +85,26 @@ def _build_baseline_chain(capacity: int = 8, n_ops: int = 20, seed: int = 42) ->
     """
     buf = ExactPERBuffer(capacity=capacity, alpha=1.0, beta=1.0, seed=seed)
     log = AttestationLog()
-
-    # Track the previous priority for attestation
-    prev_priorities = {i: 0 for i in range(buf.capacity)}
-
     for i in range(capacity):
-        td = float(i + 1)
-        old_p = 0
-        pos = buf.insert(Transition(i, 0, float(i), i + 1, False), td_error=td)
-        new_p = buf._sum_tree.get(pos)
-
-        op = "insert" if i < capacity else "evict"
-        log.append_mutation(
-            op=op,
-            index=pos,
-            old_priority_int=old_p,
-            new_priority_int=new_p,
-            op_counter=buf._op_counter,
-        )
-        prev_priorities[pos] = new_p
+        pos = buf.insert(Transition(i, 0, float(i), i + 1, False), td_error=float(i + 1))
+        log.append_mutation(op="insert", index=pos, old_priority_int=0, new_priority_int=buf._sum_tree.get(pos),
+                            op_counter=buf._op_counter)
 
     # Sample with attestation
     batch = buf.sample(4)
-    sample_entries = []
-    for k in range(4):
-        entry = make_sample_entry(
-            leaf_index=batch.indices[k],
-            draw_int=batch.draw_integers[k],
-            priority_int=batch.priorities[k],
-            root_total=batch.root_total,
-            is_weight=batch.is_weights[k],
-        )
-        sample_entries.append(entry)
-
-    log.append_sample(
-        op_counter=buf._op_counter,
-        root_total=batch.root_total,
-        samples=sample_entries,
-    )
+    sample_entries = [
+        make_sample_entry(leaf_index=batch.indices[k], draw_int=batch.draw_integers[k],
+                          priority_int=batch.priorities[k], root_total=batch.root_total, is_weight=batch.is_weights[k])
+        for k in range(4)
+    ]
+    log.append_sample(op_counter=buf._op_counter, root_total=batch.root_total, samples=sample_entries)
 
     # Do a few more updates
     for i in range(min(4, capacity)):
         old_p = buf._sum_tree.get(i)
         buf.update_priority(i, td_error=float(i * 2 + 0.5))
-        new_p = buf._sum_tree.get(i)
-        log.append_mutation(
-            op="update",
-            index=i,
-            old_priority_int=old_p,
-            new_priority_int=new_p,
-            op_counter=buf._op_counter,
-        )
-        prev_priorities[i] = new_p
+        log.append_mutation(op="update", index=i, old_priority_int=old_p, new_priority_int=buf._sum_tree.get(i),
+                            op_counter=buf._op_counter)
 
     return log.to_json_lines(), buf
 
@@ -154,53 +137,8 @@ def _recompute_digests_from(records: list[dict], start_idx: int) -> list[dict]:
     return result
 
 
-def run_mutation_campaign() -> dict:
-    """Run all forgery categories and collect results.
-
-    Returns a dict with:
-      - total_mutants: int
-      - rejected: int
-      - survived: list of surviving mutant descriptions
-      - details: list of (category, count_in_category, rejected_count)
-    """
-    json_lines, buf = _build_baseline_chain(capacity=8, n_ops=20, seed=42)
-    capacity = buf.capacity
-    records = _parse_records(json_lines)
-
-    # Verify baseline is valid first
-    try:
-        verify_chain(records, capacity)
-    except CheckerError as e:
-        raise RuntimeError(f"Baseline chain failed verification: {e}")
-
-    results = {
-        "total_mutants": 0,
-        "rejected": 0,
-        "survived": [],
-        "details": [],
-    }
-
-    def check_mutant(mutant_records: list[dict], description: str) -> bool:
-        """Return True if rejected (expected), False if survived (checker bug)."""
-        try:
-            verify_chain(mutant_records, capacity)
-            results["survived"].append(description)
-            return False
-        except CheckerError:
-            return True
-
-    def run_category(category_name: str, mutants: list[tuple[list[dict], str]]) -> None:
-        rejected_count = 0
-        for mutant_records, description in mutants:
-            results["total_mutants"] += 1
-            if check_mutant(mutant_records, description):
-                results["rejected"] += 1
-                rejected_count += 1
-        results["details"].append((category_name, len(mutants), rejected_count))
-
-    # -----------------------------------------------------------------------
-    # Category 1: Digest bit-flips
-    # -----------------------------------------------------------------------
+def _digest_bitflip_mutants(records: list[dict], capacity: int) -> list[tuple[list[dict], str]]:
+    """Category 1: Digest bit-flips."""
     category1 = []
     for i in range(len(records)):
         mutant = copy.deepcopy(records)
@@ -217,28 +155,29 @@ def run_mutation_campaign() -> dict:
         flipped = orig[:-2] + format(int(orig[-2:], 16) ^ 0xFF, "02x")
         mutant[i]["digest"] = flipped
         category1.append((mutant, f"digest_lastbyte_flip_record_{i}"))
+    return category1
 
-    run_category("digest_bitflip", category1)
 
-    # -----------------------------------------------------------------------
-    # Category 2: Off-by-one draw integers (at segment BOUNDARIES)
+def _replay_tree(records_up_to: list[dict], cap: int) -> list[int]:
+    """Return leaf priority_ints from replaying mutations up to (not including) sample."""
+    from checker.verify import _SumTree
+    t = _SumTree(cap)
+    for r in records_up_to:
+        if r.get("op") in ("insert", "update", "evict"):
+            t.update(r["index"], int(r["new_priority_int"]))
+    return [t.get(i) for i in range(t.capacity)]
+
+
+def _off_by_one_mutants(records: list[dict], capacity: int) -> list[tuple[list[dict], str]]:
+    """Category 2: Off-by-one draw integers (at segment BOUNDARIES)."""
     # The key: use draw_int values that land at a segment boundary, so
     # draw_int ± 1 crosses into a different leaf. Keep leaf_index as the
     # original leaf's declared value — the checker must detect mismatch.
-    # -----------------------------------------------------------------------
     category2 = []
     sample_records = [(i, r) for i, r in enumerate(records) if r.get("op") == "sample"]
 
     # Compute prefix-sum boundaries from the reconstructed tree at each sample record.
     # We replay the mutations up to the sample record to get the tree state.
-    def _replay_tree(records_up_to: list[dict], cap: int) -> list[int]:
-        """Return leaf priority_ints from replaying mutations up to (not including) sample."""
-        from checker.verify import _SumTree, _next_power_of_two
-        t = _SumTree(cap)
-        for r in records_up_to:
-            if r.get("op") in ("insert", "update", "evict"):
-                t.update(r["index"], int(r["new_priority_int"]))
-        return [t.get(i) for i in range(t.capacity)]
 
     for rec_idx, sample_rec in sample_records:
         # Replay tree state at this sample
@@ -277,13 +216,13 @@ def run_mutation_campaign() -> dict:
 
                 if len(category2) >= 10:
                     break
+    return category2
 
-    run_category("off_by_one_draw", category2)
 
-    # -----------------------------------------------------------------------
-    # Category 3: Swapped sampled indices
+def _swapped_index_mutants(records: list[dict], capacity: int) -> list[tuple[list[dict], str]]:
+    """Category 3: Swapped sampled indices."""
+    sample_records = [(i, r) for i, r in enumerate(records) if r.get("op") == "sample"]
     # Internally-consistent forged probability for wrong index.
-    # -----------------------------------------------------------------------
     category3 = []
     for rec_idx, sample_rec in sample_records:
         samples = sample_rec.get("samples", [])
@@ -318,12 +257,12 @@ def run_mutation_campaign() -> dict:
             )
             mutant = _recompute_digests_from(mutant, rec_idx)
             category3.append((mutant, f"wrong_leaf_index_rec{rec_idx}_k{k}_shift3"))
+    return category3
 
-    run_category("swapped_indices", category3)
 
-    # -----------------------------------------------------------------------
-    # Category 4: Probability num/den not in reduced form
-    # -----------------------------------------------------------------------
+def _not_reduced_mutants(records: list[dict], capacity: int) -> list[tuple[list[dict], str]]:
+    """Category 4: Probability num/den not in reduced form."""
+    sample_records = [(i, r) for i, r in enumerate(records) if r.get("op") == "sample"]
     category4 = []
     for rec_idx, sample_rec in sample_records:
         for k, s in enumerate(sample_rec.get("samples", [])):
@@ -352,12 +291,11 @@ def run_mutation_campaign() -> dict:
             mutant[rec_idx]["samples"][k]["is_weight_den"] = str(wd * 5)
             mutant = _recompute_digests_from(mutant, rec_idx)
             category4.append((mutant, f"is_weight_not_reduced_x5_rec{rec_idx}_k{k}"))
+    return category4
 
-    run_category("not_reduced_form", category4)
 
-    # -----------------------------------------------------------------------
-    # Category 5: Deleted mutation records
-    # -----------------------------------------------------------------------
+def _deleted_record_mutants(records: list[dict], capacity: int) -> list[tuple[list[dict], str]]:
+    """Category 5: Deleted mutation records."""
     category5 = []
     mut_indices = [i for i, r in enumerate(records) if r.get("op") in ("insert", "update", "evict")]
     for del_idx in mut_indices[:8]:
@@ -374,16 +312,15 @@ def run_mutation_campaign() -> dict:
     if mutant:
         mutant = _recompute_digests_from(mutant, 0)
     category5.append((mutant, "deleted_first_record"))
+    return category5
 
-    run_category("deleted_records", category5)
 
-    # -----------------------------------------------------------------------
-    # Category 6: Reordered records
+def _reordered_mutants(records: list[dict], capacity: int) -> list[tuple[list[dict], str]]:
+    """Category 6: Reordered records."""
     # Reordering is only detectable when the order of operations matters:
     # - An update record with old_priority_int=X depends on a prior insert that set X.
     # - Moving the update before the insert fails because tree starts at 0, not X.
     # - Moving a sample before the inserts it needs fails because root_total changes.
-    # -----------------------------------------------------------------------
     category6 = []
     # Find update records that have non-zero old_priority_int
     update_recs = [
@@ -424,12 +361,11 @@ def run_mutation_campaign() -> dict:
                 mutant[i_idx], mutant[u_idx] = mutant[u_idx], mutant[i_idx]
                 mutant = _recompute_digests_from(mutant, i_idx)
                 category6.append((mutant, f"adjacent_swap_insert{i_idx}_update{u_idx}"))
+    return category6
 
-    run_category("reordered_records", category6)
 
-    # -----------------------------------------------------------------------
-    # Category 7: Replayed stale suffixes
-    # -----------------------------------------------------------------------
+def _stale_suffix_mutants(records: list[dict], capacity: int) -> list[tuple[list[dict], str]]:
+    """Category 7: Replayed stale suffixes."""
     category7 = []
     if len(records) >= 6:
         # Append old records at the end (replay attack)
@@ -438,10 +374,11 @@ def run_mutation_campaign() -> dict:
             # Append records[repeat_from..repeat_from+3] again
             suffix = copy.deepcopy(records[repeat_from:repeat_from + 3])
             # Recompute their digests to chain from current head
+            from src.reservoir.attest import _digest_record as _dr
             prev = mutant[-1]["digest"]
             for r in suffix:
                 r["prev_digest"] = prev
-                r["digest"] = _recompute_digests_from([r], 0)[0]["digest"]
+                r["digest"] = _dr(r)
                 prev = r["digest"]
             mutant.extend(suffix)
             category7.append((mutant, f"stale_suffix_replay_from_{repeat_from}"))
@@ -457,227 +394,75 @@ def run_mutation_campaign() -> dict:
             last["digest"] = _dr(last)
             mutant.append(last)
             category7.append((mutant, f"duplicate_last_record"))
+    return category7
 
-    run_category("stale_suffix_replay", category7)
 
-    # -----------------------------------------------------------------------
-    # Category 8: Age-decay protocol forgeries
-    # Built from a RolloutBuffer log (decay_config + advance_version + rebase
-    # + decay fields). Every mutant is re-chained so only the semantic replay
-    # in checker/decay_replay.py can catch it.
-    # -----------------------------------------------------------------------
-    run_category("decay", _decay_mutants())
-
-    # -----------------------------------------------------------------------
-    # Category 9: Content-commitment forgeries (log-only and with manifest)
-    # -----------------------------------------------------------------------
-    from campaigns.mutation_content import run_content_categories
-    run_content_categories(results)
-
-    # -----------------------------------------------------------------------
-    # Category 10: Draw and importance-weight forgeries (seeded decay_config)
-    # -----------------------------------------------------------------------
-    from campaigns.mutation_draw import run_draw_category
-    run_draw_category(results)
-
-    # -----------------------------------------------------------------------
-    # Category 11: Batch-witness forgeries
-    # -----------------------------------------------------------------------
+def _module_categories() -> list:
+    """The categories that live in their own modules, in report order (see the module docstring)."""
     from campaigns.mutation_batch import run_batch_category
-    run_batch_category(results)
-
-    # -----------------------------------------------------------------------
-    # Category 12: Telemetry forgeries
-    # -----------------------------------------------------------------------
-    from campaigns.mutation_telemetry import run_telemetry_category
-    run_telemetry_category(results)
-
-    # -----------------------------------------------------------------------
-    # Category 13: Quarantine-record and reward-provenance forgeries
-    # -----------------------------------------------------------------------
+    from campaigns.mutation_content import run_content_categories
+    from campaigns.mutation_draw import run_draw_category
+    from campaigns.mutation_entry_age import run_entry_age_category
     from campaigns.mutation_provenance import run_provenance_category
-    run_provenance_category(results)
-
-    # -----------------------------------------------------------------------
-    # Category 14: Manifest tamperings against the offline replay
-    # -----------------------------------------------------------------------
     from campaigns.mutation_replay import run_replay_category
-    run_replay_category(results)
-
-    # -----------------------------------------------------------------------
-    # Category 15: Staleness-decision forgeries
-    # -----------------------------------------------------------------------
+    from campaigns.mutation_schema import run_schema_category
     from campaigns.mutation_staleness import run_staleness_category
-    run_staleness_category(results)
+    from campaigns.mutation_telemetry import run_telemetry_category
 
+    return [run_content_categories, run_draw_category, run_batch_category, run_telemetry_category,
+            run_provenance_category, run_replay_category, run_staleness_category, run_schema_category,
+            run_entry_age_category]
+
+
+def run_mutation_campaign() -> dict:
+    """Run all forgery categories and collect results.
+
+    Returns a dict with:
+      - total_mutants: int
+      - rejected: int
+      - survived: list of surviving mutant descriptions
+      - details: list of (category, count_in_category, rejected_count)
+    """
+    json_lines, buf = _build_baseline_chain(capacity=8, n_ops=20, seed=42)
+    capacity = buf.capacity
+    records = _parse_records(json_lines)
+
+    # Verify baseline is valid first
+    try:
+        verify_chain(records, capacity)
+    except CheckerError as e:
+        raise RuntimeError(f"Baseline chain failed verification: {e}")
+
+    results = {
+        "total_mutants": 0,
+        "rejected": 0,
+        "survived": [],
+        "details": [],
+    }
+
+    def check_mutant(mutant_records: list[dict]) -> Optional[str]:
+        """The checker's rejection message, or None if the mutant survived (a checker bug)."""
+        return rejection(lambda: verify_chain(mutant_records, capacity))
+
+    def run_category(category_name: str, mutants: list[tuple[list[dict], str]]) -> None:
+        tally(results, category_name, [(description, check_mutant(m)) for m, description in mutants])
+
+    run_category("digest_bitflip", _digest_bitflip_mutants(records, capacity))
+    run_category("off_by_one_draw", _off_by_one_mutants(records, capacity))
+    run_category("swapped_indices", _swapped_index_mutants(records, capacity))
+    run_category("not_reduced_form", _not_reduced_mutants(records, capacity))
+    run_category("deleted_records", _deleted_record_mutants(records, capacity))
+    run_category("reordered_records", _reordered_mutants(records, capacity))
+    run_category("stale_suffix_replay", _stale_suffix_mutants(records, capacity))
+    run_category("decay", decay_mutants())
+    for run in _module_categories():   # categories 9 to 17; each appends to results itself
+        run(results)
+    run_consistency_limits(results)    # measured, not counted: forgeries of what the log only states
     return results
 
 
-def _build_decay_chain(seed: int = 11) -> list[dict]:
-    """A RolloutBuffer run with inserts, updates, stale/capacity evictions and rebases."""
-    # The buffer type-checks its log against reservoir.attest.AttestationLog;
-    # this file imports the legacy modules as src.reservoir.*, which Python
-    # treats as a different module, so import the matching class here.
-    from reservoir.attest import AttestationLog as _BufferLog
-    from reservoir.rollout import Rollout
-    from reservoir.rollout_buffer import RolloutBuffer
-
-    log = _BufferLog()
-    buf = RolloutBuffer(capacity=8, half_life=1, max_policy_age=2, seed=seed, attest=log)
-    for v in range(10):
-        buf.add_group(
-            f"g{v}", v,
-            [Rollout(tokens=[1, 2], logprobs=[-0.1, -0.2], reward=r) for r in (1.0, 0.0, 0.5)],
-        )
-        batch = buf.sample(4, current_version=v)
-        buf.update_priorities(batch.indices[:2], [0.3, 0.6])
-    assert buf.n_rebases >= 1
-    records = [dict(r) for r in log.records]
-    verify_chain(records)  # baseline must be valid
-    return records
-
-
-def _first(records: list[dict], op: str, **match) -> int:
-    """Index of the first record with this op whose fields equal ``match``."""
-    for i, r in enumerate(records):
-        if r["op"] == op and all(r.get(k) == v for k, v in match.items()):
-            return i
-    raise RuntimeError(f"baseline has no {op} record matching {match}")
-
-
-def _bump(records: list[dict], idx: int, field: str, delta: int = 1) -> list[dict]:
-    """Copy records, add ``delta`` to an integer-as-string field, re-chain from idx."""
-    mutant = copy.deepcopy(records)
-    mutant[idx][field] = str(int(mutant[idx][field]) + delta)
-    return _recompute_digests_from(mutant, idx)
-
-
-def _decay_mutants() -> list[tuple[list[dict], str]]:
-    """One mutant per rule the decay replay enforces, plus a few variants."""
-    base = _build_decay_chain()
-    return _decay_protocol_mutants(base) + _decay_hardening_mutants(base)
-
-
-def _decay_protocol_mutants(base: list[dict]) -> list[tuple[list[dict], str]]:
-    """Forgeries of the decay bookkeeping: config, leaves, versions, staleness, rebase."""
-    mutants: list[tuple[list[dict], str]] = []
-
-    # config placement / presence
-    moved = base[1:2] + base[0:1] + base[2:]
-    mutants.append((_recompute_digests_from(moved, 0), "decay_config_not_first"))
-    mutants.append((_recompute_digests_from(copy.deepcopy(base[1:]), 0), "decay_config_removed"))
-    cfg_tamper = copy.deepcopy(base)
-    cfg_tamper[0]["half_life"] = "2"
-    mutants.append((_recompute_digests_from(cfg_tamper, 0), "decay_config_half_life_changed"))
-
-    # leaf must equal the recomputed decay formula
-    for n, i in enumerate([j for j, r in enumerate(base) if r["op"] == "insert"][:3]):
-        mutants.append((_bump(base, i, "new_priority_int"), f"insert_leaf_plus_one_{n}"))
-        mutants.append((_bump(base, i, "base_priority_int"), f"insert_q_plus_one_{n}"))
-    u = _first(base, "update")
-    mutants.append((_bump(base, u, "new_priority_int", -1), "update_leaf_minus_one"))
-    mutants.append((_bump(base, u, "base_priority_int", 7), "update_q_plus_seven"))
-
-    # epoch / version bookkeeping
-    i = _first(base, "insert")
-    mutants.append((_bump(base, i, "base_epoch"), "insert_wrong_base_epoch"))
-    mutants.append((_bump(base, i, "entry_version"), "insert_version_newer_than_current"))
-    mutants.append((_bump(base, u, "entry_version"), "update_version_changed_without_reset"))
-    advances = [j for j, r in enumerate(base) if r["op"] == "advance_version"]
-    mutants.append((_bump(base, advances[1], "new_version", -1), "advance_version_backwards"))
-    adv = copy.deepcopy(base)
-    adv[advances[1]]["old_version"] = str(int(adv[advances[1]]["old_version"]) + 1)
-    adv[advances[1]]["new_version"] = str(int(adv[advances[1]]["new_version"]) + 1)
-    mutants.append((_recompute_digests_from(adv, advances[1]), "advance_version_old_mismatch"))
-
-    return mutants + _decay_lifecycle_mutants(base)
-
-
-def _decay_lifecycle_mutants(base: list[dict]) -> list[tuple[list[dict], str]]:
-    """Forgeries of the staleness and rebase protocol."""
-    mutants: list[tuple[list[dict], str]] = []
-
-    # staleness protocol
-    s = _first(base, "evict", reason="stale")
-    deleted = copy.deepcopy(base)
-    deleted.pop(s)
-    mutants.append((_recompute_digests_from(deleted, s), "expired_entry_never_evicted"))
-    relabel = copy.deepcopy(base)
-    relabel[s]["reason"] = "capacity"
-    mutants.append((_recompute_digests_from(relabel, s), "stale_evict_relabelled_capacity"))
-    c = _first(base, "evict", reason="capacity")
-    relabel2 = copy.deepcopy(base)
-    relabel2[c]["reason"] = "stale"
-    mutants.append((_recompute_digests_from(relabel2, c), "live_entry_evicted_as_stale"))
-    noreason = copy.deepcopy(base)
-    del noreason[c]["reason"]
-    mutants.append((_recompute_digests_from(noreason, c), "evict_reason_missing"))
-
-    # rebase
-    r = _first(base, "rebase")
-    swapped = copy.deepcopy(base)
-    swapped[r - 1], swapped[r] = swapped[r], swapped[r - 1]
-    mutants.append((_recompute_digests_from(swapped, r - 1), "rebase_before_last_stale_evict"))
-    mutants.append((_bump(base, r, "new_base_epoch"), "rebase_non_canonical_epoch"))
-    mutants.append((_bump(base, r, "root_total_after"), "rebase_total_after_wrong"))
-    mutants.append((_bump(base, r, "root_total_before"), "rebase_total_before_wrong"))
-    removed = copy.deepcopy(base)
-    removed.pop(r)
-    mutants.append((_recompute_digests_from(removed, r), "rebase_record_removed"))
-
-    # sample after a rebase must use the shifted tree
-    smp = next(j for j in range(r, len(base)) if base[j]["op"] == "sample")
-    mutants.append((_bump(base, smp, "root_total", 1), "sample_total_ignores_rebase"))
-    return mutants
-
-
-def _decay_hardening_mutants(base: list[dict]) -> list[tuple[list[dict], str]]:
-    """Malformed-but-digested inputs: index range, no-op rebase, field encoding,
-    a stray reason, and configs that would stall or overflow the replay."""
-    mutants: list[tuple[list[dict], str]] = []
-    i = _first(base, "insert")
-    r = _first(base, "rebase")
-    for bad_index in (-1, 8, 10**6):
-        m = copy.deepcopy(base)
-        m[i]["index"] = bad_index
-        mutants.append((_recompute_digests_from(m, i), f"insert_index_{bad_index}"))
-    noop = copy.deepcopy(base)
-    noop[r]["new_base_epoch"] = noop[r]["old_base_epoch"]
-    mutants.append((_recompute_digests_from(noop, r), "rebase_noop"))
-    for bad_value in (5, 5.9, True, "-1", " 7"):
-        m = copy.deepcopy(base)
-        m[i]["entry_version"] = bad_value
-        mutants.append((_recompute_digests_from(m, i), f"entry_version_encoded_as_{bad_value!r}"))
-    stray = copy.deepcopy(base)
-    stray[i]["reason"] = "explicit"
-    mutants.append((_recompute_digests_from(stray, i), "reason_on_insert"))
-    hostile = copy.deepcopy(base)
-    hostile[0]["half_life"] = "200000"
-    mutants.append((_recompute_digests_from(hostile, 0), "config_half_life_hostile"))
-    budget = copy.deepcopy(base)
-    budget[0]["max_policy_age"] = "100"
-    mutants.append((_recompute_digests_from(budget, 0), "config_bit_budget_violated"))
-    return mutants
-
-
-def main() -> None:
-    print("=" * 70)
-    print("T4 Mutation Campaign — Attestation Forgery Test")
-    print("=" * 70)
-    print()
-
-    results = run_mutation_campaign()
-
-    print(f"Total mutants: {results['total_mutants']}")
-    print(f"Rejected:      {results['rejected']}")
-    print(f"Survived:      {len(results['survived'])}")
-    print()
-
-    print("By category:")
-    for name, total, rejected in results["details"]:
-        status = "PASS" if total == rejected else "FAIL"
-        print(f"  [{status}] {name}: {rejected}/{total} rejected")
-
+def _print_limits(results: dict) -> None:
+    """The documented limits, each a measurement the campaign checks."""
     limit = results.get("content_limit")
     if limit:
         print()
@@ -701,6 +486,11 @@ def main() -> None:
         print(f"Documented limit: {len(staleness_limit['pass'])} of {len(staleness_limit['mutants'])} policy-parameter "
               f"changes that flip no decision pass ({', '.join(staleness_limit['pass'])}).")
         print(f"  {staleness_limit['statement']}")
+    consistency = results.get("consistency_limit")
+    if consistency:
+        print(f"Documented limit: {len(consistency['pass'])} of {len(consistency['mutants'])} chain-consistent "
+              f"forgeries of recorded statements verify ({', '.join(consistency['pass'])}).")
+        print(f"  {consistency['statement']}")
     replay_split = results.get("replay_manifest")
     if replay_split:
         print(f"Offline replay: {len(replay_split['broke'])} manifest tamperings break it (counted above); "
@@ -708,25 +498,16 @@ def main() -> None:
               f"({', '.join(replay_split['changed'])}).")
         print(f"  {replay_split['statement']}")
 
-    print()
-    if results["survived"]:
-        print("SURVIVING MUTANTS (checker bugs!):")
-        for desc in results["survived"]:
-            print(f"  - {desc}")
-        print()
-        print("RESULT: FAIL — surviving mutants detected")
-    elif results["total_mutants"] < 60:
-        print(f"RESULT: FAIL — fewer than 60 mutants ({results['total_mutants']})")
-    else:
-        print(f"RESULT: PASS — 100% rejection rate ({results['rejected']}/{results['total_mutants']})")
 
-    # Write report
+def _write_report(results: dict) -> None:
+    """results/mutation_campaign_report.json: counts, categories, reasons and every measured limit."""
     Path("results").mkdir(exist_ok=True)
     report = {
         "campaign": "T4_mutation",
         "total_mutants": results["total_mutants"],
         "rejected": results["rejected"],
         "survived": results["survived"],
+        "wrong_reason": results.get("wrong_reason", []),
         "categories": [
             {"name": n, "total": t, "rejected": r}
             for n, t, r in results["details"]
@@ -736,13 +517,56 @@ def main() -> None:
         "provenance_limit": results.get("provenance_limit"),
         "replay_manifest": results.get("replay_manifest"),
         "staleness_limit": results.get("staleness_limit"),
-        "pass": len(results["survived"]) == 0 and results["total_mutants"] >= 60,
+        "consistency_limit": results.get("consistency_limit"),
+        "pass": not results["survived"] and not results.get("wrong_reason") and results["total_mutants"] >= 60,
     }
     Path("results/mutation_campaign_report.json").write_text(
         json.dumps(report, indent=2)
     )
     print()
     print("Report written to results/mutation_campaign_report.json")
+
+
+def main() -> None:
+    print("=" * 70)
+    print("T4 Mutation Campaign — Attestation Forgery Test")
+    print("=" * 70)
+    print()
+
+    results = run_mutation_campaign()
+
+    print(f"Total mutants: {results['total_mutants']}")
+    print(f"Rejected:      {results['rejected']}")
+    print(f"Survived:      {len(results['survived'])}")
+    print()
+
+    print("By category:")
+    for name, total, rejected in results["details"]:
+        status = "PASS" if total == rejected else "FAIL"
+        print(f"  [{status}] {name}: {rejected}/{total} rejected")
+
+    _print_limits(results)
+
+    print()
+    if results.get("wrong_reason"):
+        print("MUTANTS REJECTED FOR THE WRONG REASON (the rule they name is untested!):")
+        for desc in results["wrong_reason"]:
+            print(f"  - {desc}")
+        print()
+    if results["survived"]:
+        print("SURVIVING MUTANTS (checker bugs!):")
+        for desc in results["survived"]:
+            print(f"  - {desc}")
+        print()
+        print("RESULT: FAIL — surviving mutants detected")
+    elif results.get("wrong_reason"):
+        print(f"RESULT: FAIL — {len(results['wrong_reason'])} mutants rejected for the wrong reason")
+    elif results["total_mutants"] < 60:
+        print(f"RESULT: FAIL — fewer than 60 mutants ({results['total_mutants']})")
+    else:
+        print(f"RESULT: PASS — 100% rejection rate ({results['rejected']}/{results['total_mutants']})")
+
+    _write_report(results)
 
 
 if __name__ == "__main__":

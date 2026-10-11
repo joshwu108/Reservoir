@@ -161,6 +161,20 @@ the tensor commitment can be opened only by someone holding the batch, and
 nothing in the log ties it to the declared rows. TRL's later row shuffle
 and the optimizer are outside.
 
+Replayed rows are drawn only from entries stored at least `min_entry_age`
+steps earlier (1 by default in both adapters), so a replayed row is not a
+copy of a fresh row of the same batch; `tests/test_trl_same_step.py` and
+`tests/test_verl_same_step.py` show it on fake trainers. Sampling is still
+with replacement, so one rollout can fill two dead rows of a step, and an
+entry can be replayed at several later steps. When TRL generates more than
+once per optimizer step, the later generations of that step replay nothing.
+The committed runs under `benchmarks/modal/results/` predate the floor:
+some of their replayed rows were stored at the same step (9 of 56 in the
+two-A10G TRL log, 10 of 56 in the verl T4 log) and their sample records
+carry neither `min_entry_age` nor per-draw `entry_version`. The fields are
+recorded for a checker; this repository's checker is not claimed to verify
+them until it does.
+
 ### 14. TRL Integration Scope
 
 The adapter is tested against TRL 1.13.0 only, text-only. It does not
@@ -171,6 +185,12 @@ With vLLM generation it accepts a batch only when the importance-sampling
 correction and off-policy masking are off, in which case it drops vLLM's
 unused sampling logprobs from the batch; replayed rows carry no vLLM
 logprobs.
+A group is treated as dead from its exact per-function reward tuples only
+when the mixin captured them from `_calculate_rewards`; without them only
+exactly-zero advantages count, and a group of equal non-dyadic rewards
+stays in the batch with TRL's float32 residue advantages (it is counted
+near-dead and not stored). The rewards are compared as TRL computed them,
+not as the reward functions would compute them again.
 Generation, reward computation and TRL's own row shuffling are outside the
 attestation log; the log covers what the buffer stored, drew and evicted.
 Behavior logprobs stored for replay are those of the training model at
