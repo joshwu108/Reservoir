@@ -7,10 +7,6 @@ minor bump may change interfaces.
 
 ## [Unreleased]
 
-Entries marked *pending* are being made on other branches and are not in
-this tree yet; they are listed so this section describes the release as a
-whole.
-
 ### Added
 
 - **Staleness sweep harness** (`benchmarks/modal/staleness_sweep.py`,
@@ -88,6 +84,10 @@ whole.
 
 ### Fixed
 
+- The `verl` extra installs `cachetools`, `fastapi` and `uvicorn`. verl
+  0.9.1 imports them when its trainer loads but declares them only under its
+  `verl-core` extra, so `require_verl()` failed on a plain
+  `pip install reservoir-replay[verl]`.
 - The checker binds a batch witness's and a telemetry record's `step` to
   the buffer's version, and requires a sample's witness before any
   telemetry naming it (*pending*).
