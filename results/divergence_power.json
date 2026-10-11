@@ -1,0 +1,526 @@
+{
+  "provenance": {
+    "reservoir_version": "0.6.0",
+    "commit": "f45b5386acc7dc54cae8a442f2cfe7db8217a773",
+    "changed_files": [
+      "benchmarks/attestation_overhead.py",
+      "benchmarks/durable_overhead.py",
+      "benchmarks/staleness/report.py",
+      "campaigns/crash.py",
+      "campaigns/divergence.py",
+      "docs/design.md",
+      "results/attestation_overhead.json",
+      "results/crash_campaign_report.json",
+      "results/durable_overhead.json",
+      "src/reservoir/durable_rollout.py",
+      "src/reservoir/integrations/_trl_lifecycle.py",
+      "src/reservoir/integrations/_trl_presets.py",
+      "src/reservoir/integrations/_trl_staleness.py",
+      "src/reservoir/integrations/_trl_telemetry.py",
+      "src/reservoir/rollout_wal.py",
+      "tests/test_durable_snapshot.py",
+      "tests/test_durable_wal.py",
+      "tests/test_presets.py",
+      "tests/test_quarantine.py",
+      "tests/test_staleness_sweep.py",
+      "tests/test_trl_checkpoint.py",
+      "tests/test_trl_staleness.py",
+      "tests/test_trl_telemetry.py",
+      "tests/test_verl_replay.py"
+    ],
+    "commit_dirty": true,
+    "date": "2026-10-11T04:21:00Z",
+    "python": "3.12.14",
+    "machine": "Darwin arm64",
+    "gpu": null
+  },
+  "campaign": "T2_divergence_power",
+  "method": "per-draw divergence probability estimated as sum_i |F_exact(i) - F_float(i)| over leaf boundaries (campaigns.divergence.cdf_mismatch_mass), times the draws a run makes; the float descent's own subtraction rounding is not included and is of the same order",
+  "workloads_per_cell_measured": 4,
+  "draws_per_workload": 100,
+  "mismatch_per_draw_max_by_capacity": {
+    "1024": {
+      "openai": 1.1717331699385271e-13,
+      "labml": 1.1717331699385271e-13
+    },
+    "16384": {
+      "openai": 2.17771088236756e-12,
+      "labml": 2.17771088236756e-12
+    },
+    "131072": {
+      "openai": 1.3860359636487957e-11,
+      "labml": 1.3860359636487957e-11
+    }
+  },
+  "expected_divergences": {
+    "committed_run_200_per_cell": {
+      "openai": 1.0851598889018436e-06,
+      "labml": 1.0851598889018436e-06
+    },
+    "preregistered_grid": {
+      "openai": 5.425799444509217e-05,
+      "labml": 5.425799444509217e-05
+    }
+  },
+  "cells": [
+    {
+      "capacity": 1024,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 3.037979995426068e-14,
+        "labml": 3.037979995426068e-14
+      },
+      "mismatch_per_draw_max": {
+        "openai": 5.743572736966388e-14,
+        "labml": 5.743572736966388e-14
+      }
+    },
+    {
+      "capacity": 1024,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 1.4749400973455686e-14,
+        "labml": 1.4749400973455686e-14
+      },
+      "mismatch_per_draw_max": {
+        "openai": 2.602610438895853e-14,
+        "labml": 2.602610438895853e-14
+      }
+    },
+    {
+      "capacity": 1024,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 3.4743579497123985e-14,
+        "labml": 3.4743579497123985e-14
+      },
+      "mismatch_per_draw_max": {
+        "openai": 7.452924000103998e-14,
+        "labml": 7.452924000103998e-14
+      }
+    },
+    {
+      "capacity": 1024,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 5.510757456498434e-14,
+        "labml": 5.510757456498434e-14
+      },
+      "mismatch_per_draw_max": {
+        "openai": 1.1717331699385271e-13,
+        "labml": 1.1717331699385271e-13
+      }
+    },
+    {
+      "capacity": 1024,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 2.777776094119209e-14,
+        "labml": 2.777776094119209e-14
+      },
+      "mismatch_per_draw_max": {
+        "openai": 4.47068067743176e-14,
+        "labml": 4.47068067743176e-14
+      }
+    },
+    {
+      "capacity": 1024,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 3.0496673713593214e-14,
+        "labml": 3.0496673713593214e-14
+      },
+      "mismatch_per_draw_max": {
+        "openai": 5.3015550931289556e-14,
+        "labml": 5.3015550931289556e-14
+      }
+    },
+    {
+      "capacity": 1024,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 9.739913509976722e-15,
+        "labml": 9.739913509976722e-15
+      },
+      "mismatch_per_draw_max": {
+        "openai": 2.0439234637269908e-14,
+        "labml": 2.0439234637269908e-14
+      }
+    },
+    {
+      "capacity": 1024,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 3.462267730777047e-14,
+        "labml": 3.462267730777047e-14
+      },
+      "mismatch_per_draw_max": {
+        "openai": 5.166436399922862e-14,
+        "labml": 5.166436399922862e-14
+      }
+    },
+    {
+      "capacity": 1024,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 1.6359762330807657e-14,
+        "labml": 1.6359762330807657e-14
+      },
+      "mismatch_per_draw_max": {
+        "openai": 2.7898193308195937e-14,
+        "labml": 2.7898193308195937e-14
+      }
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 8.379047296784869e-13,
+        "labml": 8.379047296784869e-13
+      },
+      "mismatch_per_draw_max": {
+        "openai": 1.1103242579885835e-12,
+        "labml": 1.1103242579885835e-12
+      }
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 4.716801994834714e-13,
+        "labml": 4.716801994834714e-13
+      },
+      "mismatch_per_draw_max": {
+        "openai": 9.66959194527706e-13,
+        "labml": 9.66959194527706e-13
+      }
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 5.374110603704937e-13,
+        "labml": 5.374110603704937e-13
+      },
+      "mismatch_per_draw_max": {
+        "openai": 1.0723533084481443e-12,
+        "labml": 1.0723533084481443e-12
+      }
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 1.0655049144259364e-12,
+        "labml": 1.0655049144259364e-12
+      },
+      "mismatch_per_draw_max": {
+        "openai": 1.6198977166758702e-12,
+        "labml": 1.6198977166758702e-12
+      }
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 9.491194181789214e-13,
+        "labml": 9.491194181789214e-13
+      },
+      "mismatch_per_draw_max": {
+        "openai": 1.2486163010865485e-12,
+        "labml": 1.2486163010865485e-12
+      }
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 7.169640933879369e-13,
+        "labml": 7.169640933879369e-13
+      },
+      "mismatch_per_draw_max": {
+        "openai": 1.186680107596663e-12,
+        "labml": 1.186680107596663e-12
+      }
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 1.007320605232676e-12,
+        "labml": 1.007320605232676e-12
+      },
+      "mismatch_per_draw_max": {
+        "openai": 2.059755148681448e-12,
+        "labml": 2.059755148681448e-12
+      }
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 7.185271729089543e-13,
+        "labml": 7.185271729089543e-13
+      },
+      "mismatch_per_draw_max": {
+        "openai": 1.3499405263797689e-12,
+        "labml": 1.3499405263797689e-12
+      }
+    },
+    {
+      "capacity": 16384,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 1.11366768516535e-12,
+        "labml": 1.11366768516535e-12
+      },
+      "mismatch_per_draw_max": {
+        "openai": 2.17771088236756e-12,
+        "labml": 2.17771088236756e-12
+      }
+    },
+    {
+      "capacity": 131072,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 3.93749464104776e-12,
+        "labml": 3.93749464104776e-12
+      },
+      "mismatch_per_draw_max": {
+        "openai": 1.3860359636487957e-11,
+        "labml": 1.3860359636487957e-11
+      }
+    },
+    {
+      "capacity": 131072,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 4.081701190434041e-12,
+        "labml": 4.081701190434041e-12
+      },
+      "mismatch_per_draw_max": {
+        "openai": 1.254026226531619e-11,
+        "labml": 1.254026226531619e-11
+      }
+    },
+    {
+      "capacity": 131072,
+      "magnitude_span": 1000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 4.3257737098061666e-12,
+        "labml": 4.3257737098061666e-12
+      },
+      "mismatch_per_draw_max": {
+        "openai": 7.31031763428854e-12,
+        "labml": 7.31031763428854e-12
+      }
+    },
+    {
+      "capacity": 131072,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 4.482101103542069e-12,
+        "labml": 4.482101103542069e-12
+      },
+      "mismatch_per_draw_max": {
+        "openai": 1.0157951422022272e-11,
+        "labml": 1.0157951422022272e-11
+      }
+    },
+    {
+      "capacity": 131072,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 3.4239607684581766e-12,
+        "labml": 3.4239607684581766e-12
+      },
+      "mismatch_per_draw_max": {
+        "openai": 4.194935715809894e-12,
+        "labml": 4.194935715809894e-12
+      }
+    },
+    {
+      "capacity": 131072,
+      "magnitude_span": 100000000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 2.8005964254995504e-12,
+        "labml": 2.8005964254995504e-12
+      },
+      "mismatch_per_draw_max": {
+        "openai": 5.747887454236269e-12,
+        "labml": 5.747887454236269e-12
+      }
+    },
+    {
+      "capacity": 131072,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        1,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 7.132091536111581e-12,
+        "labml": 7.132091536111581e-12
+      },
+      "mismatch_per_draw_max": {
+        "openai": 9.990302707762062e-12,
+        "labml": 9.990302707762062e-12
+      }
+    },
+    {
+      "capacity": 131072,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        10,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 8.208340514466445e-12,
+        "labml": 8.208340514466445e-12
+      },
+      "mismatch_per_draw_max": {
+        "openai": 1.0327641499844432e-11,
+        "labml": 1.0327641499844432e-11
+      }
+    },
+    {
+      "capacity": 131072,
+      "magnitude_span": 1000000000000.0,
+      "update_ratio": [
+        100,
+        1
+      ],
+      "n_workloads": 4,
+      "mismatch_per_draw_mean": {
+        "openai": 8.193857534100991e-12,
+        "labml": 8.193857534100991e-12
+      },
+      "mismatch_per_draw_max": {
+        "openai": 1.0248061164234286e-11,
+        "labml": 1.0248061164234286e-11
+      }
+    }
+  ]
+}

@@ -28,14 +28,28 @@ maximum over its workloads).
 Workload programs follow the preregistered structure: ``capacity``
 priorities ``p_i = base * magnitude_factor ** (i mod 8)`` with ``base`` in
 [1, 10] and ``magnitude_factor`` chosen so the eight levels span the
-cell's magnitude range, then ``10 * updates_per_sample`` keyed priority
-updates, then 100 draws, each exactly uniform on ``[0, exact_total)``
+cell's magnitude range, then ``min(10 * updates_per_sample, capacity)``
+keyed priority updates (``updates_per_workload``), then 100 draws, each exactly uniform on ``[0, exact_total)``
 through the library's keyed rejection-sampling draw (a 64-bit hash reduced
 modulo a 70- to 90-bit total, as the campaign did before 2026-10-04, would
 only ever reach the first leaves). A divergence, if one is found, is
 written to ``results/divergence_reproducers/`` as the full workload
 parameters; the preregistered shrinking step is not implemented and would
 be run by hand on such a reproducer.
+
+Two departures from the preregistration remain in this code and are
+disclosed in docs/preregistration-deviations.md, where the committed run
+was made with them: every update happens before every draw, and there are
+``10 * r`` updates for 100 draws, so the cells labelled 1:1, 10:1 and
+100:1 run 0.1, 1 and 10 updates per draw; and a workload's seed depends
+on its capacity, span and index only (``workload_seed``), so the three
+ratio cells of a (capacity, span) pair start from the same priorities.
+``tests/test_divergence_campaign.py`` pins both, with the grid.
+
+``--power N`` measures, on ``N`` workloads per cell, how many divergences
+the grid could be expected to find at all: the probability that one
+uniform draw lands between a leaf's exact and float boundaries
+(``cdf_mismatch_mass``), times the draws the grid makes.
 
 ``--workloads-per-cell`` runs a disclosed fraction of the grid. The report
 records the count run, and the preregistered kill rule is declared fired
@@ -48,6 +62,7 @@ Usage::
     python -m campaigns.divergence                              # full grid, ~28 CPU-hours
     python -m campaigns.divergence --workloads-per-cell 200     # 1% sample, ~20 min on 8 cores
     python -m campaigns.divergence --workloads-per-cell 5 --jobs 1
+    python -m campaigns.divergence --power 4                    # writes results/divergence_power.json
 """
 
 from __future__ import annotations
@@ -93,6 +108,17 @@ def _keyed_hash(seed: int, i: int) -> int:
     return int.from_bytes(hashlib.blake2b(msg, digest_size=8).digest(), "big")
 
 
+def workload_seed(capacity: int, magnitude_span: float, w: int) -> int:
+    """Seed of workload ``w`` of a cell. The update ratio is not an input (a disclosed deviation)."""
+    return _keyed_hash(capacity + int(magnitude_span), w)
+
+
+def updates_per_workload(update_sample_ratio: tuple[int, int], capacity: int) -> int:
+    """Priority updates a workload makes, all before its ``TV_SAMPLE_COUNT`` draws (a disclosed deviation)."""
+    updates_per_sample, _ = update_sample_ratio
+    return min(updates_per_sample * 10, capacity)
+
+
 SPAN_LEVELS = 8
 """Preregistered: priorities cycle through eight magnitude levels."""
 
@@ -129,6 +155,35 @@ def _map_draw_to_float(draw_int: int, exact_total: int, float_total: float) -> f
 # Single divergence check
 # ---------------------------------------------------------------------------
 
+def _build_trees(capacity: int, magnitude_span: float, update_sample_ratio: tuple[int, int], workload_seed: int,
+                 alpha: float = ALPHA) -> tuple:
+    """The exact tree and the two float trees after a workload's inserts and updates (its draws come after)."""
+    exact_tree = ExactSumTree(capacity)
+    openai_tree = OpenAISegmentTree(capacity, alpha=alpha)
+    labml_tree = LabmlArraySumTree(capacity, alpha=alpha)
+
+    # Insert initial priorities
+    priorities_raw = generate_priorities(capacity, magnitude_span, seed=workload_seed)
+    for i, p in enumerate(priorities_raw):
+        p_int = float_to_priority_int(p, alpha)
+        exact_tree.update(i, p_int)
+        openai_tree.update(i, p)
+        labml_tree.update(i, p)
+
+    # Updates, all before any draw
+    n_updates = updates_per_workload(update_sample_ratio, capacity)
+    for j in range(n_updates):
+        pos = _keyed_hash(workload_seed, 10000 + j) % capacity
+        h = _keyed_hash(workload_seed, 20000 + j)
+        new_p = priorities_raw[pos] * (0.5 + h % 100 / 50.0)
+        p_int = float_to_priority_int(new_p, alpha)
+        exact_tree.update(pos, p_int)
+        openai_tree.update(pos, new_p)
+        labml_tree.update(pos, new_p)
+
+    return exact_tree, openai_tree, labml_tree
+
+
 def check_divergence(
     capacity: int,
     magnitude_span: float,
@@ -145,31 +200,8 @@ def check_divergence(
       - tv_openai: float (TV distance, OpenAI baseline)
       - tv_labml: float (TV distance, labml baseline)
     """
-    updates_per_sample, _ = update_sample_ratio
-
-    # Initialize trees
-    exact_tree = ExactSumTree(capacity)
-    openai_tree = OpenAISegmentTree(capacity, alpha=alpha)
-    labml_tree = LabmlArraySumTree(capacity, alpha=alpha)
-
-    # Insert initial priorities
-    priorities_raw = generate_priorities(capacity, magnitude_span, seed=workload_seed)
-    for i, p in enumerate(priorities_raw):
-        p_int = float_to_priority_int(p, alpha)
-        exact_tree.update(i, p_int)
-        openai_tree.update(i, p)
-        labml_tree.update(i, p)
-
-    # Do some updates
-    n_updates = min(updates_per_sample * 10, capacity)
-    for j in range(n_updates):
-        pos = _keyed_hash(workload_seed, 10000 + j) % capacity
-        h = _keyed_hash(workload_seed, 20000 + j)
-        new_p = priorities_raw[pos] * (0.5 + h % 100 / 50.0)
-        p_int = float_to_priority_int(new_p, alpha)
-        exact_tree.update(pos, p_int)
-        openai_tree.update(pos, new_p)
-        labml_tree.update(pos, new_p)
+    exact_tree, openai_tree, labml_tree = _build_trees(capacity, magnitude_span, update_sample_ratio,
+                                                       workload_seed, alpha)
 
     divergences = []
     exact_total = exact_tree.total
@@ -244,6 +276,84 @@ def _total_variation(exact_tree: ExactSumTree, exact_total: int, float_tree, cap
     return 0.5 * total
 
 
+def cdf_mismatch_mass(exact_tree: ExactSumTree, exact_total: int, float_tree, capacity: int) -> float:
+    """``sum_i |F_exact(i) - F_float(i)|`` over the leaf boundaries ``i < capacity - 1``.
+
+    ``F(i)`` is the cumulative probability of positions ``0..i``: exact
+    for the integer tree, ``(sum of float leaves 0..i) / float_total``
+    (the float leaves summed exactly) for the float tree, the same implied
+    distribution the total-variation distance uses. A draw ``u`` uniform
+    on ``[0, 1)``, mapped to both trees, lands in different leaves only if
+    some boundary has ``u`` between its two values, so this sum is the
+    probability that one draw diverges, up to the rounding the float
+    descent adds when it subtracts left sums (a few ulps of the total per
+    level, the same order). Computed in integers, rounded once.
+    """
+    float_total = float_tree.total
+    if float_total <= 0 or exact_total <= 0:
+        return 0.0
+    leaves = [Fraction(float_tree.get_leaf(i)) for i in range(capacity)]
+    scale = max(f.denominator for f in leaves + [Fraction(float_total)])
+    total_scaled = int(Fraction(float_total) * scale)
+    exact_prefix = 0
+    float_prefix = 0
+    mismatch = 0
+    for i in range(capacity - 1):
+        exact_prefix += exact_tree.get(i)
+        float_prefix += int(leaves[i] * scale)
+        mismatch += abs(exact_prefix * total_scaled - float_prefix * exact_total)
+    return float(Fraction(mismatch, exact_total * total_scaled))
+
+
+def _power_cell(args: tuple) -> dict:
+    """``cdf_mismatch_mass`` for ``n`` workloads of one cell, both idioms."""
+    cap, mag_span, update_ratio, n = args
+    masses: dict[str, list[float]] = {"openai": [], "labml": []}
+    for w in range(n):
+        seed = workload_seed(cap, mag_span, w)
+        trees = _build_trees(cap, mag_span, update_ratio, seed)
+        exact_tree, openai_tree, labml_tree = trees
+        masses["openai"].append(cdf_mismatch_mass(exact_tree, exact_tree.total, openai_tree, cap))
+        masses["labml"].append(cdf_mismatch_mass(exact_tree, exact_tree.total, labml_tree, cap))
+    return {"capacity": cap, "magnitude_span": mag_span, "update_ratio": list(update_ratio), "n_workloads": n,
+            "mismatch_per_draw_mean": {k: sum(v) / len(v) for k, v in masses.items()},
+            "mismatch_per_draw_max": {k: max(v) for k, v in masses.items()}}
+
+
+def run_power(workloads_per_cell: int, jobs: int = 1) -> dict:
+    """Expected divergences of the grid, from the mismatch mass of ``workloads_per_cell`` workloads per cell."""
+    specs = [(cap, span, ratio, workloads_per_cell)
+             for cap in CAPACITIES for span in MAGNITUDE_SPANS for ratio in UPDATE_SAMPLE_RATIOS]
+    if jobs > 1:
+        with multiprocessing.get_context("spawn").Pool(jobs) as pool:
+            cells = pool.map(_power_cell, specs)
+    else:
+        cells = [_power_cell(spec) for spec in specs]
+
+    def expected(workloads: int, idiom: str) -> float:
+        return sum(workloads * TV_SAMPLE_COUNT * c["mismatch_per_draw_mean"][idiom] for c in cells)
+
+    per_capacity = {
+        str(cap): {idiom: max(c["mismatch_per_draw_max"][idiom] for c in cells if c["capacity"] == cap)
+                   for idiom in ("openai", "labml")}
+        for cap in CAPACITIES
+    }
+    return {
+        "campaign": "T2_divergence_power",
+        "method": ("per-draw divergence probability estimated as sum_i |F_exact(i) - F_float(i)| over leaf "
+                   "boundaries (campaigns.divergence.cdf_mismatch_mass), times the draws a run makes; the "
+                   "float descent's own subtraction rounding is not included and is of the same order"),
+        "workloads_per_cell_measured": workloads_per_cell,
+        "draws_per_workload": TV_SAMPLE_COUNT,
+        "mismatch_per_draw_max_by_capacity": per_capacity,
+        "expected_divergences": {
+            "committed_run_200_per_cell": {i: expected(200, i) for i in ("openai", "labml")},
+            "preregistered_grid": {i: expected(PREREGISTERED_WORKLOADS_PER_CELL, i) for i in ("openai", "labml")},
+        },
+        "cells": cells,
+    }
+
+
 def _write_reproducer(cap: int, mag_span: float, update_ratio, seed: int, divergences: list[dict]) -> None:
     """Record a divergent workload's parameters (preregistered §Minimal Reproducer, without shrinking)."""
     out = Path("results/divergence_reproducers")
@@ -263,7 +373,7 @@ def _run_cell(args: tuple) -> dict:
         "tv_max_openai": 0.0, "tv_max_labml": 0.0, "examples": [],
     }
     for w in range(workloads_per_cell):
-        seed = _keyed_hash(cap + int(mag_span), w)
+        seed = workload_seed(cap, mag_span, w)
         r = check_divergence(capacity=cap, magnitude_span=mag_span, update_sample_ratio=update_ratio,
                              workload_seed=seed)
         if r["diverged"]:
@@ -363,13 +473,33 @@ def _report(results: dict) -> dict:
     }
 
 
+def _main_power(workloads_per_cell: int, jobs: int) -> None:
+    from benchmarks.provenance import stamped
+
+    power = run_power(workloads_per_cell, jobs)
+    for scope, by_idiom in power["expected_divergences"].items():
+        print(f"expected divergences, {scope}: " + ", ".join(f"{k} {v:.2e}" for k, v in by_idiom.items()))
+    for cap, by_idiom in power["mismatch_per_draw_max_by_capacity"].items():
+        print(f"per-draw divergence probability, capacity {cap}: max " +
+              ", ".join(f"{k} {v:.2e}" for k, v in by_idiom.items()))
+    Path("results").mkdir(exist_ok=True)
+    Path("results/divergence_power.json").write_text(json.dumps(stamped(power), indent=2))
+    print("Report written to results/divergence_power.json")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Preregistered T2 float-divergence campaign.")
     parser.add_argument("--workloads-per-cell", type=int, default=PREREGISTERED_WORKLOADS_PER_CELL,
                         help="workloads per grid cell; the preregistered value is 10,000")
     parser.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) - 1),
                         help="worker processes (cells run in parallel)")
+    parser.add_argument("--power", type=int, default=None, metavar="N",
+                        help="instead of the campaign, measure the expected divergences on N workloads per cell "
+                             "and write results/divergence_power.json")
     args = parser.parse_args(argv)
+    if args.power is not None:
+        _main_power(args.power, args.jobs)
+        return
 
     n_cells = len(CAPACITIES) * len(MAGNITUDE_SPANS) * len(UPDATE_SAMPLE_RATIOS)
     print("=" * 70)

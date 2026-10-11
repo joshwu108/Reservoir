@@ -2,17 +2,16 @@
 
 How far behind the current policy may a replayed rollout be before
 replaying it stops helping, and does a staleness policy recover what is
-lost? This note describes the experiment
-(`planning/2026-10-06-staleness-controller.md`, deliverable D3), how to
-run and verify it, and what has been observed so far. Everything a run
-claims is in its committed record; the numbers below are copied from
-those records and nothing else.
+lost? This note describes the experiment, how to run and verify it, and
+what is committed so far. Everything a run claims is in its committed
+record; no run record is committed yet, so this note makes no claim about
+any run.
 
 ## Status
 
 | Stage | Observed |
 |---|---|
-| Harness, CPU smoke (2026-10-06) | Tiny Qwen2 test model, HF generation, coin-flip reward, 3 steps: all 7 arms train, 6 of 6 Reservoir logs verify with their manifests, the report and figure build. A 12-step run of `reservoir_age8_{off,on}` on seeds 42 and 43 replaces 8 and 4 rows at an exact ESS fraction of 0.98 to 0.99; with the gate at 1e-9 the same run declines 7 of 8 draws and its log still verifies. Not a result about training: the model cannot learn the task |
+| Harness and report builder | `tests/test_staleness_sweep.py` runs the arm planning, the policy switch, the per-run summaries, the report and its refusals on fabricated records. A CPU smoke of the harness (tiny Qwen2 test model, HF generation, coin-flip reward) was run on 2026-10-06; its records were not committed, so the repository holds no evidence of it and `tests/test_staleness_sweep_results.py` skips |
 | 16-step GPU engine smoke | not yet run |
 | 0.5B sweep (7 arms × 3 seeds × 300 steps) | not yet run |
 | 1.5B sweep | not yet run; needs an A100-80GB (float32 master weights plus Adam do not fit a 24 GB A10G) |
@@ -57,18 +56,18 @@ reward scaling, 300 optimizer steps, seeds 42, 43, 44.
 Every Reservoir arm uses capacity 4096, `half_life = max_policy_age / 2`
 (a row at the age bound has decayed to a quarter of its priority),
 `beta=0.4`, telemetry on, the run seed as the buffer seed, an attestation
-log and a manifest. "Policy on" is, until S1's `StalenessPolicy` lands,
-the 0.6.0 drift gate: `max_log_ratio=2.0` with uncapped declines, so a
-replayed row whose absolute sequence log-ratio (sum over completion
-tokens of current minus stored logprob) exceeds 2 nats is declined,
-evicted with reason `drift`, and listed in the step's batch witness.
-`--policy-on staleness` switches every `_on` arm to S1's `StalenessPolicy`
-through one function, `benchmarks.staleness.report.replay_kwargs`: the
-`conservative` preset's ESS floor (0.5) and group-mass cap (0.25) only, no
-policy age bound (the age axis stays the buffer's `max_policy_age`) and no
-legacy gate, passed under whichever keyword `ReservoirReplay` accepts for
-it. Until the adapter accepts one, the arm refuses to run rather than
-silently training with the policy off.
+log and a manifest. "Policy on" is selected by `--policy-on` through one
+function, `benchmarks.staleness.report.replay_kwargs`. `staleness` passes
+a `StalenessPolicy` with the `conservative` preset's sampling-design ESS
+floor (0.5) and group-mass cap (0.25) only: no policy age bound (the age
+axis stays the buffer's `max_policy_age`) and no legacy gate. `gate`
+(the harness default) is the 0.6.0 drift gate, `max_log_ratio=2.0` with
+uncapped declines: a replayed row whose absolute log-ratio exceeds 2 is
+declined, evicted with reason `drift`, and listed in the step's batch
+witness. The TRL adapter now measures that log-ratio as the mean over
+completion tokens of current minus stored logprob; when 2.0 was chosen it
+was the sum, so the gate arms are much looser than they were designed to
+be. Pass `--policy-on staleness` for the policy the library ships.
 
 **Stale-engine check.** Martingale's first colocate run caught TRL's
 in-process vLLM serving the initial weights for some generation steps
@@ -93,8 +92,9 @@ Under `benchmarks/modal/results/sweep_<model>_<steps>steps/`:
 
 - `<arm>_seed<seed>.json`: the configuration and library versions, TRL's
   per-step log with the `reservoir/*` telemetry (replay fraction, dead and
-  near-dead groups, replaced and declined rows, exact ESS and its fraction
-  of the replayed rows, staleness, sequence log-ratio statistics),
+  near-dead groups, replaced and declined rows, the exact sampling-design
+  ESS and its fraction of the replayed rows, staleness, log-ratio
+  statistics),
   per-step wall clock, the adapter's counters, the greedy evaluation, the
   stale-engine check, the container's wall clock and the dollars at
   Modal's list price (A10 $1.10/h, A100-80GB $2.50/h, 2026-10-06), and for
@@ -111,10 +111,10 @@ Under `benchmarks/modal/results/sweep_<model>_<steps>steps/`:
 `results/staleness_sweep_report.json` aggregates the records per arm
 (mean and sample standard deviation over seeds of the held-out accuracy,
 the last-quarter train reward, the dead-group rate, replaced and declined
-rows, the mean ESS fraction and log-ratio, wall clock and dollars, stale
+rows, the mean sampling-design ESS fraction and log-ratio, wall clock and dollars, stale
 engine steps) and keeps every per-step series;
 `results/staleness_sweep_ess_vs_reward.png` plots the reward curves per
-arm and ESS fraction against reward at every replayed step. Rebuilding the
+arm and sampling-design ESS fraction against reward at every replayed step. Rebuilding the
 report (`--report-only`) runs the checker again on every log and manifest
 next to the records and compares the log's last digest with the head the
 run reported, refuses a Reservoir run without a log or with a rejected
@@ -167,9 +167,11 @@ python -m checker.transcript <log> --manifest <manifest>      # exposure per exa
 ```
 
 The checker recomputes every draw, importance weight, decayed priority,
-batch witness and the exact ESS and staleness of every telemetry record;
-the log-ratio statistics are carried as reported floats (the checker has
-no model). See `docs/reproducible-training.md` for what the transcript
+batch witness and the exact sampling-design ESS and staleness of every
+telemetry record, recomputes the log-ratio statistics from the per-draw
+log-ratios the record carries, and replays every staleness-policy
+decision. The log-ratios themselves are measurements it cannot redo (the
+checker has no model). See `docs/reproducible-training.md` for what the transcript
 does and does not establish.
 
 ## What this does not claim

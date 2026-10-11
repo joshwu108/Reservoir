@@ -94,7 +94,7 @@ def test_rescore_writes_the_strategy_value_after_alpha_and_quantisation():
     assert {u["index"] for u in ups} == set(first_placement)
     for (rollout, signal, value), (slot, k) in zip(strategy.calls, first_placement.items()):
         assert rollout is batch.rollouts[k]
-        assert signal.log_ratio is not None and signal.log_ratio == pytest.approx(-0.5 * len(rollout))
+        assert signal.log_ratio is not None and signal.log_ratio == pytest.approx(-0.5)   # per-token mean
         assert signal.age == r.buffer.current_version - batch.model_versions[k]
         assert signal.step == 2 and signal.is_weight == float(batch.is_weights[k])
         assert r.buffer.base_priority(slot) == quantize_priority(value ** r.buffer.alpha, r.buffer.params)

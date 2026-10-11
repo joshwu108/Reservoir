@@ -1,8 +1,55 @@
 {
+  "provenance": {
+    "reservoir_version": "0.6.0",
+    "commit": "f45b5386acc7dc54cae8a442f2cfe7db8217a773",
+    "changed_files": [
+      ".github/workflows/ci.yml",
+      "CHANGELOG.md",
+      "README.md",
+      "benchmarks/atari_dqn.py",
+      "benchmarks/attestation_overhead.py",
+      "benchmarks/durable_overhead.py",
+      "benchmarks/modal/nccl_probe.py",
+      "benchmarks/modal/reproducible_grpo_real.py",
+      "benchmarks/modal/reproducible_grpo_vllm.py",
+      "benchmarks/modal/staleness_sweep.py",
+      "benchmarks/modal/trl_replay_real.py",
+      "benchmarks/staleness/report.py",
+      "campaigns/crash.py",
+      "campaigns/divergence.py",
+      "docs/design.md",
+      "docs/nonclaims.md",
+      "docs/preregistration-deviations.md",
+      "docs/reproducible-training.md",
+      "docs/staleness.md",
+      "results/attestation_overhead.json",
+      "results/crash_campaign_report.json",
+      "results/durable_overhead.json",
+      "src/reservoir/durable_rollout.py",
+      "src/reservoir/integrations/_trl_lifecycle.py",
+      "src/reservoir/integrations/_trl_presets.py",
+      "src/reservoir/integrations/_trl_staleness.py",
+      "src/reservoir/integrations/_trl_telemetry.py",
+      "src/reservoir/rollout_wal.py",
+      "tests/test_attestation_overhead.py",
+      "tests/test_durable_snapshot.py",
+      "tests/test_durable_wal.py",
+      "tests/test_presets.py",
+      "tests/test_quarantine.py",
+      "tests/test_staleness_sweep.py",
+      "tests/test_trl_checkpoint.py",
+      "tests/test_trl_rescore.py",
+      "tests/test_trl_staleness.py",
+      "tests/test_trl_telemetry.py",
+      "tests/test_verl_replay.py"
+    ],
+    "commit_dirty": true,
+    "date": "2026-10-11T04:38:16Z",
+    "python": "3.12.14",
+    "machine": "Darwin arm64",
+    "gpu": null
+  },
   "benchmark": "durable_overhead",
-  "reservoir_version": "0.5.0",
-  "python": "3.14.2",
-  "machine": "Darwin arm64",
   "workload": {
     "groups": 3000,
     "group_size": 8,
@@ -10,29 +57,92 @@
     "batch_size": 16,
     "capacity": 4096,
     "compact_every": 256,
-    "version_advance_every_groups": 10
+    "version_advance_every_groups": 10,
+    "repeats": 5,
+    "warmup_groups": 50,
+    "gc": "collected before and disabled during each timed run"
+  },
+  "load_average_1_5_15_min": {
+    "before": [
+      7.18,
+      8.67,
+      8.1
+    ],
+    "after": [
+      6.86,
+      7.16,
+      7.49
+    ]
   },
   "in_memory_attested": {
-    "add_group_ms_first_tenth": 0.3965625073760748,
-    "add_group_ms_last_tenth": 0.950020519667305,
-    "sample_ms_first_tenth": 0.3231455048080534,
-    "sample_ms_last_tenth": 0.7067709957482293,
+    "add_group_ms_first_tenth": 0.36560450098477304,
+    "add_group_ms_last_tenth": 0.8493120258208364,
+    "sample_ms_first_tenth": 0.23264551418833435,
+    "sample_ms_last_tenth": 0.5719379987567663,
     "wal_bytes_per_add_group": 0,
     "compactions": 0,
     "compaction_ms_median": null,
-    "compaction_ms_last": null
+    "compaction_ms_last": null,
+    "spread": {
+      "add_group_ms_first_tenth": [
+        0.3616045287344605,
+        0.3691040037665516
+      ],
+      "add_group_ms_last_tenth": [
+        0.8361660002265126,
+        0.8743749931454659
+      ],
+      "sample_ms_first_tenth": [
+        0.22764597088098526,
+        0.2480420225765556
+      ],
+      "sample_ms_last_tenth": [
+        0.5605834885500371,
+        0.5863955011591315
+      ]
+    }
   },
   "durable": {
-    "add_group_ms_first_tenth": 4.4630834890995175,
-    "add_group_ms_last_tenth": 5.710395489586517,
-    "sample_ms_first_tenth": 3.9756870100973174,
-    "sample_ms_last_tenth": 4.0502915071556345,
-    "wal_bytes_per_add_group": 12897.0,
+    "add_group_ms_first_tenth": 5.130917008500546,
+    "add_group_ms_last_tenth": 5.512667004950345,
+    "sample_ms_first_tenth": 3.978958004154265,
+    "sample_ms_last_tenth": 3.9936660323292017,
+    "wal_bytes_per_add_group": 12907,
     "compactions": 23,
-    "compaction_ms_median": 587.4509580025915,
-    "compaction_ms_last": 871.164417010732,
-    "snapshot_bytes": 54753803
+    "compaction_ms_median": 378.3777500502765,
+    "compaction_ms_last": 571.1957080056891,
+    "snapshot_bytes": 54754097,
+    "spread": {
+      "add_group_ms_first_tenth": [
+        4.495000001043081,
+        6.307000003289431
+      ],
+      "add_group_ms_last_tenth": [
+        5.505082954186946,
+        5.516083037946373
+      ],
+      "sample_ms_first_tenth": [
+        3.8093330222181976,
+        3.985541989095509
+      ],
+      "sample_ms_last_tenth": [
+        3.958333982154727,
+        4.004166985396296
+      ],
+      "compaction_ms_median": [
+        352.3244169773534,
+        413.27454103156924
+      ],
+      "compaction_ms_last": [
+        556.5264579490758,
+        597.463250043802
+      ]
+    }
   },
-  "reopen_seconds": 5.329068207996897,
+  "reopen_seconds": 5.294113541953266,
+  "reopen_seconds_spread": [
+    5.275262874958571,
+    5.833888666995335
+  ],
   "note": "cost of durability only; durability itself is evidenced by the crash campaign, not here"
 }

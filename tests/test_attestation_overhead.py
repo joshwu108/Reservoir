@@ -16,8 +16,16 @@ def test_tiny_benchmark_report_shape(tmp_path):
     assert report["configs"]["none"]["records"] == 0
     assert report["configs"]["file"]["records"] == report["configs"]["memory"]["records"] > 0
     assert report["configs"]["file+manifest"]["manifest_bytes"] > 0
-    assert report["checker"]["records"] == report["configs"]["file+manifest"]["records"]
+    # The checker reads the log after the steady pass, which adds one sample record per call.
+    assert report["checker"]["records"] == report["configs"]["file+manifest"]["records"] + 3
     assert report["checker"]["verify_with_manifest_seconds_per_10k_records"] > 0
+    for row in report["configs"].values():
+        assert row["sample_us_per_draw_steady"] > 0 and row["sample_us_per_draw_median_call"] > 0
+        low, high = row["spread"]["add_group_us_per_rollout"]
+        assert low <= row["add_group_us_per_rollout"] <= high
+    assert report["workload"]["warmup_passes"] == 1
+    assert list(report)[0] == "provenance" and report["provenance"]["reservoir_version"]
+    assert set(report["load_average_1_5_15_min"]) == {"before", "after"}
 
 
 def test_cli_writes_json(tmp_path):

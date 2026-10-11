@@ -1,5 +1,5 @@
 """
-campaigns.crash — T3 kill-9 crash atomicity campaign.
+campaigns.crash — kill-9 crash atomicity campaign.
 
 For each (operation type × cut point × seed), spawns a child subprocess
 that arms a cut point and runs one operation; the durability protocol
@@ -14,8 +14,8 @@ Operation types:
   - rollout_add_group,        (DurableRolloutBuffer; the add forces stale
     rollout_update,            evictions and a rebase inside one operation;
     rollout_quarantine,        the quarantine evicts a whole group with a
-    rollout_restore            reasoned record; the restore rewinds to a
-                               checkpoint)
+    rollout_restore,           reasoned record; the restore rewinds to a
+    rollout_checkpoint         checkpoint, and checkpoint re-takes a tag)
 Cut points:
   - after_intent_write
   - after_intent_fsync
@@ -24,6 +24,9 @@ Cut points:
   - before_rename
   - after_rename_before_dir_fsync
   - after_dir_fsync
+  - after_checkpoint_stage_fsync
+  - after_checkpoint_old_rename
+  - after_checkpoint_new_rename
 
 Run with: python -m campaigns.crash
 """
@@ -113,6 +116,19 @@ def _get_state_snapshot(directory: str, capacity: int, seed: int) -> dict:
 # Single crash test
 # ---------------------------------------------------------------------------
 
+def _prepare_classic(directory: str, seed: int, op_type: str | None = None) -> dict:
+    os.makedirs(directory, exist_ok=True)
+    buf = DurableBuffer(directory, capacity=4, seed=seed)
+    for i in range(2):
+        t = Transition(state=i, action=0, reward=float(i), next_state=i + 1, done=False)
+        buf.insert(t, td_error=float(i + 1))
+    if op_type == "insert":
+        buf.insert(Transition(state=42, action=1, reward=3.14, next_state=43, done=False), td_error=5.0)
+    elif op_type == "update":
+        buf.update_priority(0, td_error=9.9)
+    return _get_state_snapshot(directory, 4, seed)
+
+
 def run_crash_test(
     op_type: str,
     cut_point: str,
@@ -124,41 +140,12 @@ def run_crash_test(
     Returns a result dict.
     """
     test_dir = os.path.join(base_tmpdir, f"{op_type}_{cut_point}_{seed}")
-    os.makedirs(test_dir, exist_ok=True)
-
-    capacity = 4
-
-    # --- Build pre-state: a buffer with some existing state ---
     for k in ["RESERVOIR_CUT_POINT", "RESERVOIR_CUT_BYTE_OFFSET"]:
         os.environ.pop(k, None)
-
-    buf = DurableBuffer(test_dir, capacity=capacity, seed=seed)
-    # Pre-populate with 2 transitions
-    for i in range(2):
-        t = Transition(state=i, action=0, reward=float(i), next_state=i + 1, done=False)
-        buf.insert(t, td_error=float(i + 1))
-
-    # Record pre-state oracle
-    pre_state = _get_state_snapshot(test_dir, capacity, seed)
-
-    # --- Compute post-state oracle (apply op to a fresh copy) ---
-    # To get the post-state, we apply the operation without cut, on a fresh dir
+    pre_state = _prepare_classic(test_dir, seed)
     oracle_dir = test_dir + "_oracle"
-    os.makedirs(oracle_dir, exist_ok=True)
-    oracle_buf = DurableBuffer(oracle_dir, capacity=capacity, seed=seed)
-    for i in range(2):
-        t = Transition(state=i, action=0, reward=float(i), next_state=i + 1, done=False)
-        oracle_buf.insert(t, td_error=float(i + 1))
+    post_state = _prepare_classic(oracle_dir, seed, op_type)
 
-    if op_type == "insert":
-        t = Transition(state=42, action=1, reward=3.14, next_state=43, done=False)
-        oracle_buf.insert(t, td_error=5.0)
-    elif op_type == "update":
-        oracle_buf.update_priority(0, td_error=9.9)
-
-    post_state = _get_state_snapshot(oracle_dir, capacity, seed)
-
-    # --- Spawn child; the protocol kills it at the armed cut point ---
     cut_byte = 8  # small byte offset for mid_segment_write
     ctx = multiprocessing.get_context("spawn")
     if op_type == "insert":
@@ -175,8 +162,7 @@ def run_crash_test(
     p.start()
     cut_fired = _wait_for_cut(p)
 
-    # --- Recover and compare ---
-    recovered_state = _get_state_snapshot(test_dir, capacity, seed)
+    recovered_state = _get_state_snapshot(test_dir, 4, seed)
     return _verdict(op_type, cut_point, seed, recovered_state, pre_state, post_state, cut_fired)
 
 
@@ -234,9 +220,14 @@ RESTORE_CUT_POINTS = [
     "before_rename", "after_rename_before_dir_fsync", "after_dir_fsync",
     "after_snapshot_rename", "after_snapshot_dir_fsync", "after_restore_before_wal_reset",
 ]
+CHECKPOINT_CUT_POINTS = [
+    "after_checkpoint_stage_fsync", "after_checkpoint_old_rename", "after_checkpoint_new_rename",
+]
 
 
 def _cuts_for(op_type: str) -> list[str]:
+    if op_type == "rollout_checkpoint":
+        return CHECKPOINT_CUT_POINTS
     if op_type == "rollout_restore":
         return RESTORE_CUT_POINTS
     return ROLLOUT_CUT_POINTS if op_type.startswith("rollout_") else CUT_POINTS
@@ -266,6 +257,8 @@ def _rollout_apply(directory: str, seed: int, op_type: str) -> None:
         buf.quarantine(lambda r, g: g.prompt_id == "g1", "campaign: g1 is quarantined")
     elif op_type == "rollout_restore":
         buf.restore_checkpoint("a")
+    elif op_type == "rollout_checkpoint":
+        buf.checkpoint("a", binding={"campaign": "new"})
     else:
         buf.update_priorities([0, 1], [0.9, 0.1])
     buf.close()
@@ -286,6 +279,7 @@ def _rollout_snapshot(directory: str, seed: int) -> dict:
     buf = DurableRolloutBuffer(directory, seed=seed, **_ROLLOUT_KW)
     assert buf.verify_trees()
     state = buf.state_dict()
+    state["checkpoint_a_binding"] = buf.checkpoint_binding("a")
     buf.close()
     return state
 
@@ -316,7 +310,8 @@ def run_rollout_crash_test(op_type: str, cut_point: str, seed: int, base_tmpdir:
 # Full campaign
 # ---------------------------------------------------------------------------
 
-OP_TYPES = ["insert", "update", "rollout_add_group", "rollout_update", "rollout_quarantine", "rollout_restore"]
+OP_TYPES = ["insert", "update", "rollout_add_group", "rollout_update", "rollout_quarantine",
+            "rollout_restore", "rollout_checkpoint"]
 
 CUT_POINTS = [
     "after_intent_write",
@@ -332,7 +327,7 @@ SEEDS = [0, 1, 2, 3, 4]
 
 
 def run_campaign() -> dict:
-    """Run the full T3 crash campaign.
+    """Run the full crash campaign.
 
     Returns campaign results dict.
     """
@@ -372,7 +367,7 @@ def run_campaign() -> dict:
 
 def main() -> None:
     print("=" * 70)
-    print("T3 Crash Atomicity Campaign")
+    print("Crash Atomicity Campaign")
     print("=" * 70)
     print()
     print(f"Operations: {OP_TYPES}")

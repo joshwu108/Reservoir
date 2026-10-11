@@ -68,7 +68,9 @@ Costs and limits
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
+import warnings
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence, Union
 
@@ -90,6 +92,17 @@ DEFAULT_COMPACT_EVERY = 256
 BINDING_FILE = "binding.json"
 """Optional caller data beside a checkpoint's state (see ``DurableRolloutBuffer.checkpoint``)."""
 CHECKPOINT_DIR = "checkpoints"
+_SNAPSHOT_PERSON = b"rollout-snap\x00\x00\x00\x00"
+
+
+def _snapshot_digest(snapshot: dict) -> str:
+    raw = json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.blake2b(raw, digest_size=32, person=_SNAPSHOT_PERSON).hexdigest()
+
+
+def _sealed_snapshot(state: dict, seq: int, epoch: int) -> dict:
+    snapshot = {"buffer": state, "wal_seq": seq, "wal_epoch": epoch}
+    return {**snapshot, "digest": _snapshot_digest(snapshot)}
 
 
 def _strict_position(value: object) -> int:
@@ -172,6 +185,9 @@ class DurableRolloutBuffer:
         except CorruptStateError as exc:
             raise ValueError(f"saved state in {self.directory} is corrupt: {exc}") from exc
         if snapshot is None:
+            if self._wal.size_bytes() or (self._attest is not None and self._attest.exists()
+                                          and self._attest.stat().st_size):
+                raise ValueError(f"missing snapshot in {self.directory} with non-empty WAL or attestation file")
             buf = self._new_buffer()
             self._snapshot_seq = self._seq = 0
             # Persist the empty state (and the decay_config record) so the
@@ -184,14 +200,32 @@ class DurableRolloutBuffer:
         # Replay onto the throwaway buffer first: a log that cannot be
         # replayed is refused before the attestation file is rewritten.
         self._replay_log(probe)
+        self._warn_surplus_attestation(probe)
         buf = self._buffer_from_state(state)
         self._seq = self._replay_log(buf)
         return buf
+
+    def _warn_surplus_attestation(self, probe: RolloutBuffer) -> None:
+        if self._attest is None or not self._attest.exists():
+            return
+        on_disk = len(self._attest.read_bytes().splitlines())
+        recovered = len(probe.attestation_log.records)
+        if on_disk > recovered:
+            warnings.warn(
+                f"surplus attestation records in {self._attest}: {on_disk} on disk, "
+                f"{recovered} recoverable; inspect the WAL before continuing",
+                RuntimeWarning, stacklevel=2,
+            )
 
     @staticmethod
     def _unwrap(snapshot: dict) -> tuple[dict, int, int]:
         """The buffer state, command seq and log epoch of a snapshot; a pre-0.5 full-state file is seq 0, epoch 0."""
         if "buffer" in snapshot and "wal_seq" in snapshot:
+            if "digest" not in snapshot:                 # written before 0.7.0: corruption is not detectable
+                warnings.warn("snapshot carries no digest (written by reservoir < 0.7.0); its integrity is not "
+                              "checked on this open and it is re-sealed at the next compaction", RuntimeWarning)
+            elif snapshot["digest"] != _snapshot_digest({k: v for k, v in snapshot.items() if k != "digest"}):
+                raise ValueError("snapshot digest mismatch")
             seq, epoch = snapshot["wal_seq"], snapshot.get("wal_epoch", 0)
             for name, value in (("wal_seq", seq), ("wal_epoch", epoch)):
                 if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -200,8 +234,7 @@ class DurableRolloutBuffer:
         return snapshot, 0, 0
 
     def _snapshot_of(self, buf: RolloutBuffer, seq: int, epoch: Optional[int] = None) -> dict:
-        return {"buffer": buf.state_dict(), "wal_seq": seq,
-                "wal_epoch": self._epoch if epoch is None else epoch}
+        return _sealed_snapshot(buf.state_dict(), seq, self._epoch if epoch is None else epoch)
 
     def _replay_log(self, buf: RolloutBuffer) -> int:
         """Apply the commands after the snapshot; cut a torn tail; return the last seq."""
@@ -342,7 +375,8 @@ class DurableRolloutBuffer:
 
     @staticmethod
     def _check_tag(tag: str) -> str:
-        if not isinstance(tag, str) or not tag or "/" in tag or "\\" in tag or tag in (".", ".."):
+        if (not isinstance(tag, str) or not tag or "/" in tag or "\\" in tag
+                or tag in (".", "..") or tag.endswith((".tmp", ".old"))):
             raise ValueError(f"checkpoint tag must be a plain name, got {tag!r}")
         return tag
 
@@ -355,28 +389,52 @@ class DurableRolloutBuffer:
         adapter records the digest of the model checkpoint it was taken
         with); it is written as ``binding.json`` beside the state, the same
         way, and read back by ``checkpoint_binding``. A checkpoint taken
-        without one has no ``binding.json``. When a tag is re-taken, its
-        old binding is removed before the new state is installed, so a
-        crash inside this call can leave the checkpoint unbound (resume
-        then runs unchecked) but never bound to the wrong digest.
+        without one has no ``binding.json``. A re-taken tag is staged in a
+        separate directory; recovery keeps the old state and binding or
+        installs the new pair together.
         """
         if binding is not None and not isinstance(binding, dict):
             raise TypeError(f"binding must be a dict or None, got {type(binding).__name__}")
         target = self.directory / CHECKPOINT_DIR / self._check_tag(tag)
+        stage = target.with_name(target.name + ".tmp")
+        backup = target.with_name(target.name + ".old")
         self.compact()
-        target.mkdir(parents=True, exist_ok=True)
-        if (target / BINDING_FILE).exists():
-            self._write_binding(target, None)
-            _fsync_directory(target)
-        tmp = target / "state.json.tmp"
-        with open(self.directory / "state.json", "rb") as src, open(tmp, "wb") as dst:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._recover_checkpoint_dir(target)
+        if stage.exists():
+            shutil.rmtree(stage)
+        stage.mkdir()
+        with open(self.directory / "state.json", "rb") as src, open(stage / "state.json", "wb") as dst:
             shutil.copyfileobj(src, dst)
             dst.flush()
             _full_fsync(dst.fileno())
-        tmp.replace(target / "state.json")
-        self._write_binding(target, binding)
-        _fsync_directory(target)
+        self._write_binding(stage, binding)
+        _fsync_directory(stage)
+        if _should_cut("after_checkpoint_stage_fsync"):
+            _kill_self()
+        if target.exists():
+            target.replace(backup)
+            _fsync_directory(target.parent)
+            if _should_cut("after_checkpoint_old_rename"):
+                _kill_self()
+        stage.replace(target)
+        _fsync_directory(target.parent)
+        if _should_cut("after_checkpoint_new_rename"):
+            _kill_self()
+        if backup.exists():
+            shutil.rmtree(backup)
+            _fsync_directory(target.parent)
         return target
+
+    @staticmethod
+    def _recover_checkpoint_dir(target: Path) -> None:
+        backup = target.with_name(target.name + ".old")
+        if not target.exists() and backup.exists():
+            backup.replace(target)
+            _fsync_directory(target.parent)
+        elif target.exists() and backup.exists():
+            shutil.rmtree(backup)
+            _fsync_directory(target.parent)
 
     @staticmethod
     def _write_binding(target: Path, binding: Optional[dict]) -> None:
@@ -397,6 +455,7 @@ class DurableRolloutBuffer:
     def checkpoint_binding(self, tag: str) -> Optional[dict]:
         """The ``binding`` recorded with ``checkpoints/<tag>``, or None when it has none."""
         target = self.directory / CHECKPOINT_DIR / self._check_tag(tag)
+        self._recover_checkpoint_dir(target)
         if not (target / "state.json").exists():
             raise FileNotFoundError(f"no checkpoint {tag!r} under {self.directory / CHECKPOINT_DIR}")
         path = target / BINDING_FILE
@@ -417,13 +476,15 @@ class DurableRolloutBuffer:
         timeline are ignored on replay even if the reset that follows the
         snapshot never ran.
         """
-        source = self.directory / CHECKPOINT_DIR / self._check_tag(tag) / "state.json"
+        target = self.directory / CHECKPOINT_DIR / self._check_tag(tag)
+        self._recover_checkpoint_dir(target)
+        source = target / "state.json"
         if not source.exists():
             raise FileNotFoundError(f"no checkpoint {tag!r} under {self.directory / CHECKPOINT_DIR}")
         state, seq, saved_epoch = self._unwrap(json.loads(source.read_bytes()))
         self._validate_state(state)
         epoch = max(self._epoch, saved_epoch) + 1
-        durably_snapshot(self.directory, "restore", {"buffer": state, "wal_seq": seq, "wal_epoch": epoch})
+        durably_snapshot(self.directory, "restore", _sealed_snapshot(state, seq, epoch))
         if _should_cut("after_restore_before_wal_reset"):
             _kill_self()
         self._buf.close()
@@ -451,7 +512,11 @@ class DurableRolloutBuffer:
     def checkpoints(self) -> list[str]:
         """Checkpoint tags present, sorted."""
         root = self.directory / CHECKPOINT_DIR
-        return sorted(p.name for p in root.iterdir() if (p / "state.json").exists()) if root.exists() else []
+        if root.exists():
+            for backup in root.glob("*.old"):
+                self._recover_checkpoint_dir(backup.with_name(backup.name[:-4]))
+        return sorted(p.name for p in root.iterdir()
+                      if not p.name.endswith((".tmp", ".old")) and (p / "state.json").exists()) if root.exists() else []
 
     # -- durable operations ------------------------------------------------
 

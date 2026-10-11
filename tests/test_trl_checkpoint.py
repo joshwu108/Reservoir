@@ -8,6 +8,8 @@ rather than from wherever the crashed run had got to.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from reservoir.integrations.trl import (
@@ -18,6 +20,25 @@ from tests.test_trl_replay import FakeTrainer, live_batch, mixed_batch, replay
 
 def durable(tmp_path, **kw):
     return replay(directory=tmp_path / "buf", attest=tmp_path / "attest.jsonl", **kw)
+
+
+def test_trainer_requires_two_retained_checkpoints(tmp_path):
+    from reservoir.integrations._trl_lifecycle import resume_model_checkpoint
+    r = durable(tmp_path)
+    with pytest.raises(ValueError, match="save_total_limit"):
+        resume_model_checkpoint(r, SimpleNamespace(save_total_limit=1, output_dir=tmp_path), 0)
+    r.close()
+
+
+def test_directory_digest_skips_symlinks(tmp_path):
+    from reservoir.integrations._trl_lifecycle import directory_digest
+    root = tmp_path / "model"
+    root.mkdir()
+    (root / "weight").write_bytes(b"a")
+    expected = directory_digest(root)
+    (root / "linked_weight").symlink_to(root / "weight")
+    (root / "linked_dir").symlink_to(root, target_is_directory=True)
+    assert directory_digest(root) == expected
 
 
 def test_save_then_resume_rewinds_to_the_checkpoint(tmp_path):
