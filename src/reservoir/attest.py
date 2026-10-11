@@ -351,6 +351,7 @@ class AttestationLog:
         op_counter: int,
         root_total: int,
         samples: list[dict],
+        min_entry_age: Optional[int] = None,
     ) -> dict:
         """Append a SampleAttestation and return it.
 
@@ -364,6 +365,12 @@ class AttestationLog:
             Per-sample dicts with keys:
               leaf_index, draw_int, prob_num, prob_den,
               is_weight_num, is_weight_den, rejection_count
+            and optionally entry_version, the version the drawn slot
+            is aged from (written as a decimal string).
+        min_entry_age : int, optional
+            The buffer's declared minimum entry age: every drawn slot's
+            entry_version is at most ``current_version - min_entry_age``.
+            Absent from the record when None.
 
         Returns
         -------
@@ -373,7 +380,7 @@ class AttestationLog:
         # Encode integer fields in samples as strings
         encoded_samples = []
         for s in samples:
-            encoded_samples.append({
+            entry = {
                 "leaf_index": s["leaf_index"],
                 "draw_int": str(s["draw_int"]),
                 "prob_num": str(s["prob_num"]),
@@ -381,7 +388,11 @@ class AttestationLog:
                 "is_weight_num": str(s["is_weight_num"]),
                 "is_weight_den": str(s["is_weight_den"]),
                 "rejection_count": s["rejection_count"],
-            })
+            }
+            if s.get("entry_version") is not None:
+                _require_int(s["entry_version"], "entry_version", 0)
+                entry["entry_version"] = str(s["entry_version"])
+            encoded_samples.append(entry)
 
         record = {
             "op": "sample",
@@ -390,6 +401,9 @@ class AttestationLog:
             "samples": encoded_samples,
             "prev_digest": self._head_digest,
         }
+        if min_entry_age is not None:
+            _require_int(min_entry_age, "min_entry_age", 0)
+            record["min_entry_age"] = str(min_entry_age)
         digest = _digest_record(record)
         record["digest"] = digest
 
@@ -689,6 +703,7 @@ def make_sample_entry(
     root_total: int,
     is_weight: Fraction,
     rejection_count: int = 0,
+    entry_version: Optional[int] = None,
 ) -> dict:
     """Build a sample dict for a single draw, suitable for append_sample().
 
@@ -709,6 +724,8 @@ def make_sample_entry(
         The exact IS weight (normalized).
     rejection_count : int
         Number of hash blocks rejected before acceptance.
+    entry_version : int, optional
+        The version the drawn slot is aged from; omitted when None.
 
     Returns
     -------
@@ -716,7 +733,7 @@ def make_sample_entry(
         Sample entry with exact probability and IS weight as integers.
     """
     prob = Fraction(priority_int, root_total)  # Already in lowest terms via GCD
-    return {
+    entry = {
         "leaf_index": leaf_index,
         "draw_int": draw_int,
         "prob_num": prob.numerator,
@@ -725,3 +742,6 @@ def make_sample_entry(
         "is_weight_den": is_weight.denominator,
         "rejection_count": rejection_count,
     }
+    if entry_version is not None:
+        entry["entry_version"] = entry_version
+    return entry

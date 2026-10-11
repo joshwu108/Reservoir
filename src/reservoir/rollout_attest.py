@@ -22,7 +22,8 @@ Record order the checker relies on
    the group has one (``record_insert``).
    An ``evict`` with reason ``"quarantine"`` also carries the predicate
    text and the operator's note (``rollout_quarantine``).
-4. One ``sample`` record per batch, unchanged from the classic buffer.
+4. One ``sample`` record per batch: the classic buffer's fields plus the
+   buffer's ``min_entry_age`` and each drawn slot's ``entry_version``.
 5. Optionally one ``batch`` record per sample, written by an adapter
    through ``record_batch`` once it has placed the sampled rollouts into
    a training batch (the batch witness; see ``attest.append_batch``), and
@@ -317,8 +318,15 @@ class RolloutAttester:
         draw_integers: tuple[int, ...],
         priorities: tuple[int, ...],
         is_weights: tuple[Fraction, ...],
+        entry_versions: tuple[int, ...],
+        min_entry_age: int,
     ) -> None:
-        """One sample record covering the whole batch."""
+        """One sample record covering the whole batch.
+
+        The record declares the buffer's ``min_entry_age`` and every drawn
+        slot carries its ``entry_version``, so the checker can confirm that
+        each draw was at least ``min_entry_age`` versions old.
+        """
         if self._log is None:
             return
         entries = [
@@ -328,11 +336,13 @@ class RolloutAttester:
                 priority_int=priorities[k],
                 root_total=root_total,
                 is_weight=is_weights[k],
+                entry_version=entry_versions[k],
             )
             for k in range(len(indices))
         ]
         record = self._log.append_sample(
-            op_counter=op_counter, root_total=root_total, samples=entries
+            op_counter=op_counter, root_total=root_total, samples=entries,
+            min_entry_age=min_entry_age,
         )
         self._emit(record)
 

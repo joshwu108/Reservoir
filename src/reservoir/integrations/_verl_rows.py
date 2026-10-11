@@ -60,7 +60,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from typing import Final, Mapping, NamedTuple, Sequence
+from typing import Final, Mapping, NamedTuple, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -197,23 +197,76 @@ def _group_rows(uids: Sequence[object]) -> dict[str, list[int]]:
     return groups
 
 
-def _is_near_dead(rows: list[int], advantages: list[float], scores: list[float]) -> bool:
-    """A live group that verl would have made dead with exact arithmetic.
+def _is_dead(rows: list[int], advantages: list[float], scores: list[float]) -> bool:
+    """No signal: every advantage exactly zero, or two or more rows with one score.
 
     ``compute_grpo_outcome_advantage`` computes ``(score - mean) / (std + 1e-6)``
     in float32. For a group whose scores are all equal but not exactly
     representable (``0.3`` with ``n = 6``, say) the mean can differ from the
     score by a rounding residue, the standard deviation is then of the order
-    of that residue, and the quotient can reach a few hundredths: verl trains
-    on those rows, so the adapter stores them and leaves them alone (the
-    dead-group criterion is "zero gradient", not "equal scores"), but counts
-    the group so the condition is visible. Equal scores are compared exactly;
-    the magnitude test of ``NEAR_DEAD_ADVANTAGE`` is kept for parity with the
-    TRL adapter.
+    of that residue, and the quotient can reach a few hundredths, which verl
+    would train on. Equal scores are compared exactly. A lone response is
+    never dead by its score: verl gives it mean 0 and std 1, so its advantage
+    is the score itself.
     """
-    if all(abs(advantages[r]) < NEAR_DEAD_ADVANTAGE for r in rows):
+    if all(advantages[r] == 0.0 for r in rows):
         return True
-    return len({scores[r] for r in rows}) == 1
+    return len(rows) >= 2 and len({scores[r] for r in rows}) == 1
+
+
+class _Columns(NamedTuple):
+    """The batch as Python lists, one entry per row."""
+
+    prompts: list[list[int]]          # unpadded prompt ids
+    lengths: tuple[int, ...]          # response prefix lengths
+    advantages: list[float]
+    scores: list[float]
+    responses: list[list[int]]
+    logprobs: list[list[float]]
+    refs: Optional[list[list[float]]]
+
+
+def _columns(t: Tensors, layout: Layout) -> _Columns:
+    """Validate masks and per-row values once and move the batch to Python lists."""
+    prompt_lengths = _mask_lengths(t["attention_mask"][:, :layout.prompt_len], prefix=False, name="prompt attention_mask")
+    lengths = _mask_lengths(t["response_mask"], prefix=True, name="response_mask")
+    prompts = t["prompts"].tolist()
+    return _Columns(
+        prompts=[row[layout.prompt_len - n:] if n else [] for row, n in zip(prompts, prompt_lengths)],
+        lengths=lengths,
+        advantages=[_row_advantage(t["advantages"], r, n) for r, n in enumerate(lengths)],
+        scores=[_finite_floats([s], r, "score")[0] for r, s in enumerate(t["token_level_scores"].sum(dim=1).tolist())],
+        responses=t["responses"].tolist(),
+        logprobs=t["old_log_probs"].tolist(),
+        refs=t[REF_KEY].tolist() if REF_KEY in t else None,
+    )
+
+
+def _uid_rollouts(cols: _Columns, uid: str, rows: list[int], step: int) -> tuple[list[Rollout], list[int], int, int, int]:
+    """Rollouts of one live uid: ``(rollouts, kept_rows, skipped, clamped, negligible)``."""
+    prompt = cols.prompts[rows[0]]
+    rollouts: list[Rollout] = []
+    kept: list[int] = []
+    skipped = clamped = negligible = 0
+    for r in rows:
+        if cols.prompts[r] != prompt:
+            raise ValueError(f"uid {uid!r}: rows {rows} do not share one prompt")
+        n = cols.lengths[r]
+        if n == 0:
+            skipped += 1
+            continue
+        if abs(cols.advantages[r]) < NEAR_DEAD_ADVANTAGE:
+            negligible += 1
+            continue
+        lp, n_clamped = clamp_logprobs(cols.logprobs[r][:n], row=r)
+        clamped += n_clamped
+        metadata: dict = {"prompt_ids": list(prompt), "row": r, "global_step": step, "uid": uid,
+                          "score": cols.scores[r]}
+        if cols.refs is not None:
+            metadata["ref_logprobs"] = _finite_floats(cols.refs[r][:n], r, "ref logprob")
+        rollouts.append(Rollout(tokens=cols.responses[r][:n], logprobs=lp, reward=cols.advantages[r], metadata=metadata))
+        kept.append(r)
+    return rollouts, kept, skipped, clamped, negligible
 
 
 def rows_to_groups(t: Tensors, uids: Sequence[object], *, step: int) -> RowConversion:
@@ -221,8 +274,10 @@ def rows_to_groups(t: Tensors, uids: Sequence[object], *, step: int) -> RowConve
 
     ``uids`` has one entry per row (``non_tensor_batch["uid"]``). A group
     is dead when every row's advantage is exactly zero (a row with an
-    empty response counts as zero); its rows are returned for replacement.
-    Rows of live groups with an empty response are skipped and counted.
+    empty response counts as zero) or its rows share one score
+    (``_is_dead``); its rows are returned for replacement. Rows of live
+    groups with an empty response, or with |advantage| below
+    ``NEAR_DEAD_ADVANTAGE``, are not stored and are counted.
 
     Raises
     ------
@@ -235,47 +290,24 @@ def rows_to_groups(t: Tensors, uids: Sequence[object], *, step: int) -> RowConve
     layout = check_layout(t)
     if len(uids) != layout.rows:
         raise ValueError(f"{len(uids)} uids for a batch of {layout.rows} rows")
-    prompt_lengths = _mask_lengths(t["attention_mask"][:, :layout.prompt_len], prefix=False, name="prompt attention_mask")
-    lengths = _mask_lengths(t["response_mask"], prefix=True, name="response_mask")
-    prompts = t["prompts"].tolist()
-    unpadded = [row[layout.prompt_len - n:] if n else [] for row, n in zip(prompts, prompt_lengths)]
-    advantages = [_row_advantage(t["advantages"], r, n) for r, n in enumerate(lengths)]
-    scores = [_finite_floats([s], r, "score")[0] for r, s in enumerate(t["token_level_scores"].sum(dim=1).tolist())]
-    responses = t["responses"].tolist()
-    logprobs = t["old_log_probs"].tolist()
-    refs = t[REF_KEY].tolist() if REF_KEY in t else None
-
+    cols = _columns(t, layout)
     groups: list[GroupSpec] = []
     dead_rows: list[int] = []
-    dead = skipped = clamped = near_dead = 0
+    dead = skipped = clamped = near_dead = negligible = 0
     for uid, rows in _group_rows(uids).items():
-        if all(advantages[r] == 0.0 for r in rows):
+        if _is_dead(rows, cols.advantages, cols.scores):
             dead_rows.extend(rows)
             dead += 1
             continue
-        if _is_near_dead(rows, advantages, scores):
+        if all(abs(cols.advantages[r]) < NEAR_DEAD_ADVANTAGE for r in rows):
             near_dead += 1
-        prompt = unpadded[rows[0]]
-        rollouts: list[Rollout] = []
-        kept: list[int] = []
-        for r in rows:
-            if unpadded[r] != prompt:
-                raise ValueError(f"uid {uid!r}: rows {rows} do not share one prompt")
-            n = lengths[r]
-            if n == 0:
-                skipped += 1
-                continue
-            lp, n_clamped = clamp_logprobs(logprobs[r][:n], row=r)
-            clamped += n_clamped
-            metadata: dict = {"prompt_ids": list(prompt), "row": r, "global_step": step, "uid": uid,
-                              "score": scores[r]}
-            if refs is not None:
-                metadata["ref_logprobs"] = _finite_floats(refs[r][:n], r, "ref logprob")
-            rollouts.append(Rollout(tokens=responses[r][:n], logprobs=lp, reward=advantages[r], metadata=metadata))
-            kept.append(r)
+        rollouts, kept, n_skipped, n_clamped, n_negligible = _uid_rollouts(cols, uid, rows, step)
+        skipped += n_skipped
+        clamped += n_clamped
+        negligible += n_negligible
         if rollouts:
-            groups.append(GroupSpec(prompt_id_of(prompt), tuple(rollouts), tuple(kept)))
-    return RowConversion(tuple(groups), tuple(sorted(dead_rows)), dead, skipped, clamped, near_dead)
+            groups.append(GroupSpec(prompt_id_of(cols.prompts[rows[0]]), tuple(rollouts), tuple(kept)))
+    return RowConversion(tuple(groups), tuple(sorted(dead_rows)), dead, skipped, clamped, near_dead, negligible)
 
 
 # ---------------------------------------------------------------------------
@@ -470,10 +502,13 @@ def verify_written_rows(t: Tensors, rows: Sequence[int], rollouts: Sequence[Roll
 # Commitments and meta
 # ---------------------------------------------------------------------------
 
-def tensor_digest(t: Tensors) -> str:
-    """BLAKE2b-256 over the final batch tensors the actor consumes.
+def tensor_digest(t: Tensors, *, token_nums: Sequence[int]) -> str:
+    """BLAKE2b-256 over the final batch tensors the actor consumes and its loss normaliser.
 
-    Each tensor in ``TENSOR_DIGEST_KEYS`` the batch has is fed as
+    ``token_nums`` is the ``meta_info["global_token_num"]`` handed to the
+    actor with the batch (valid tokens per row, ``global_token_num``),
+    digested last as ``global_token_num``, an int64 vector, so the witness
+    binds that meta value to the digested ``attention_mask``. Each tensor in ``TENSOR_DIGEST_KEYS`` the batch has is fed as
     ``name|shape|kind`` followed by its values, integer tensors as int64
     and float tensors as float64, little-endian. Per-token values are
     zeroed outside ``response_mask`` and ``position_ids`` outside
@@ -497,6 +532,9 @@ def tensor_digest(t: Tensors) -> str:
         h.update(f"{key}|{'x'.join(str(d) for d in x.shape)}|{kind}\n".encode())
         x = x.to(torch.float64) if x.is_floating_point() else x.to(torch.int64)
         h.update(x.numpy().astype("<f8" if kind == "f64" else "<i8", copy=False).tobytes())
+    tokens = [int(n) for n in token_nums]
+    h.update(f"global_token_num|{len(tokens)}|i64\n".encode())
+    h.update(b"".join(n.to_bytes(8, "little", signed=True) for n in tokens))
     return h.hexdigest()
 
 

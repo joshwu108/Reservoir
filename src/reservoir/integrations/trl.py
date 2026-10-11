@@ -60,19 +60,16 @@ Per generation step, in train mode only:
    no-grad forward through ``trainer._get_per_token_logps_and_entropies``
    for the fresh rows, because a replayed rollout needs them and
    ``Rollout`` requires them.
-2. Store: every row of a live group becomes a ``Rollout`` (``reward`` =
-   TRL's advantage, the value the loss consumes) and each group is one
-   ``add_group(prompt_id, model_version=global_step, ...)``.
-3. Replay: with ``d`` dead groups, ``sample(d * G, current_version=
-   global_step)`` draws rollouts (possibly from different prompts; the
-   loss does not need group contiguity) and writes them into the dead
-   rows. Each replayed advantage is multiplied by its importance-sampling
+2. Replay: with ``d`` dead groups, ``sample(d * G, current_version=
+   global_step)`` draws rollouts stored at earlier steps (possibly from
+   different prompts; the loss does not need group contiguity) and writes
+   them into the dead rows. Each replayed advantage is multiplied by its importance-sampling
    weight, which is exact for every loss type that is positively
    homogeneous in the advantage (all of them except ``vespo``). The batch
    is padded if a replayed sequence is longer than the current width,
    ``old_per_token_logps`` is attached for all rows, and
    ``num_items_in_batch`` is recomputed from the final mask.
-4. Staleness policy (``staleness_policy=``, off by default): from each
+3. Staleness policy (``staleness_policy=``, off by default): from each
    replayed row's sequence log-ratio, exact importance weight and age, the
    policy declines rows (age bound, ESS floor, legacy ``max_log_ratio``)
    or rescales a group's advantages by an exact fraction (group-mass
@@ -80,14 +77,18 @@ Per generation step, in train mode only:
    slot stays dead. Every decision is written to the telemetry record and
    replayed by the checker; the batch witness digests the rescaled
    advantages.
+4. Store: every row of a live group becomes a ``Rollout`` (``reward`` =
+   TRL's advantage, the value the loss consumes) and each group is one
+   ``add_group(prompt_id, model_version=global_step, ...)``.
 
 A batch with no dead groups, or an empty buffer, is returned as the very
 dict TRL produced. When TRL did not compute ``old_per_token_logps``, one
 extra no-grad forward has run by then, which consumes RNG state under
 dropout; apart from that a step without replay matches a plain
-``GRPOTrainer`` step. A live group is stored before the same step's dead
-groups are replaced, so a replayed row can be a copy of a fresh row from
-the same batch; that is how TRL's own buffer behaved too.
+``GRPOTrainer`` step. Dead groups are replaced before the step's live
+groups are stored and the buffer is built with ``min_entry_age=1``, so a
+replayed row is never a copy of a fresh row of the same batch; every
+sample record declares that floor and each drawn slot's entry version.
 
 Versions, half-life and ``max_policy_age`` are counted in optimizer
 steps (``trainer.state.global_step``).
@@ -141,10 +142,6 @@ first access through ``build_trainer_class``, which imports TRL.
 from __future__ import annotations
 
 import functools
-import hashlib
-import json
-import math
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Optional, Sequence, Union
 
@@ -153,6 +150,14 @@ import torch
 from reservoir.durable_rollout import DurableRolloutBuffer
 from reservoir.integrations._trl_compat import require_trl
 from reservoir.integrations._trl_distributed import OWNER_RANK, owner_step, Communicator, communicator_for, mix_distributed
+from reservoir.integrations._trl_guards import (  # re-exported: the refusals and the keys they name
+    SAMPLING_LOGPROBS_KEY,
+    SHARDED_STRATEGIES,
+    UNSUPPORTED_OUTPUT_KEYS,
+    check_batch,
+    drop_unused_sampling_logprobs,
+    refuse_sharded,
+)
 from reservoir.integrations._trl_lifecycle import (
     RANK_ENV_VARS,
     bind_checkpoint,
@@ -163,7 +168,22 @@ from reservoir.integrations._trl_lifecycle import (
     resume_from_checkpoint,
     trainer_checkpoint_steps,
 )
-from reservoir.integrations._trl_rows import RowConversion, rows_to_groups, verify_written_rows, write_rows
+from reservoir.integrations._replay_common import (  # re-exported: the adapters' shared priority and validators
+    StoredAdvantagePriority,
+    _validated_decline_cap,
+    _validated_floor,
+    _validated_gate,
+    rescore_placed,
+)
+from reservoir.integrations._trl_rows import (  # tensor_digest and its keys re-exported
+    PER_TOKEN_LOGPROB_KEYS,
+    TENSOR_DIGEST_KEYS,
+    RowConversion,
+    rows_to_groups,
+    tensor_digest,
+    verify_written_rows,
+    write_rows,
+)
 from reservoir.integrations._trl_staleness import (
     RowDecision,
     StalenessPolicy,
@@ -178,93 +198,16 @@ from reservoir.integrations._trl_telemetry import (
     sequence_log_ratios,
     summarize,
 )
-from reservoir.priorities import DEFAULT_EPSILON, PriorityStrategy, ReplaySignal, _require_epsilon, validated_rescore
-from reservoir.rollout import Rollout, RolloutGroup
+from reservoir.priorities import PriorityStrategy
 from reservoir.rollout_attest import AttestTarget
 from reservoir.rollout_buffer import RolloutBatch, RolloutBuffer
-
-UNSUPPORTED_OUTPUT_KEYS: Final[tuple[str, ...]] = (
-    "tool_mask",
-    "importance_sampling_ratio",
-    "sampling_per_token_logps",
-    "pixel_values",
-    "image_grid_thw",
-    "pixel_attention_mask",
-    "image_sizes",
-    "spatial_shapes",
-    "num_tiles",
-    "token_type_ids",
-    "mm_token_type_ids",
-    "image_position_ids",
-    "num_images",
-)
-"""Output keys that would need per-row replacement logic this adapter does not have."""
 
 STAT_NAMES: Final[tuple[str, ...]] = (
     "hook_calls", "ingested_rows", "ingested_groups", "dead_groups", "skipped_rows",
     "clamped_logprobs", "replaced_rows", "logprob_forwards", "dropped_sampling_logprobs",
     "near_dead_groups", "declined_rows", "telemetry_forwards", "rescored_rows", "rescaled_rows",
+    "age_floor_skips", "negligible_rows",
 )
-
-SAMPLING_LOGPROBS_KEY: Final[str] = "sampling_per_token_logps"
-"""vLLM's sampling logprobs; dropped when TRL would not use them, refused otherwise."""
-
-
-@dataclass(frozen=True)
-class StoredAdvantagePriority(PriorityStrategy):
-    """``|reward| + epsilon`` where ``reward`` holds TRL's advantage.
-
-    TRL centres advantages within each group before the adapter sees
-    them, so ``|advantage|`` is already the group-relative magnitude
-    that advantage-prioritized replay samples on. ``AdvantagePriority``
-    would re-centre on the mean of the rows that survived truncation,
-    which is not the same quantity.
-    """
-
-    epsilon: float = DEFAULT_EPSILON
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "epsilon", _require_epsilon(self.epsilon))
-
-    def score(self, rollout: Rollout, group: RolloutGroup) -> float:
-        return abs(rollout.reward) + self.epsilon
-
-
-def _validated_gate(max_log_ratio: Optional[float]) -> Optional[float]:
-    """The drift gate threshold as a finite positive float, or None when off; anything else is a ValueError."""
-    if max_log_ratio is None:
-        return None
-    if (isinstance(max_log_ratio, bool) or not isinstance(max_log_ratio, (int, float))
-            or not math.isfinite(max_log_ratio) or max_log_ratio <= 0):
-        raise ValueError(f"max_log_ratio must be a finite positive number or None, got {max_log_ratio!r}")
-    return float(max_log_ratio)
-
-
-def _validated_decline_cap(max_declines_per_step: Optional[int]) -> Optional[int]:
-    """The per-step decline cap as a non-negative int, or None when uncapped."""
-    if max_declines_per_step is None:
-        return None
-    if isinstance(max_declines_per_step, bool) or not isinstance(max_declines_per_step, int) or max_declines_per_step < 0:
-        raise ValueError(f"max_declines_per_step must be a non-negative int or None, got {max_declines_per_step!r}")
-    return max_declines_per_step
-
-
-SHARDED_STRATEGIES: Final[tuple[str, ...]] = ("DEEPSPEED", "FSDP", "MEGATRON_LM")
-"""Accelerate distributed types the adapter refuses: the owner-only telemetry and drift-gate forward
-needs the whole model on rank 0, which a sharded strategy does not provide (only DDP is verified)."""
-
-
-def refuse_sharded(accelerator: Any, num_processes: int) -> None:
-    """Raise if ``accelerator`` shards parameters across more than one process."""
-    kind = getattr(accelerator, "distributed_type", None)
-    name = getattr(kind, "name", None) or (str(kind) if kind is not None else "")
-    if num_processes > 1 and any(tag in name.upper() for tag in SHARDED_STRATEGIES):
-        raise RuntimeError(
-            f"ReservoirReplay does not support the {name} strategy: rank 0 alone runs the telemetry and "
-            "drift-gate forward over the gathered batch, which under sharded parameters would wait on an "
-            "all-gather the other ranks never join. Use DDP (the verified configuration)."
-        )
-
 
 class ReservoirReplay:
     """The replay buffer handed to ``ReservoirGRPOTrainer(replay_buffer=...)``.
@@ -301,6 +244,14 @@ class ReservoirReplay:
         Declines are never silent.
     max_declines_per_step : int, optional
         Raise if more rows than this would be declined in one step.
+    min_entry_age : int
+        Passed to the buffer (default 1; 0 or 1, since a floor of 2 would
+        empty every sample): a replayed rollout was stored at
+        least this many steps ago. The hook samples before it stores the
+        step's live groups, so with 1 no replayed row duplicates a row of
+        the batch; while an entry from an earlier generation of the same
+        step is live the sample is empty and ``stats["age_floor_skips"]``
+        counts it. 0 allows replaying such same-step entries.
 
     Attributes
     ----------
@@ -340,6 +291,7 @@ class ReservoirReplay:
         staleness_policy: Union[StalenessPolicy, str, None] = None,
         max_log_ratio: Optional[float] = None,
         max_declines_per_step: Optional[int] = None,
+        min_entry_age: int = 1,
         **rollout_buffer_kwargs: Any,
     ) -> None:
         self._buffer_kwargs = dict(
@@ -351,6 +303,7 @@ class ReservoirReplay:
             seed=seed,
             attest=attest,
             manifest=manifest,
+            min_entry_age=_validated_floor(min_entry_age),
             **rollout_buffer_kwargs,
         )
         self._directory = directory
@@ -489,16 +442,19 @@ class ReservoirReplay:
         Runs on every rank before any collective, so it must not touch the
         buffer; the version check is the owner's, in ``mix_local``.
         """
-        output = self._drop_unused_sampling_logprobs(output, trainer)
-        self._check_batch(output, trainer)
-        return output
+        kept = drop_unused_sampling_logprobs(output, trainer)
+        if kept is not output:
+            self.stats["dropped_sampling_logprobs"] += 1
+        check_batch(kept, trainer, self.beta)
+        return kept
 
     def mix_local(self, output: dict, trainer: Any) -> dict:
         """The single-process hook on a batch with whole prompt groups.
 
-        Order matters: groups are stored, then the buffer is advanced to
-        ``global_step`` (evicting entries older than ``max_policy_age``),
-        and only then are dead rows replaced from whatever is still live.
+        Order matters: the buffer is advanced to ``global_step`` (evicting
+        entries older than ``max_policy_age``), dead rows are replaced from
+        whatever is still live, and only then are this step's live groups
+        stored, so a replayed row is never one the batch already holds.
         If the buffer raises while groups are being stored, the groups
         stored before it stay stored and the counters are not updated.
         """
@@ -510,31 +466,16 @@ class ReservoirReplay:
         logprobs = output.get("old_per_token_logps")
         if logprobs is None:
             logprobs = self.behavior_logprobs(output, trainer)
-        conversion = self._ingest(output, trainer, step, logprobs)
+        conversion = self._convert(output, trainer, step, logprobs)
         if step > self.buffer.current_version:
             self.buffer.advance(step)
-        if not conversion.dead_rows or self.buffer.size == 0 or self.buffer.total == 0:
+        new = None
+        if conversion.dead_rows and self.buffer.size and self.buffer.total:
+            new = self._replay(output, trainer, step, logprobs, conversion)
+        if new is None:
             self._telemetry(trainer, step, None, [], [], output["advantages"].size(0), conversion, 0)
-            return output
-        return self._replay(output, trainer, step, logprobs, conversion)
-
-    def _drop_unused_sampling_logprobs(self, output: dict, trainer: Any) -> dict:
-        """Remove vLLM's sampling logprobs when nothing downstream reads them.
-
-        TRL 1.13.0 consumes ``sampling_per_token_logps`` only for the vLLM
-        importance-sampling correction and for off-policy masking. With
-        both off, the key is dead weight that would otherwise make the
-        adapter refuse the batch. Returns ``output`` itself when there is
-        nothing to drop.
-        """
-        if SAMPLING_LOGPROBS_KEY not in output:
-            return output
-        correction = bool(getattr(trainer, "vllm_importance_sampling_correction", False))
-        masking = getattr(trainer, "off_policy_mask_threshold", None) is not None
-        if correction or masking or "importance_sampling_ratio" in output:
-            return output  # _check refuses it with the usual message
-        self.stats["dropped_sampling_logprobs"] += 1
-        return {k: v for k, v in output.items() if k != SAMPLING_LOGPROBS_KEY}
+        self._ingest(conversion, step)
+        return output if new is None else new
 
     def _check_version(self, step: int) -> None:
         """Refuse a step behind the buffer (owner only: it reads the buffer)."""
@@ -544,20 +485,6 @@ class ReservoirReplay:
                 f"{self.buffer.current_version}; versions only move forward. A resumed run "
                 "must reopen the buffer at or behind the step it resumes from"
             )
-
-    def _check_batch(self, output: dict, trainer: Any) -> None:
-        """Refuse configurations the adapter does not handle, before touching anything."""
-        if self.beta > 0.0 and getattr(trainer, "loss_type", None) == "vespo":
-            raise ValueError(
-                "loss_type 'vespo' is not linear in the advantage, so importance weights "
-                "cannot be folded into it; use ReservoirReplay(beta=0.0) with vespo"
-            )
-        for key in UNSUPPORTED_OUTPUT_KEYS:
-            if key in output:
-                raise NotImplementedError(
-                    f"ReservoirReplay cannot replay batches with {key!r} "
-                    "(tools, vLLM importance sampling and vision inputs are unsupported)"
-                )
 
     def behavior_logprobs(self, output: dict, trainer: Any) -> torch.Tensor:
         """One no-grad forward to get the logprobs TRL did not compute (for this rank's rows)."""
@@ -603,13 +530,18 @@ class ReservoirReplay:
             )
         return names, values.to("cpu", torch.float64)
 
-    def _ingest(self, output: dict, trainer: Any, step: int, logprobs: torch.Tensor) -> RowConversion:
-        """Convert the batch and add every live group to the buffer."""
+    def _convert(self, output: dict, trainer: Any, step: int, logprobs: torch.Tensor) -> RowConversion:
+        """The batch as live groups to store and dead rows to replace."""
         names, values = self._take_rewards_per_func(int(output["advantages"].size(0)))
-        conversion = rows_to_groups(
+        aggregation = getattr(trainer, "multi_objective_aggregation", "sum_then_normalize")
+        return rows_to_groups(
             output, num_generations=trainer.num_generations, step=step, logprobs=logprobs,
             reward_names=names, rewards_per_func=values,
+            equal_rewards_are_dead=aggregation == "sum_then_normalize",
         )
+
+    def _ingest(self, conversion: RowConversion, step: int) -> None:
+        """Add every live group of the step to the buffer, after its dead rows were replaced."""
         for group in conversion.groups:
             self.buffer.add_group(group.prompt_id, step, group.rollouts, source=self.source)
         self.stats["ingested_rows"] += sum(len(group.rollouts) for group in conversion.groups)
@@ -618,19 +550,23 @@ class ReservoirReplay:
         self.stats["near_dead_groups"] += conversion.near_dead_groups
         self.stats["skipped_rows"] += conversion.skipped_rows
         self.stats["clamped_logprobs"] += conversion.clamped_logprobs
-        return conversion
+        self.stats["negligible_rows"] += conversion.negligible_rows
 
     def _replay(
         self, output: dict, trainer: Any, step: int, logprobs: torch.Tensor, conversion: RowConversion
-    ) -> dict:
+    ) -> Optional[dict]:
         """Sample one rollout per dead row, write them in, gate, verify, witness, measure.
 
-        ``write_rows`` recomputes ``num_items_in_batch`` from the final
+        Returns None when the sample is empty (a live entry is younger than
+        the buffer's ``min_entry_age``). ``write_rows`` recomputes ``num_items_in_batch`` from the final
         mask; this runs on the whole generation batch (rank 0 assembles it
         under more than one process), so that is the value TRL would gather.
         """
         dead_rows = conversion.dead_rows
         batch = self.buffer.sample(len(dead_rows), current_version=step)
+        if not batch.indices:
+            self.stats["age_floor_skips"] += 1
+            return None
         rewards = [r.reward for r in batch.rollouts]
         unit = place(rewards, batch.is_weights, ()).weighted           # importance-weighted, before the policy
         with_logprobs = output if "old_per_token_logps" in output else {**output, "old_per_token_logps": logprobs}
@@ -675,35 +611,8 @@ class ReservoirReplay:
 
     def _rescore(self, batch: RolloutBatch, kept: list[int], weighted: list[float], ratios: list[float],
                  step: int) -> None:
-        """Ask the strategy for new priorities of the placed rollouts; write them as updates.
-
-        ``weighted[i]`` is the advantage written for ``kept[i]`` (importance
-        weight and any policy scale applied). A slot drawn more than once
-        is rescored once, from its first placement. Declined draws are not
-        rescored (an entry declined for age or drift is gone).
-        """
-        strategy = self.buffer.priority
-        indices: list[int] = []
-        scores: list[float] = []
-        seen: set[int] = set()
-        for position, k in enumerate(kept):
-            slot = batch.indices[k]
-            if slot in seen:
-                continue
-            seen.add(slot)
-            ratio = ratios[k] if ratios else None
-            signal = ReplaySignal(
-                advantage=weighted[position], is_weight=float(batch.is_weights[k]),
-                log_ratio=ratio if ratio is not None and math.isfinite(ratio) else None,
-                age=self.buffer.current_version - batch.model_versions[k], step=step,
-            )
-            value = validated_rescore(strategy, batch.rollouts[k], batch.groups[k], signal)
-            if value is not None:
-                indices.append(slot)
-                scores.append(value)
-        if indices:
-            self.buffer.update_priorities(indices, scores)
-            self.stats["rescored_rows"] += len(indices)
+        """New priorities for the placed rollouts; see ``rescore_placed``."""
+        self.stats["rescored_rows"] += rescore_placed(self.buffer, batch, kept, weighted, ratios, step)
 
     def _log_ratios(self, output: dict, rows: list[int], trainer: Any) -> list[float]:
         """Sequence log-ratios of the replayed rows, when telemetry or the policy needs them."""
@@ -743,42 +652,6 @@ class ReservoirReplay:
         source = f", source={self.source!r}" if self.source is not None else ""
         inner = repr(self._buffer) if self._buffer is not None else f"<no buffer on rank {self.rank}>"
         return f"ReservoirReplay({inner}, beta={self.beta}{source})"
-
-
-PER_TOKEN_LOGPROB_KEYS: Final[tuple[str, ...]] = ("old_per_token_logps", "ref_per_token_logps")
-"""Digested under the completion mask; see ``tensor_digest``."""
-
-TENSOR_DIGEST_KEYS: Final[tuple[str, ...]] = (
-    "prompt_ids", "prompt_mask", "completion_ids", "completion_mask", "advantages", "old_per_token_logps",
-)
-
-
-def tensor_digest(output: dict) -> str:
-    """BLAKE2b-256 over the final batch tensors the loss consumes.
-
-    Each tensor in ``TENSOR_DIGEST_KEYS`` that the batch has (and
-    ``ref_per_token_logps`` when present) is fed as ``name|shape|kind`` followed by its values in a
-    fixed-width little-endian encoding: integer tensors as int64, float
-    tensors as float64. The per-token logprob tensors are zeroed outside
-    the completion mask first: the loss never reads those positions and
-    what sits there is padding, which differs between a forward over the
-    whole batch and per-rank forwards padded together. The digest
-    therefore depends on the values the loss consumes and the padded
-    shape, not on dtype, device or padding garbage, and a holder of the
-    batch can recompute it without this package.
-    """
-    h = hashlib.blake2b(digest_size=32, person=b"batch-tensors\x00\x00")
-    keys = [k for k in TENSOR_DIGEST_KEYS + ("ref_per_token_logps",) if k in output]
-    mask = output["completion_mask"].detach().cpu()
-    for key in keys:
-        t = output[key].detach().cpu().contiguous()
-        if key in PER_TOKEN_LOGPROB_KEYS:
-            t = t.masked_fill(mask == 0, 0.0)  # a fill, not a multiply: -0.5 * 0 is -0.0, a different byte pattern
-        kind = "f64" if t.is_floating_point() else "i64"
-        h.update(f"{key}|{'x'.join(str(d) for d in t.shape)}|{kind}\n".encode())
-        t = t.to(torch.float64) if t.is_floating_point() else t.to(torch.int64)
-        h.update(t.numpy().astype("<f8" if kind == "f64" else "<i8", copy=False).tobytes())
-    return h.hexdigest()
 
 
 class ReservoirReplayMixin:

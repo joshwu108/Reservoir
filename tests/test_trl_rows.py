@@ -462,7 +462,7 @@ def test_rows_to_groups_then_write_rows_reproduces_the_batch():
 
 
 
-def test_near_dead_groups_are_kept_and_counted():
+def test_near_dead_groups_are_counted_and_their_negligible_rows_not_stored():
     from reservoir.integrations._trl_rows import NEAR_DEAD_ADVANTAGE, rows_to_groups
 
     out = make_output(
@@ -473,9 +473,72 @@ def test_near_dead_groups_are_kept_and_counted():
     logps = torch.full_like(out["completion_ids"], -0.5, dtype=torch.float32)
     conv = rows_to_groups(out, num_generations=2, step=0, logprobs=logps)
     assert conv.dead_groups == 1 and conv.dead_rows == (4, 5)
-    assert conv.near_dead_groups == 1
-    assert len(conv.groups) == 2            # the near-dead group is stored like any live group
+    assert conv.near_dead_groups == 1 and conv.negligible_rows == 2
+    assert [g.rows for g in conv.groups] == [(0, 1)]     # the near-dead rows stay in the batch, unstored
     assert 5e-4 < NEAR_DEAD_ADVANTAGE
+
+
+def trl_advantages(rewards_per_func: torch.Tensor, num_generations: int) -> torch.Tensor:
+    """TRL 1.13.0's advantages (sum_then_normalize, scale_rewards="group", unit weights), float32.
+
+    ``grpo_trainer.py``: rewards are the nansum over functions, centred on the group's nanmean
+    and divided by ``nanstd + 1e-4``, ``nanstd`` with Bessel's correction (``trl.trainer.utils``).
+    """
+    grouped = rewards_per_func.nansum(dim=1).view(-1, num_generations)
+    mean = torch.nanmean(grouped, dim=1, keepdim=True)
+    variance = torch.nanmean((grouped - mean) ** 2, dim=1, keepdim=True)
+    count = torch.sum(~torch.isnan(grouped), dim=1, keepdim=True)
+    std = torch.sqrt(variance * count / (count - 1))
+    return ((grouped - mean) / (std + 1e-4)).reshape(-1)
+
+
+def residue_group(rewards: torch.Tensor) -> dict:
+    g = rewards.size(0)
+    return make_output(prompts=[[5]] * g, completions=[[k + 1] for k in range(g)],
+                       advantages=trl_advantages(rewards, g).tolist())
+
+
+def test_equal_rewards_are_dead_although_trl_leaves_a_float32_residue():
+    from reservoir.integrations._trl_rows import rows_to_groups
+
+    rewards = torch.full((7, 1), 0.9)
+    out = residue_group(rewards)
+    assert out["advantages"].abs().max().item() > 0.0          # TRL trains on noise here
+    conv = rows_to_groups(out, num_generations=7, step=0, logprobs=torch.zeros(7, 1),
+                          reward_names=["acc"], rewards_per_func=rewards)
+    assert conv.dead_groups == 1 and conv.dead_rows == tuple(range(7))
+    assert conv.groups == ()                                    # zero rows stored
+
+
+def test_without_reward_provenance_the_residue_group_is_live_but_nothing_is_stored():
+    from reservoir.integrations._trl_rows import rows_to_groups
+
+    out = residue_group(torch.full((7, 1), 0.9))
+    conv = rows_to_groups(out, num_generations=7, step=0, logprobs=torch.zeros(7, 1))
+    assert conv.dead_groups == 0 and conv.near_dead_groups == 1
+    assert conv.groups == () and conv.negligible_rows == 7
+
+
+def test_dead_means_equal_reward_tuples_with_the_same_abstentions():
+    from reservoir.integrations._trl_rows import rows_to_groups
+
+    nan = float("nan")
+    same = torch.tensor([[1.0, nan], [1.0, nan]])
+    differ = torch.tensor([[1.0, nan], [1.0, 0.0]])
+    for rewards, dead in ((same, 1), (differ, 0)):
+        out = make_output(prompts=[[5]] * 2, completions=[[1], [2]], advantages=[1e-4, -1e-4])
+        conv = rows_to_groups(out, num_generations=2, step=0, logprobs=torch.zeros(2, 1),
+                              reward_names=["a", "b"], rewards_per_func=rewards)
+        assert conv.dead_groups == dead
+
+
+def test_exactly_zero_advantages_are_dead_even_when_the_reward_tuples_differ():
+    from reservoir.integrations._trl_rows import rows_to_groups
+
+    out = make_output(prompts=[[5]] * 2, completions=[[1], [2]], advantages=[0.0, 0.0])
+    conv = rows_to_groups(out, num_generations=2, step=0, logprobs=torch.zeros(2, 1),
+                          reward_names=["a", "b"], rewards_per_func=torch.tensor([[1.0, 0.0], [0.0, 1.0]]))
+    assert conv.dead_groups == 1
 
 
 # ---------------------------------------------------------------------------
@@ -569,3 +632,15 @@ def test_reward_metadata_survives_json_and_the_manifest():
     lines = manifest.records
     assert [l["rewards"] for l in lines] == [{"verifier": 1.0}, {"verifier": 0.0}]
     assert json.loads(json.dumps(lines)) == lines
+
+
+def test_equal_reward_tuples_are_not_dead_when_trl_recentres_over_the_batch():
+    # normalize_then_sum: each function is normalised within the group, then the sum is re-centred over
+    # the whole batch, so an equal-tuple group gets the same nonzero advantage on every row.
+    from reservoir.integrations._trl_rows import rows_to_groups
+
+    out = make_output(prompts=[[5]] * 2, completions=[[1], [2]], advantages=[-0.5, -0.5])
+    conv = rows_to_groups(out, num_generations=2, step=0, logprobs=torch.zeros(2, 1),
+                          reward_names=["a"], rewards_per_func=torch.tensor([[1.0], [1.0]]),
+                          equal_rewards_are_dead=False)
+    assert conv.dead_groups == 0 and len(conv.groups) == 1
