@@ -165,8 +165,40 @@ def buffer_fingerprint(buf) -> dict:
         "rebase_slack": p.rebase_slack, "alpha": buf.alpha, "beta": buf.beta,
         "seed": buf.seed, "buffer_id": buf.buffer_id,
         "reset_age_on_update": buf.reset_age_on_update,
+        "min_entry_age": buf.min_entry_age,
         "priority": _strategy_fingerprint(buf.priority),
     }
+
+
+def _legacy_min_entry_age(state: dict, wanted: int) -> int:
+    """The ``min_entry_age`` a snapshot written before it was fingerprinted was sampled under.
+
+    The snapshot's own attestation log answers when it can: every sample
+    record since the floor existed declares it. A buffer that never sampled
+    is consistent with any floor, so it takes ``wanted``. Anything else is
+    refused rather than guessed: sample records without the declaration
+    cannot be continued by records that carry one (the checker fixes the
+    floor from a run's first sample), and an unattested buffer that has
+    sampled does not say which floor it drew under.
+    """
+    records = state.get("attestation")
+    samples = [r for r in records or () if isinstance(r, dict) and r.get("op") == "sample"]
+    declared = {r["min_entry_age"] for r in samples if "min_entry_age" in r}
+    if samples and len(declared) == 1 and all("min_entry_age" in r for r in samples):
+        return int(next(iter(declared)))
+    if samples:
+        raise ValueError(
+            "snapshot predates min_entry_age in the fingerprint and its log's sample records "
+            f"declare {sorted(declared) or 'no'} floor; a continued log would not verify. Start a new buffer"
+        )
+    drew = state.get("last_sample") is not None or str(state.get("draw_counter", "0")) != "0"
+    if records is None and drew:
+        raise ValueError(
+            "snapshot predates min_entry_age in the fingerprint and has sampled without an attestation log, "
+            "so the floor it drew under is unknown. Start a new buffer"
+        )
+    return wanted
+
 
 def buffer_state_dict(buf) -> dict:
     """Complete buffer state as a JSON-serialisable dict.
@@ -287,10 +319,13 @@ def load_buffer_state(buf, state: dict) -> None:
         raise ValueError("load_state_dict() requires a freshly constructed buffer")
     if not isinstance(state, dict) or state.get("format") != buf.STATE_FORMAT:
         raise ValueError(f"unsupported snapshot format: {state.get('format') if isinstance(state, dict) else state!r}")
-    if state.get("fingerprint") != buf._fingerprint():
+    fingerprint = state.get("fingerprint")
+    if isinstance(fingerprint, dict) and "min_entry_age" not in fingerprint:
+        fingerprint = {**fingerprint, "min_entry_age": _legacy_min_entry_age(state, buf.min_entry_age)}
+    if fingerprint != buf._fingerprint():
         raise ValueError(
             "snapshot was written by a buffer with different parameters: "
-            f"{state.get('fingerprint')} vs {buf._fingerprint()}"
+            f"{fingerprint} vs {buf._fingerprint()}"
         )
     groups = [_group_from_dict(g) for g in _require_list(state, "groups")]
     slots = _validate_slots(_require_list(state, "slots"), buf.capacity, groups)
