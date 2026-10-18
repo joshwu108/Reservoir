@@ -100,11 +100,22 @@ def test_adapter_row_matches_the_trl_and_verl_records():
     assert f"each of the {len(verl['trainer_checkpoints'])} trainer checkpoints" in text
 
 
-def test_sweep_row_claims_no_run_while_none_is_committed():
+def test_sweep_row_matches_the_committed_cpu_smoke():
     text = row("The staleness sweep harness")
-    committed = sorted(MODAL.glob("sweep_*/*.json")) + sorted(RESULTS.glob("staleness_sweep_report.json"))
-    assert committed == [], "a sweep record is committed: update the README row, docs/staleness.md and this test"
-    assert "No sweep record is committed" in text and "has not been run" in text
+    smoke = MODAL / "sweep_tiny_cpu_smoke"
+    report = load(smoke / "report.json")
+    arms = report["arms"]
+    main = [a for a in arms.values() if not a["stress"]]
+    stress = [name for name, a in arms.items() if a["stress"]]
+    assert f"{len(arms)} arms (the {len(main)} of the main grid on seeds {' and '.join(map(str, report['seeds']))}" in text
+    assert all(f"`{name}` stress arm on seed {arms[name]['runs'][0]['seed']}" in text for name in stress)
+    assert f"{report['max_steps']} steps, {report['totals']['runs']} runs" in text
+    assert f"the {report['verified_logs']} Reservoir logs verify" in text
+    assert report["totals"]["suspect_runs"] == 0 and report["missing_arms"] == []
+    gpu = sorted(p for p in MODAL.glob("sweep_*/report.json") if p.parent != smoke) + sorted(
+        RESULTS.glob("staleness_sweep_report.json"))
+    assert gpu == [], "a GPU sweep report is committed: update the README row, docs/staleness.md and this test"
+    assert "has not been run" in text and "no training-quality claim" in text
 
 
 def _ratio(configs: dict, name: str) -> str:
