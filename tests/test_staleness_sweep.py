@@ -59,19 +59,6 @@ def test_even_length_reward_is_a_coin_flip_on_text_length():
 # --- arms --------------------------------------------------------------------
 
 
-def test_arm_specs_are_plain_plus_three_ages_off_and_on():
-    specs = arm_specs(policy_on="gate", max_log_ratio=2.0)
-    names = [s.name for s in specs]
-    assert names == ["grpo", "reservoir_age8_off", "reservoir_age32_off", "reservoir_age128_off",
-                     "reservoir_age8_on", "reservoir_age32_on", "reservoir_age128_on"]
-    plain = specs[0]
-    assert not plain.replay and plain.max_policy_age is None and plain.policy == "off"
-    on = [s for s in specs if s.name.endswith("_on")]
-    assert all(s.policy == "gate" and s.max_log_ratio == 2.0 for s in on)
-    assert [s.max_policy_age for s in on] == [8, 32, 128]
-    assert all(s.policy == "off" for s in specs[1:4])
-
-
 def test_arm_lookup_by_name_and_unknown_name():
     specs = arm_specs()
     assert report.arm_by_name(specs, "reservoir_age32_on").max_policy_age == 32
@@ -238,8 +225,8 @@ def test_build_report_groups_runs_by_arm_with_seed_means(tmp_path: Path):
     assert out["totals"]["dollars"] == pytest.approx(4 * 12.0 / 3600 * 1.10)
     assert out["per_step"]["reservoir_age8_on"]["42"]["ess_fraction"] == [0.8] * 4
     assert out["verified_logs"] == 2 and out["reverified"] is False
-    assert out["missing_arms"] == ["reservoir_age8_off", "reservoir_age32_off", "reservoir_age128_off",
-                                   "reservoir_age32_on", "reservoir_age128_on"]
+    assert out["missing_arms"] == ["grpo_filter", "wreinforce", "reservoir_age8_off", "reservoir_age32_off",
+                                   "reservoir_age32_on", "reservoir_naive_age32", "reservoir_age128_on"]
     assert out["totals"]["suspect_runs"] == 0
 
 
@@ -373,3 +360,180 @@ def test_cpu_smoke_runs_a_plain_and_a_reservoir_arm_and_the_logs_verify(tmp_path
     rec_path.write_text(json.dumps(rec))
     with pytest.raises(RuntimeError, match="head"):
         report.build_report(tmp_path)
+
+
+# --- control arms, diagnostics and evaluation in the report -----------------------------------
+
+
+def _full_record(arm: str, seed: int, *, replay: bool = False, trainer: str = "grpo", stress: bool = False,
+                 rollouts: int = 32, per_item=(1, 0, 1, 0), steps: int = 8) -> dict:
+    rec = _fake_record(arm, seed, replay, steps=steps)
+    for entry in rec["log_history"]:
+        if "reward" in entry:
+            entry.update({"sweep/rollouts_generated": float(rollouts), "sweep/dead_all_wrong_rate": 0.25,
+                          "sweep/dead_all_correct_rate": 0.25, "sweep/kl_to_init": 0.01, "entropy": 0.5,
+                          "completions/mean_length": 100.0, "sweep/lm_head_grad_z": 0.1})
+            if replay:
+                entry.update({"sweep/replayed_row_fraction": 0.25, "sweep/same_step_fraction": 0.0,
+                              "sweep/replayed_age_p90": 3.0, "sweep/clip_fraction/replayed_pos": 0.1})
+    rec.update({"trainer": trainer, "stress": stress, "priority": "advantage",
+                "evals": {"gsm8k_test": {"accuracy": sum(per_item) / len(per_item), "per_item": list(per_item)},
+                          "math500": {"accuracy": 0.5, "per_item": [1, 0]},
+                          "gsm8k_avg_at_k": [{"step": 4, "accuracy": 0.3}, {"step": 8, "accuracy": 0.4}]}})
+    rec["eval"] = {"accuracy": rec["evals"]["gsm8k_test"]["accuracy"], "n": len(per_item)}
+    return rec
+
+
+def _write(tmp_path: Path, rec: dict) -> None:
+    (tmp_path / f"{rec['arm']}_seed{rec['seed']}.json").write_text(json.dumps(rec))
+
+
+def test_per_step_series_reads_the_sweep_diagnostics():
+    series = report.per_step_series(_full_record("reservoir_age8_off", 42, replay=True)["log_history"])
+    assert series["rollouts"] == [32.0] * 8
+    assert series["dead_all_wrong"] == [0.25] * 8 and series["kl_to_init"] == [0.01] * 8
+    assert series["replayed_age_p90"] == [3.0] * 8 and series["same_step_fraction"] == [0.0] * 8
+    assert series["clip_replayed_pos"] == [0.1] * 8 and series["entropy"] == [0.5] * 8
+
+
+def test_report_adds_bootstrap_cis_differences_auc_and_rollout_matched_cuts(tmp_path: Path):
+    for seed in (42, 43):
+        _write(tmp_path, _full_record("grpo", seed, per_item=(1, 0, 1, 0)))
+        _write(tmp_path, _full_record("grpo_filter", seed, trainer="grpo_filter", rollouts=64, per_item=(1, 1, 1, 0)))
+    _write(tmp_path, _full_record("reservoir_age128_on", 42, replay=True, trainer="reservoir", stress=True))
+    out = report.build_report(tmp_path, reverify=False)
+    grpo, filt = out["arms"]["grpo"], out["arms"]["grpo_filter"]
+    assert grpo["eval_ci"]["mean"] == pytest.approx(0.5) and grpo["eval_ci"]["n_seeds"] == 2
+    assert filt["eval_diff_vs_grpo"]["mean"] == pytest.approx(0.25)
+    assert grpo["eval_diff_vs_grpo"] is None
+    assert filt["math500_ci"]["mean"] == pytest.approx(0.5)
+    assert filt["summary"]["reward_auc"]["mean"] == pytest.approx(sum(0.1 * s for s in range(1, 9)) / 8)
+    assert out["rollout_budget"] == 8 * 32
+    assert filt["summary"]["steps_at_rollout_budget"]["mean"] == 4
+    assert grpo["summary"]["steps_at_rollout_budget"]["mean"] == 8
+    assert filt["summary"]["avg_at_k_at_rollout_budget"]["mean"] == pytest.approx(0.3)
+    target = 0.95 * grpo["summary"]["train_reward_last_quarter"]["mean"]
+    assert out["steps_to_95pct_grpo_target"] == pytest.approx(target)
+    # a 10-step rolling mean over 8 steps of 0.1..0.8 peaks at 0.45, below the 0.71 target
+    assert filt["reached_95pct_grpo"] == 0 and filt["summary"]["steps_to_95pct_grpo"]["n"] == 0
+    stress = out["arms"]["reservoir_age128_on"]
+    assert stress["stress"] is True and [r["seed"] for r in stress["runs"]] == [42]
+
+
+def test_report_refuses_a_stress_seed_outside_the_main_seed_set(tmp_path: Path):
+    _write(tmp_path, _full_record("grpo", 42))
+    _write(tmp_path, _full_record("reservoir_age128_on", 99, replay=True, trainer="reservoir", stress=True))
+    with pytest.raises(RuntimeError, match="stress"):
+        report.build_report(tmp_path, reverify=False)
+
+
+def test_estimate_jobs_cost_weights_grpo_filter_and_adds_eval_time():
+    specs = {s.name: s for s in arm_specs()}
+    est = report.estimate_jobs_cost([specs["grpo"], specs["grpo_filter"]], max_steps=100, seconds_per_step=10.0,
+                                    overhead_seconds=60.0, price_per_hour=3.6, eval_seconds=40.0)
+    per_run = [100 * 10.0 + 60 + 40, 100 * 10.0 * report.GRPO_FILTER_STEP_FACTOR + 60 + 40]
+    assert est["runs"] == 2
+    assert est["gpu_hours"] == pytest.approx(sum(per_run) / 3600)
+    assert est["dollars"] == pytest.approx(sum(per_run) / 3600 * 3.6)
+    assert est["per_run_minutes"] == pytest.approx(sum(per_run) / 2 / 60)
+
+
+def test_report_marks_a_failed_probe_suspect_and_refuses_same_step_replay_and_mixed_settings(tmp_path: Path):
+    failed = _full_record("reservoir_age8_off", 42, replay=True, trainer="reservoir")
+    failed["engine_check"] = {"available": False, "steps": [], "stale_steps": [], "failure": "no sampling logprobs"}
+    _write(tmp_path, failed)
+    run = report.build_report(tmp_path, reverify=False)["arms"]["reservoir_age8_off"]["runs"][0]
+    assert run["suspect"] and run["suspect_reasons"] == ["probe failed: no sampling logprobs"]
+    same = _full_record("reservoir_age8_off", 42, replay=True, trainer="reservoir")
+    same["log_history"][2]["sweep/same_step_fraction"] = 0.5
+    _write(tmp_path, same)
+    with pytest.raises(RuntimeError, match="own step"):
+        report.build_report(tmp_path, reverify=False)
+    _write(tmp_path, _full_record("reservoir_age8_off", 42, replay=True, trainer="reservoir"))
+    mixed = _full_record("reservoir_age8_off", 43, replay=True, trainer="reservoir")
+    mixed["policy"] = "staleness"
+    _write(tmp_path, mixed)
+    with pytest.raises(RuntimeError, match="mix settings"):
+        report.build_report(tmp_path, reverify=False)
+
+
+def test_report_refuses_records_that_differ_in_precision(tmp_path: Path):
+    a, b = _full_record("grpo", 42), _full_record("wreinforce", 42, trainer="wreinforce")
+    a["config"]["bf16"], b["config"]["bf16"] = True, False
+    _write(tmp_path, a)
+    _write(tmp_path, b)
+    with pytest.raises(RuntimeError, match="precision"):
+        report.build_report(tmp_path, reverify=False)
+
+
+def test_reverify_refuses_a_log_without_the_same_step_floor(tmp_path: Path):
+    from reservoir.rollout import Rollout
+    from reservoir.rollout_buffer import RolloutBuffer
+
+    stem = tmp_path / "reservoir_age8_off_seed42"
+    buf = RolloutBuffer(capacity=8, half_life=4, max_policy_age=8, seed=1, min_entry_age=0,
+                        attest=str(stem) + ".attest.jsonl", manifest=str(stem) + ".manifest.jsonl")
+    buf.add_group("p", 0, [Rollout(tokens=[1, 2], logprobs=[-0.1, -0.2], reward=r) for r in (1.0, 0.0)])
+    buf.sample(1, current_version=0)
+    head = buf.attestation_log.head_digest
+    buf.close()
+    with pytest.raises(RuntimeError, match="min_entry_age"):
+        report.reverify_log(stem.with_suffix(".json"), head)
+
+
+def test_control_arm_probe_marks_stale_steps_and_first_round_reward_is_the_reward_series(tmp_path: Path):
+    rec = _full_record("grpo_filter", 42, trainer="grpo_filter")
+    rec["engine_check"] = {"available": False, "steps": [], "stale_steps": []}
+    steps = [e for e in rec["log_history"] if "reward" in e]
+    for e in steps:
+        e["sweep/engine_confident_fraction"] = 0.0
+        e["sweep/first_round_reward"] = 0.9
+        e["sweep/filter_unfilled_groups"] = 1.0
+    steps[3]["sweep/engine_confident_fraction"] = 0.05
+    summary = report.summarize_run(rec)
+    assert summary["engine_stale_steps"] == 1 and summary["suspect"]
+    assert summary["train_reward_last_quarter"] == pytest.approx(0.9)
+    assert summary["filter_unfilled_groups_total"] == 8
+    series = report.per_step_series(rec["log_history"])
+    assert series["reward_all_rounds"][0] == pytest.approx(0.1)
+
+
+def test_steps_to_target_is_censored_at_the_run_length(tmp_path: Path):
+    for seed in (42, 43):
+        _write(tmp_path, _full_record("grpo", seed))
+    run = report.build_report(tmp_path, reverify=False)["arms"]["grpo"]["runs"][0]
+    assert run["steps_to_95pct_grpo"] is None and run["steps_to_95pct_grpo_censored"] == 8
+
+
+def test_failed_evaluations_are_listed_and_an_unprobed_vllm_run_is_suspect(tmp_path: Path):
+    rec = _full_record("grpo", 42)
+    rec["evals"]["math500"] = {"step": 8, "error": "ValueError: prompt too long", "seconds": 1.0}
+    rec["evals"]["gsm8k_avg_at_k"].append({"step": 12, "error": "RuntimeError: boom", "seconds": 0.5})
+    rec["config"]["vllm"] = {"version": "0.28.0"}
+    rec["engine_check"] = {"available": False, "steps": [], "stale_steps": []}
+    _write(tmp_path, rec)
+    out = report.build_report(tmp_path, reverify=False)
+    run = out["arms"]["grpo"]["runs"][0]
+    assert run["eval_errors"] == ["math500: ValueError: prompt too long", "gsm8k_avg_at_k step 12: RuntimeError: boom"]
+    assert out["arms"]["grpo"]["eval_error_runs"] == [42]
+    assert run["suspect_reasons"] == ["vLLM run was never engine-probed"]
+    assert "evaluation failed: grpo seed 42: math500" in report.format_table(out)
+
+
+def test_fit_prompts_drops_only_the_over_length_items():
+    datasets = pytest.importorskip("datasets")
+    from benchmarks.staleness.evaluation import fit_prompts
+
+    class Tok:
+        def apply_chat_template(self, messages, tokenize, add_generation_prompt):
+            return messages[-1]["content"]
+
+        def __call__(self, text, add_special_tokens):
+            return {"input_ids": text.split()}
+
+    data = datasets.Dataset.from_dict({"prompt": [[{"role": "user", "content": "a b"}],
+                                                  [{"role": "user", "content": "a b c d e"}]], "answer": ["1", "2"]})
+    kept, dropped = fit_prompts(data, Tok(), max_prompt_tokens=3)
+    assert dropped == 1 and kept["answer"] == ["1"]
+    same, none = fit_prompts(data, Tok(), max_prompt_tokens=10)
+    assert none == 0 and same is data

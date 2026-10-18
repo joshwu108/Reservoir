@@ -58,7 +58,9 @@ class ProbedReplay(ReservoirReplay):
 
     Only the single-process path is probed (the sweep runs one process).
     With HF generation there are no sampling logprobs and ``engine_check``
-    reports ``available: False``.
+    reports ``available: False``. ``last_replayed`` holds the batch rows the
+    hook call replaced and the entry version of each replayed rollout, for
+    the sweep's per-step diagnostics.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -66,8 +68,10 @@ class ProbedReplay(ReservoirReplay):
         self.engine_steps: list[dict] = []
         self._pending_sampling: Optional[Any] = None
         self._pending_step: Optional[int] = None
+        self.last_replayed: tuple[tuple[int, ...], tuple[int, ...]] = ((), ())
 
     def mix(self, output: dict, trainer: Any) -> dict:
+        self.last_replayed = ((), ())
         self._pending_sampling = output.get("sampling_per_token_logps")
         self._pending_step = int(trainer.state.global_step)
         if self._pending_sampling is not None and output.get("old_per_token_logps") is not None:
@@ -79,6 +83,13 @@ class ProbedReplay(ReservoirReplay):
         if self._pending_sampling is not None:
             self._record(logprobs, output["completion_mask"])
         return logprobs
+
+    def _telemetry(self, trainer: Any, step: int, batch: Any, ratios: Any, kept: Any, batch_rows: int,
+                   conversion: Any, *args: Any, **kwargs: Any) -> None:
+        if batch is not None:
+            self.last_replayed = (tuple(conversion.dead_rows[k] for k in kept),
+                                  tuple(int(batch.model_versions[k]) for k in kept))
+        super()._telemetry(trainer, step, batch, ratios, kept, batch_rows, conversion, *args, **kwargs)
 
     def _record(self, trainer_logprobs: Any, mask: Any) -> None:
         sampling, self._pending_sampling = self._pending_sampling, None
