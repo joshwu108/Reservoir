@@ -208,6 +208,27 @@ def test_hook_computes_behavior_logprobs_once_when_trl_omits_them():
         assert all(lp == LOGP for lp in rollout.logprobs)
 
 
+def test_sync_ref_model_is_refused_before_replay():
+    r = replay()
+    trainer = FakeTrainer(r, [live_batch()])
+    trainer.sync_ref_model = True
+    with pytest.raises(ValueError, match="sync_ref_model"):
+        trainer.generate(step=0)
+    assert r.stats["hook_calls"] == 0
+
+
+def test_dropout_without_trl_old_logprobs_warns_once():
+    r = replay()
+    trainer = FakeTrainer(r, [live_batch(), live_batch()])
+    trainer.model = torch.nn.Sequential(torch.nn.Dropout(0.2))
+    trainer.args.disable_dropout = False
+    with pytest.warns(RuntimeWarning, match="dropout"):
+        trainer.generate(step=0)
+    with __import__("warnings").catch_warnings(record=True) as warnings_seen:
+        trainer.generate(step=1)
+    assert not any("dropout" in str(w.message) for w in warnings_seen)
+
+
 def test_hook_is_a_no_op_in_eval_mode():
     r = replay()
     batch = live_batch()

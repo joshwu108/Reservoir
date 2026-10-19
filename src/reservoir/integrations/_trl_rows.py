@@ -435,7 +435,11 @@ def _check_write_args(
         raise ValueError(f"rows contains duplicates: {rows}")
     handled = set(_CORE_KEYS) | {"old_per_token_logps", "ref_per_token_logps", "num_items_in_batch"}
     for key, value in output.items():
-        if key not in handled and isinstance(value, torch.Tensor) and value.dim() >= 2 and value.size(0) == batch:
+        if key in handled or key == "martingale_row_id":
+            continue
+        per_row_tensor = isinstance(value, torch.Tensor) and value.dim() >= 1 and value.size(0) == batch
+        per_row_sequence = isinstance(value, (list, tuple)) and len(value) == batch
+        if per_row_tensor or per_row_sequence:
             raise ValueError(
                 f"batch entry {key!r} has one row per sample and write_rows does not know how to "
                 "replace its rows"

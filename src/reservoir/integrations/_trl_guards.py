@@ -65,6 +65,8 @@ def drop_unused_sampling_logprobs(output: dict, trainer: Any) -> dict:
 
 def check_batch(output: dict, trainer: Any, beta: float) -> None:
     """Refuse configurations the adapter does not handle, before touching anything."""
+    if getattr(trainer, "sync_ref_model", False) or getattr(getattr(trainer, "args", None), "sync_ref_model", False):
+        raise ValueError("ReservoirReplay cannot use sync_ref_model: stored reference logprobs would become stale")
     if beta > 0.0 and getattr(trainer, "loss_type", None) == "vespo":
         raise ValueError(
             "loss_type 'vespo' is not linear in the advantage, so importance weights "
@@ -76,3 +78,20 @@ def check_batch(output: dict, trainer: Any, beta: float) -> None:
                 f"ReservoirReplay cannot replay batches with {key!r} "
                 "(tools, vLLM importance sampling and vision inputs are unsupported)"
             )
+
+
+def dropout_without_old_logprobs(output: dict, trainer: Any) -> bool:
+    """Whether active model dropout can make fresh-row behavior logprobs differ from the loss."""
+    if "old_per_token_logps" in output or getattr(getattr(trainer, "args", None), "disable_dropout", False):
+        return False
+    model = getattr(trainer, "model", None)
+    if model is None or not getattr(model, "training", False):
+        return False
+    modules = getattr(model, "modules", None)
+    if callable(modules):
+        for module in modules():
+            if "dropout" in type(module).__name__.lower() and float(getattr(module, "p", 0)) > 0:
+                return True
+    config = getattr(model, "config", None)
+    return any(float(getattr(config, key, 0) or 0) > 0 for key in
+               ("attention_dropout", "hidden_dropout_prob", "dropout", "dropout_rate"))

@@ -142,6 +142,7 @@ first access through ``build_trainer_class``, which imports TRL.
 from __future__ import annotations
 
 import functools
+import warnings
 from pathlib import Path
 from typing import Any, Final, Optional, Sequence, Union
 
@@ -155,6 +156,7 @@ from reservoir.integrations._trl_guards import (  # re-exported: the refusals an
     SHARDED_STRATEGIES,
     UNSUPPORTED_OUTPUT_KEYS,
     check_batch,
+    dropout_without_old_logprobs,
     drop_unused_sampling_logprobs,
     refuse_sharded,
 )
@@ -332,6 +334,7 @@ class ReservoirReplay:
         self.last_telemetry: Optional[StepTelemetry] = None
         self.stats: dict[str, int] = {name: 0 for name in STAT_NAMES}
         self.last_replay: Optional[RolloutBatch] = None
+        self._dropout_warned = False
 
     @property
     def max_log_ratio(self) -> Optional[float]:
@@ -446,6 +449,12 @@ class ReservoirReplay:
         if kept is not output:
             self.stats["dropped_sampling_logprobs"] += 1
         check_batch(kept, trainer, self.beta)
+        if not self._dropout_warned and dropout_without_old_logprobs(kept, trainer):
+            warnings.warn(
+                "model dropout is active without TRL old_per_token_logps; replay can change fresh-row loss ratios",
+                RuntimeWarning, stacklevel=2,
+            )
+            self._dropout_warned = True
         return kept
 
     def mix_local(self, output: dict, trainer: Any) -> dict:
@@ -722,6 +731,7 @@ def build_trainer_class() -> type:
                     f"replay_buffer must be a ReservoirReplay, got {type(replay_buffer).__name__}"
                 )
             super().__init__(*args, **kwargs)
+            check_batch({}, self, replay_buffer.beta)
             self.replay_buffer = replay_buffer
             accelerator = getattr(self, "accelerator", None)
             if accelerator is not None:

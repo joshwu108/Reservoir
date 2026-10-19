@@ -99,6 +99,18 @@ def test_init_forwards_arguments_installs_the_buffer_and_registers_the_callback(
     assert added[0].replay is replay
 
 
+def test_init_refuses_sync_ref_model_instance_setting(trainer_class, monkeypatch):
+    from trl import GRPOTrainer
+
+    def fake_init(self, *args, **kwargs):
+        self.sync_ref_model = True
+        self.args = SimpleNamespace(sync_ref_model=True)
+
+    monkeypatch.setattr(GRPOTrainer, "__init__", fake_init)
+    with pytest.raises(ValueError, match="sync_ref_model"):
+        trainer_class(replay_buffer=ReservoirReplay(capacity=4))
+
+
 def test_callback_fails_the_run_when_the_hook_never_ran(trainer_class):
     from transformers import TrainerCallback
 

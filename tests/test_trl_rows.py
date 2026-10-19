@@ -407,6 +407,25 @@ def test_write_rows_does_not_mutate_inputs_when_the_batch_does_not_grow():
     assert new["prompt_ids"][1].tolist() == [PAD, 8]
 
 
+@pytest.mark.parametrize("extra", [torch.tensor([4, 5]), [4, 5], (4, 5)])
+def test_write_rows_refuses_unhandled_per_row_values(extra):
+    out = make_output(prompts=[[1], [1]], completions=[[2], [3]], advantages=[1.0, -1.0],
+                      old_logps=[[-0.1], [-0.2]])
+    out["unknown_row_value"] = extra
+    with pytest.raises(ValueError, match="unknown_row_value"):
+        write_rows(out, rows=(1,), rollouts=[_rollout([7], [-0.5], 0.5, prompt=[1])],
+                   advantages=(0.5,), pad_token_id=PAD)
+
+
+def test_write_rows_allows_martingale_row_id_for_the_recorder_hook():
+    out = make_output(prompts=[[1], [1]], completions=[[2], [3]], advantages=[1.0, -1.0],
+                      old_logps=[[-0.1], [-0.2]])
+    out["martingale_row_id"] = torch.tensor([4, 5])
+    new = write_rows(out, rows=(1,), rollouts=[_rollout([7], [-0.5], 0.5, prompt=[1])],
+                     advantages=(0.5,), pad_token_id=PAD)
+    assert new["martingale_row_id"].tolist() == [4, 5]
+
+
 def test_write_rows_handles_full_width_and_empty_prompt_rollouts():
     out = make_output(prompts=[[1, 2]], completions=[[3, 4]], advantages=[1.0], old_logps=[[-0.1, -0.2]])
     full = _rollout([5, 6], [-1.0, -2.0], 0.5, prompt=[])
