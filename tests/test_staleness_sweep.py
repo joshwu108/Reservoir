@@ -539,3 +539,19 @@ def test_fit_prompts_drops_only_the_over_length_items():
     assert dropped == 1 and kept["answer"] == ["1"]
     same, none = fit_prompts(data, Tok(), max_prompt_tokens=10)
     assert none == 0 and same is data
+
+
+def test_sweep_entrypoint_puts_sources_on_path_before_benchmark_imports(tmp_path, monkeypatch):
+    # Modal imports the entrypoint before any function body runs, and benchmarks.staleness
+    # imports reservoir at module level: the sources must be on sys.path at import time.
+    from benchmarks.modal import staleness_sweep
+
+    checkout = tmp_path / "checkout"
+    (checkout / "src").mkdir(parents=True)
+    (checkout / "benchmarks" / "modal").mkdir(parents=True)
+    monkeypatch.setattr("sys.path", [])
+    staleness_sweep._add_repo_to_path(checkout / "benchmarks" / "modal" / "staleness_sweep.py")
+    import sys
+
+    assert str(checkout / "src") in sys.path
+    assert str(checkout) in sys.path

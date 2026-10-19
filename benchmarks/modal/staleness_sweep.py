@@ -74,12 +74,18 @@ from typing import Any, Optional
 import modal
 
 
-def _add_repo_to_path() -> None:
-    """Run as a script, the checkout root is not on ``sys.path``; in the container it is ``/root``."""
-    here = Path(__file__).resolve()
+def _add_repo_to_path(here: Path = Path(__file__).resolve()) -> None:
+    """Put the checkout root and the package sources on ``sys.path`` before the benchmark imports.
+
+    Run as a script, the checkout root is not on ``sys.path``; in the container it is ``/root``
+    and the sources are mounted at ``/reservoir_src``. ``benchmarks.staleness`` imports
+    ``reservoir`` at module level, so the sources must be importable when Modal imports this file.
+    """
     root = here.parents[2] if len(here.parents) > 2 else Path("/root")
-    if (root / "benchmarks").is_dir() and str(root) not in sys.path:
-        sys.path.insert(0, str(root))
+    src = root / "src" if (root / "src").is_dir() else Path("/reservoir_src")
+    for path in (src, root):
+        if path.is_dir() and str(path) not in sys.path:
+            sys.path.insert(0, str(path))
 
 
 _add_repo_to_path()
