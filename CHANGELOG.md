@@ -7,17 +7,43 @@ minor bump may change interfaces.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-19
+
+The staleness release: a declared minimum entry age, the staleness policy,
+checker binding of steps to the buffer version, log format 4, durable-reopen
+refusals, the sweep harness with its control arms and the replayed-row hook
+for a token flight recorder. Tested (2,213 tests, 2,210
+passing and 3 skipped with the `trl` extra); the sweep has a committed
+CPU smoke and no GPU run (`docs/staleness.md`).
+
 ### Added
 
 - **Staleness sweep harness** (`benchmarks/modal/staleness_sweep.py`,
   `benchmarks/staleness/`): TRL 1.13 GRPO with colocated vLLM on one A10G
-  over GSM8K, seven arms (plain GRPO; Reservoir at `max_policy_age` 8, 32,
-  128 with the policy off and on) × three seeds, every Reservoir run
-  verified by the checker before it is written, a stale-engine check that
-  compares vLLM's sampling logprobs with the trainer's forward at no extra
-  cost, a greedy held-out evaluation, per-run dollars, and a report and
-  figure rebuilt offline. No run record is committed and the GPU sweep has
-  not been run (`docs/staleness.md`).
+  over GSM8K, `bf16=True` autocast against the bf16 engine. Arms on one
+  prompt stream: plain GRPO; `grpo_filter` (DAPO dynamic sampling, reported
+  at matched effective batch and at matched total rollouts); `wreinforce`
+  (fixed-reference advantage +0.1 / −1); Reservoir at `max_policy_age` 8
+  and 32 with the policy off and on; `reservoir_naive_age32` (uniform
+  priority, no age decay); and `reservoir_age128_on` as a single-seed
+  stress arm. Every arm logs per step the dead-group rate split
+  all-wrong/all-correct, the replayed fraction of trained rows, the
+  same-step fraction of replayed rows (the run fails if it is not 0),
+  replayed-row age mean/p90/max, clip fraction by row origin and advantage
+  sign, KL to the initial model, `lm_head` gradient-norm z-score and a
+  stale-engine check. Evaluation: GSM8K test (1,319) greedy at the end,
+  avg@8 every 50 steps, MATH500 at the end; the report gives mean ± std
+  over seeds, seeds × items bootstrap CIs and paired differences from GRPO,
+  reward AUC and steps to 95% of GRPO's final reward. Every Reservoir run
+  is verified by the checker before it is written and again when the
+  report is rebuilt. `--dry-run` works without Modal. A CPU smoke (tiny
+  model, 12 steps, 17 runs) is committed under
+  `benchmarks/modal/results/sweep_tiny_cpu_smoke/`; the GPU sweep has not
+  been run (`docs/staleness.md`). The `_on` arms' policy is the
+  `conservative` preset's sampling-design ESS floor (0.5) and group-mass cap
+  (0.25) plus an age bound of 4, below every buffer `max_policy_age`, so
+  the policy declines rows in every `_on` arm of the smoke; the legacy
+  drift gate is off. Single-process vLLM records its seed (0).
 - **Staleness policy.** `ReservoirReplay(staleness_policy=...)` (TRL and
   verl) decides per replayed row, from its log-ratio, exact sampling
   weight and age: an age bound, an exact sampling-design ESS floor that
@@ -39,12 +65,58 @@ minor bump may change interfaces.
   find (`results/divergence_power.json`: about 5.4e-05 for the full grid).
   `tests/test_divergence_campaign.py` pins the campaign's grid, workload,
   draw mapping, distance, verdict rule and its two disclosed deviations.
+- **GRPO presets.** `ReservoirReplay.for_grpo(num_generations, max_steps,
+  per_device_train_batch_size, profile=...)` derives capacity, half-life and
+  `max_policy_age` from the run's schedule and returns, with the replay, a
+  sentence per setting saying why it was chosen. Built with
+  `capacity=None`, the TRL replay sizes itself the same way from the
+  trainer's `GRPOConfig` (policy off) and, unless `attest`/`manifest` are
+  given, writes `<output_dir>/reservoir/attest.jsonl` and `manifest.jsonl`.
+- **`reservoir doctor`.** A console command that reports the installed
+  `trl` and `verl` against their pins and compatibility guards, torch,
+  numpy, transformers and GPU visibility, and runs a durable round trip
+  and the checker in a temporary directory; exits 1 when a check fails
+  (a missing extra is reported, not a failure).
+- **Replay run summary.** At the end of training the TRL adapter's owner
+  rank prints the rows replayed, the share of generation they recovered,
+  the buffer size, the log and manifest paths and the `reservoir-verify`
+  command that checks them.
+- **Replayed rows in a token record.** `ReservoirReplay(replay_recorder=...)`
+  (TRL), or a trainer's `flight_recorder`, receives every kept replayed
+  row through a duck-typed `register_replayed`: the draw's exact
+  batch-normalised importance weight, the staleness policy's exact rescale,
+  draw id, content digest, origin tokens, behaviour step and log-probs, and
+  buffer age; the returned ids go into the batch's `martingale_row_id`
+  column. `reservoir.integrations.martingale` imports no Martingale code. A
+  joint CPU run with Martingale 4416046 (`benchmarks/martingale_joint.py`)
+  joins all 18 replayed rows draw by draw in two configurations, with both
+  records verifying (`docs/staleness.md`).
 - **verl in CI.** A job installs the `verl` extra on Python 3.12 and runs
-  the verl adapter tests against the real package, so the version guard
-  no longer skips.
+  the verl adapter tests against the real package, including the same-step
+  floor test, so the version guard no longer skips.
 
 ### Changed
 
+- **Log format 4.** Adapter logs with telemetry enabled (the default in
+  both adapters) open with a format-4 `decay_config` that declares
+  `min_entry_age`. The checker requires every format-4 sample to repeat
+  that floor, carry each draw's `entry_version`, and have a batch witness
+  and telemetry, so deleting witnesses or stripping the floor is no longer
+  read as a legacy log. A sample the writer abandoned (the next sample
+  re-runs the same buffer version) and the last sample of a log read with
+  `allow_truncated` are exempt. A format-4 durable directory refuses to
+  reopen without telemetry; a format-3 directory reopened with it warns and
+  stays format 3. Standalone buffer logs stay at format 3; the checker
+  reads formats 1 to 4.
+- **`min_entry_age` is part of the buffer fingerprint.** Two buffers that
+  differ only in it draw different rows from one state, so a snapshot,
+  durable reopen or checkpoint restore across them is refused like any
+  other parameter mismatch. A snapshot written before the key existed
+  takes the floor its own attestation log declares; one that never
+  sampled loads under any floor; one whose sample records declare no
+  floor (0.6.0), or that sampled without a log, is refused, because the
+  checker fixes a run's floor from its first sample and a continued log
+  would not verify.
 - **The ESS stage is named for what it measures.** Stage 2 of the
   staleness policy is the *sampling-design* ESS floor: the Kish ESS of the
   buffer's prioritized-sampling weights, which does not change with
@@ -79,8 +151,8 @@ minor bump may change interfaces.
 - **README guarantees** reworded to match their evidence: the mutation,
   crash, reproducibility, adapter, sweep, attestation-cost and TLA+ rows.
   `tests/test_readme_evidence.py` checks the README's numbers against the
-  committed JSON. The mutant total and the crash-campaign count are left
-  as placeholders until the branches that change them land.
+  committed JSON, including the mutant total (279 in 18 categories) and the
+  crash-campaign count (330).
 
 ### Fixed
 
@@ -94,7 +166,16 @@ minor bump may change interfaces.
 - A missing snapshot with a non-empty command log or attestation file
   refuses to open instead of starting fresh and truncating the
   attestation log; surplus on-disk attestation records on reopen are
-  reported; a command-log line from a future epoch refuses.
+  reported; a command-log line from a future epoch refuses. A directory
+  that has been snapshotted keeps an initialisation marker, so a deleted
+  `state.json` with a compacted (empty) command log and no attestation file
+  also refuses instead of opening fresh.
+- Checkpoint tags are case-folded and Unicode-normalised before staging,
+  so on case-insensitive APFS a tag such as `x.TMP` or `x.OLD` can no longer
+  alias the staging and backup paths of `x` and delete both checkpoints;
+  existing checkpoints are kept when a tag collides.
+- The checker rejects a second telemetry record for an already-reported
+  sample, which would have counted the step twice.
 - Replay no longer draws rows inserted in the same step: a declared
   minimum age (`min_entry_age`, default 1 in both adapters), recorded in
   the sample record and checked by the checker against every drawn slot's
@@ -132,9 +213,14 @@ minor bump may change interfaces.
   run is corrected from 1% to 2% (5,400 of 270,000).
 - `docs/design.md` §10.12 and `docs/reproducible-training.md` say the
   content forgeries are rejected with an *unedited* manifest.
+- `docs/nonclaims.md` §12 states that the snapshot digest (unkeyed BLAKE2b)
+  detects corruption, not tampering.
 
 ### Performance note
 
+- The checker evaluates sampling-design ESS declines in sorted order
+  instead of a repeated maximum and list removal, keeping the tie rule; a
+  20,000-draw step drops from about 11 s to under 1 s.
 - An unattested `RolloutBuffer` computes each group's content digests on
   the first sample that touches the group, an attested one on insert; the
   0.5.0 benchmark predates digests in sampled batches, which is why a

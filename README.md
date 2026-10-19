@@ -20,8 +20,12 @@ run the `reservoir-verify` command printed in its summary.
 > with content commitments, the independent checker with its transcript and
 > diff tools, the durable buffer, the TRL integration and the reproducibility
 > demo below are implemented and tested, as is the verl integration for
-> verl's `DataProto` trainer. The Stable-Baselines3 / TorchRL adapters are
-> not yet.
+> verl's `DataProto` trainer, and the TRL adapter's replayed-row hook for
+> a token flight recorder (Martingale, joint CPU run in
+> `docs/staleness.md`). Version 0.7.0: 2,213 tests (2,210 pass and 3 skip
+> with the `trl` extra installed). The staleness sweep harness has a
+> committed CPU smoke; its GPU sweep has not been run. The
+> Stable-Baselines3 / TorchRL adapters are not yet.
 
 Generating rollouts is the most expensive part of GRPO-style training, and the
 standard recipe uses each rollout once and throws it away. Reservoir is a replay
