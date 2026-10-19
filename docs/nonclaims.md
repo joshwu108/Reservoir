@@ -140,6 +140,14 @@ holds the buffer operations of that window; the resumed trainer
 regenerates the window, so the buffer samples it a second time. The chain
 records both samples and verifies; it is not the chain an uninterrupted
 run would have produced. Untested against a real resume.
+The snapshot's `digest` (BLAKE2b over its canonical JSON, unkeyed) detects
+corruption, not tampering: anyone who can write `state.json` can recompute
+it, and a snapshot without the key (written before 0.7.0, or with the key
+deleted) opens with a warning. A deleted snapshot opens fresh only when
+there is no command log, attestation file or compacted history to
+contradict it. An edited snapshot that opens is caught by the checker only
+where the attestation log commits to what was changed, for example when a
+later witness names an edited row.
 
 ### 13. Replay in TRL and Training Quality
 
