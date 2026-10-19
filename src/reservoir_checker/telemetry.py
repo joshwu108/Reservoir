@@ -166,6 +166,8 @@ def verify_telemetry(record: dict, idx: int, content: ContentState, entries: dic
     draws = content._samples_by_op.get(op)
     if draws is None or op != content.last_sample_op:
         raise CheckerError(f"{where}: telemetry names sample {op}, which is not the latest sample record")
+    if op in content.telemetered_samples:
+        raise CheckerError(f"{where}: duplicate telemetry for sample {op}")
     _require_awaited(awaiting, op, where)
     if counts["replaced_rows"] + counts["declined_rows"] != len(draws):
         raise CheckerError(
@@ -177,6 +179,7 @@ def verify_telemetry(record: dict, idx: int, content: ContentState, entries: dic
     _check_against_witness(content, op, idx, step, counts, where)
     ratios, policy, decisions = _check_staleness(record, where, draws, ages, counts, _witness_rows(content, op), reported,
                                                  content)
+    content.telemetered_samples.add(op)
     return TelemetryPoint(idx, step, counts, op, ess, max(ages), Fraction(sum(ages), len(ages)), reported,
                           ratios, policy, decisions)
 

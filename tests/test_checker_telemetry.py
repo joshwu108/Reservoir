@@ -88,6 +88,14 @@ class TestRejects:
         edit(m[idx])
         return rechain(m, idx)
 
+    def test_duplicate_telemetry_for_one_sample_is_rejected(self):
+        records, _ = telemetry_run(steps=1)
+        i = telemetry_indices(records)[0]
+        duplicate = copy.deepcopy(records[i])
+        records.insert(i + 1, duplicate)
+        with pytest.raises(CheckerError, match="duplicate telemetry"):
+            verify_chain(rechain(records, i + 1))
+
     def test_ess_forged(self):
         records, _ = telemetry_run()
         i = telemetry_indices(records)[0]

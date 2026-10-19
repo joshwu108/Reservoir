@@ -302,6 +302,7 @@ class ContentState:
     witness_by_op: dict[int, dict] = field(default_factory=dict)                     # sample op_counter -> witness
     witnessed_rows_by_op: dict[int, list[WitnessedRow]] = field(default_factory=dict)
     last_sample_op: Optional[int] = None    # op_counter of the latest sample record; they must increase
+    telemetered_samples: set[int] = field(default_factory=set)
     # Once a replayed telemetry record carries log_ratios (or a policy), every later one must too, and the
     # policy must not change: a record cannot opt out of the stronger checks (reservoir_checker.telemetry).
     staleness_log_ratios_seen: bool = False
