@@ -70,6 +70,7 @@ from __future__ import annotations
 import json
 import hashlib
 import shutil
+import unicodedata
 import warnings
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence, Union
@@ -376,9 +377,21 @@ class DurableRolloutBuffer:
     @staticmethod
     def _check_tag(tag: str) -> str:
         if (not isinstance(tag, str) or not tag or "/" in tag or "\\" in tag
-                or tag in (".", "..") or tag.endswith((".tmp", ".old"))):
+                or tag in (".", "..") or unicodedata.normalize("NFC", tag).casefold().endswith((".tmp", ".old"))):
             raise ValueError(f"checkpoint tag must be a plain name, got {tag!r}")
         return tag
+
+    @staticmethod
+    def _check_checkpoint_collisions(target: Path) -> None:
+        """Refuse APFS-style aliases of a tag or its staging paths before touching them."""
+        if not target.parent.exists():
+            return
+        names = (target.name, target.name + ".tmp", target.name + ".old")
+        folded = {unicodedata.normalize("NFC", name).casefold(): name for name in names}
+        for existing in target.parent.iterdir():
+            intended = folded.get(unicodedata.normalize("NFC", existing.name).casefold())
+            if intended is not None and existing.name != intended:
+                raise ValueError(f"checkpoint tag {target.name!r} collides with existing {existing.name!r}")
 
     def checkpoint(self, tag: str, binding: Optional[dict] = None) -> Path:
         """Compact, then copy the snapshot to ``checkpoints/<tag>/``; returns that directory.
@@ -398,6 +411,7 @@ class DurableRolloutBuffer:
         target = self.directory / CHECKPOINT_DIR / self._check_tag(tag)
         stage = target.with_name(target.name + ".tmp")
         backup = target.with_name(target.name + ".old")
+        self._check_checkpoint_collisions(target)
         self.compact()
         target.parent.mkdir(parents=True, exist_ok=True)
         self._recover_checkpoint_dir(target)

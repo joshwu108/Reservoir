@@ -455,3 +455,26 @@ class TestCheckpointBinding:
         assert buf.prune_checkpoints({"a"}) == []
         assert stage.exists()
         buf.close()
+
+    def test_checkpoint_rejects_casefolded_stage_and_backup_collisions(self, tmp_path):
+        buf = open_buf(tmp_path)
+        root = tmp_path / "buf" / "checkpoints"
+        root.mkdir(exist_ok=True)
+        for name in ("x.TMP", "x.OLD"):
+            path = root / name
+            path.mkdir()
+            (path / "sentinel").write_text(name)
+        with pytest.raises(ValueError, match="collides"):
+            buf.checkpoint("x")
+        assert all((root / name / "sentinel").read_text() == name for name in ("x.TMP", "x.OLD"))
+        with pytest.raises(ValueError, match="checkpoint tag"):
+            buf.checkpoint("new.TMP")
+        buf.close()
+
+    def test_checkpoint_rejects_unicode_normalized_existing_tag(self, tmp_path):
+        buf = open_buf(tmp_path)
+        buf.checkpoint("caf\u00e9")
+        with pytest.raises(ValueError, match="collides"):
+            buf.checkpoint("cafe\u0301")
+        assert buf.checkpoints() == ["caf\u00e9"]
+        buf.close()
