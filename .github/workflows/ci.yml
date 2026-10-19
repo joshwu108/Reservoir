@@ -55,7 +55,7 @@ jobs:
         run: >-
           uv run --no-sync pytest -q -rs
           tests/test_verl_compat.py tests/test_verl_rows.py tests/test_verl_replay.py
-          tests/test_verl_staleness.py tests/test_verl_results.py
+          tests/test_verl_staleness.py tests/test_verl_results.py tests/test_verl_same_step.py
 
   tla:
     name: TLA+ model check

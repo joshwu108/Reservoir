@@ -96,8 +96,9 @@ minor bump may change interfaces.
   attestation log; surplus on-disk attestation records on reopen are
   reported; a command-log line from a future epoch refuses.
 - Replay no longer draws rows inserted in the same step: a declared
-  minimum age, recorded in the sample record and checked by the checker
- .
+  minimum age (`min_entry_age`, default 1 in both adapters), recorded in
+  the sample record and checked by the checker against every drawn slot's
+  entry version.
 - Dead groups are detected from the per-function rewards rather than
   exact-zero advantages, so float32 residue at group sizes that are not a
   power of two no longer stores an all-equal group as live.
