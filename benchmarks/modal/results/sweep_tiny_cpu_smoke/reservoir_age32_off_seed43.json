@@ -1,25 +1,52 @@
 {
   "provenance": {
     "reservoir_version": "0.7.0",
-    "commit": "1dd19341632cc07eb2d9ab0f5ab668fc77878664",
+    "commit": "890dd2000f5a03b127b4495378a05e1e88774198",
     "changed_files": [
       "CHANGELOG.md",
       "README.md",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/ess_vs_reward.png",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/grpo_filter_seed42.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/grpo_filter_seed43.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/grpo_seed42.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/grpo_seed43.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/report.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age128_on_seed42.attest.jsonl",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age128_on_seed42.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age128_on_seed42.manifest.jsonl",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_off_seed42.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_off_seed43.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_on_seed42.attest.jsonl",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_on_seed42.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_on_seed42.manifest.jsonl",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_on_seed43.attest.jsonl",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_on_seed43.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_on_seed43.manifest.jsonl",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_off_seed42.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_off_seed43.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_on_seed42.attest.jsonl",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_on_seed42.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_on_seed42.manifest.jsonl",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_on_seed43.attest.jsonl",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_on_seed43.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_on_seed43.manifest.jsonl",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_naive_age32_seed42.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_naive_age32_seed43.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/wreinforce_seed42.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/wreinforce_seed43.json",
       "benchmarks/modal/staleness_sweep.py",
-      "benchmarks/staleness/engine_probe.py",
-      "benchmarks/staleness/report.py",
+      "benchmarks/staleness/arms.py",
       "docs/staleness.md",
       "pyproject.toml",
       "src/reservoir/__init__.py",
-      "src/reservoir/rollout_snapshot.py",
       "tests/test_readme_evidence.py",
       "tests/test_staleness_sweep.py",
       "tests/test_staleness_sweep_results.py",
       "uv.lock"
     ],
     "commit_dirty": true,
-    "date": "2026-10-15T06:58:07Z",
-    "python": "3.12.14",
+    "date": "2026-10-18T22:04:23Z",
+    "python": "3.14.2",
     "machine": "Darwin arm64",
     "gpu": null
   },
@@ -65,6 +92,7 @@
     "half_life": 16,
     "beta_is": 0.4,
     "vllm": null,
+    "vllm_seed": null,
     "bf16": false,
     "fp16": false,
     "dtype": "torch.float32"
@@ -74,56 +102,56 @@
     "transformers": "5.10.4",
     "torch": "2.14.0"
   },
-  "wall_clock_seconds": 3.5115880966186523,
+  "wall_clock_seconds": 3.5799190998077393,
   "peak_memory_gb": null,
   "steps": [
     {
       "step": 1,
-      "seconds": 0.24708318710327148
+      "seconds": 0.325833797454834
     },
     {
       "step": 2,
-      "seconds": 0.24047422409057617
+      "seconds": 0.25838804244995117
     },
     {
       "step": 3,
-      "seconds": 0.22806191444396973
+      "seconds": 0.24373698234558105
     },
     {
       "step": 4,
-      "seconds": 0.22777390480041504
+      "seconds": 0.2520411014556885
     },
     {
       "step": 5,
-      "seconds": 0.23298096656799316
+      "seconds": 0.2481517791748047
     },
     {
       "step": 6,
-      "seconds": 0.24198603630065918
+      "seconds": 0.2523829936981201
     },
     {
       "step": 7,
-      "seconds": 0.23923993110656738
+      "seconds": 0.2659487724304199
     },
     {
       "step": 8,
-      "seconds": 0.2356579303741455
+      "seconds": 0.2679102420806885
     },
     {
       "step": 9,
-      "seconds": 0.2352006435394287
+      "seconds": 0.2723712921142578
     },
     {
       "step": 10,
-      "seconds": 0.22896409034729004
+      "seconds": 0.24605226516723633
     },
     {
       "step": 11,
-      "seconds": 0.24384212493896484
+      "seconds": 0.24888205528259277
     },
     {
       "step": 12,
-      "seconds": 0.39910006523132324
+      "seconds": 0.24179363250732422
     }
   ],
   "log_history": [
@@ -165,7 +193,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 0.0,
-      "step_time": 0.2447601250023581,
+      "step_time": 0.32328495901310816,
       "sweep/lm_head_grad_norm": 0.21646273136138916,
       "epoch": 0.03125,
       "step": 1
@@ -208,7 +236,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 8.526512829121202e-12,
-      "step_time": 0.23883608303731307,
+      "step_time": 0.2562985419644974,
       "sweep/lm_head_grad_norm": 0.21646545827388763,
       "epoch": 0.0625,
       "step": 2
@@ -251,7 +279,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 1.8964461945270017e-11,
-      "step_time": 0.2264677079510875,
+      "step_time": 0.24176208401331678,
       "sweep/lm_head_grad_norm": 0.21646185219287872,
       "epoch": 0.09375,
       "step": 3
@@ -294,7 +322,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 2.651389351127076e-11,
-      "step_time": 0.22616437496617436,
+      "step_time": 0.2502331669675186,
       "sweep/lm_head_grad_norm": 0.21646344661712646,
       "epoch": 0.125,
       "step": 4
@@ -337,7 +365,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 3.996795776284312e-11,
-      "step_time": 0.2313149169785902,
+      "step_time": 0.24635600001784042,
       "sweep/lm_head_grad_norm": 0.21646170318126678,
       "epoch": 0.15625,
       "step": 5
@@ -380,7 +408,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 3.195667862276874e-11,
-      "step_time": 0.2403321250458248,
+      "step_time": 0.2506114999996498,
       "sweep/lm_head_grad_norm": 0.21646490693092346,
       "sweep/lm_head_grad_z": 1.2250452262629827,
       "epoch": 0.1875,
@@ -435,7 +463,7 @@
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/clip_fraction/replayed_neg": 0.0,
       "sweep/kl_to_init": 1.5958821070194418e-11,
-      "step_time": 0.23762575001455843,
+      "step_time": 0.2638680830132216,
       "sweep/lm_head_grad_norm": 0.19420698285102844,
       "sweep/lm_head_grad_z": -14238.647406459937,
       "epoch": 0.21875,
@@ -479,7 +507,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 7.057111318931053e-11,
-      "step_time": 0.2340400000102818,
+      "step_time": 0.2660101249930449,
       "sweep/lm_head_grad_norm": 0.21646788716316223,
       "sweep/lm_head_grad_z": 0.37850385665334374,
       "epoch": 0.25,
@@ -523,7 +551,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 4.116182915347988e-11,
-      "step_time": 0.2335601249942556,
+      "step_time": 0.27057470800355077,
       "sweep/lm_head_grad_norm": 0.21646755933761597,
       "sweep/lm_head_grad_z": 0.3540059591575883,
       "epoch": 0.28125,
@@ -567,7 +595,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 2.098951047690978e-11,
-      "step_time": 0.22734591696644202,
+      "step_time": 0.2441619589808397,
       "sweep/lm_head_grad_norm": 0.21646244823932648,
       "sweep/lm_head_grad_z": 0.333064433666728,
       "epoch": 0.3125,
@@ -611,7 +639,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 1.79660609306298e-11,
-      "step_time": 0.24219054100103676,
+      "step_time": 0.24706745898583904,
       "sweep/lm_head_grad_norm": 0.21646273136138916,
       "sweep/lm_head_grad_z": 0.31601603661058353,
       "epoch": 0.34375,
@@ -655,16 +683,16 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 4.3712653288729975e-11,
-      "step_time": 0.3970882910070941,
+      "step_time": 0.23996462498325855,
       "sweep/lm_head_grad_norm": 0.21646182239055634,
       "sweep/lm_head_grad_z": 0.30117603561178014,
       "epoch": 0.375,
       "step": 12
     },
     {
-      "train_runtime": 3.4564,
-      "train_samples_per_second": 27.774,
-      "train_steps_per_second": 3.472,
+      "train_runtime": 3.4668,
+      "train_samples_per_second": 27.691,
+      "train_steps_per_second": 3.461,
       "total_flos": 0.0,
       "train_loss": 0.027164201562603314,
       "epoch": 0.375,
@@ -701,7 +729,7 @@
     "decoding": "greedy",
     "backend": "hf",
     "reward": "even_length_reward",
-    "seconds": 0.031245946884155273
+    "seconds": 0.014739036560058594
   },
   "evals": {
     "gsm8k_test": {
@@ -721,7 +749,7 @@
         0.0,
         0.0
       ],
-      "seconds": 0.031245946884155273
+      "seconds": 0.014739036560058594
     },
     "math500": {
       "step": 12,
@@ -740,7 +768,7 @@
         1.0,
         1.0
       ],
-      "seconds": 0.01791214942932129
+      "seconds": 0.014906883239746094
     },
     "gsm8k_avg_at_k": [
       {
@@ -760,7 +788,7 @@
           1.0,
           0.5
         ],
-        "seconds": 0.15529298782348633
+        "seconds": 0.16688275337219238
       },
       {
         "step": 12,
@@ -779,7 +807,7 @@
           0.5,
           1.0
         ],
-        "seconds": 0.29558300971984863
+        "seconds": 0.17034482955932617
       }
     ]
   },
@@ -803,5 +831,5 @@
       "output": "OK: 118 records verified; 92 examples committed; manifest opens 92 of them"
     }
   },
-  "container_seconds": 6.666017770767212
+  "container_seconds": 6.606032133102417
 }

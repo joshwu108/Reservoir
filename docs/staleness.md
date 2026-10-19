@@ -11,7 +11,7 @@ committed so far. Everything a run claims is in its committed record.
 | Stage | Observed |
 |---|---|
 | Harness and report builder | `tests/test_staleness_sweep.py`, `test_staleness_arms.py`, `test_staleness_controls.py` and `test_staleness_stats.py` run the arm plan, the control trainers' pieces, the per-step diagnostics, the evaluation statistics, the report and its refusals on fabricated inputs |
-| CPU smoke | committed: `benchmarks/modal/results/sweep_tiny_cpu_smoke/` (9 arms, the 8 of the main grid on seeds 42 and 43 and the stress arm on seed 42, 12 steps, 17 runs; all 11 Reservoir logs verify with their manifests, every draw declares `min_entry_age` 1, no replayed row came from its own step, nothing was declined or rescaled, so the `_on` arms trained exactly as the `_off` arms). Tiny Qwen2 test model, HF generation, coin-flip reward, so it shows the harness and the logs work and nothing about training. `tests/test_staleness_sweep_results.py` re-verifies every log and rebuilds the report |
+| CPU smoke | committed: `benchmarks/modal/results/sweep_tiny_cpu_smoke/` (9 arms, the 8 of the main grid on seeds 42 and 43 and the stress arm on seed 42, 12 steps, 17 runs; all 11 Reservoir logs verify with their manifests, every draw declares `min_entry_age` 1, no replayed row came from its own step; the age policy declined at least one row in every `_on` run). Tiny Qwen2 test model, HF generation, coin-flip reward, so it shows the harness and the logs work and nothing about training. `tests/test_staleness_sweep_results.py` re-verifies every log and rebuilds the report |
 | 16-step GPU engine smoke | not yet run |
 | 0.5B sweep (8 arms × 3 seeds + 1 stress run × 300 steps) | not yet run |
 | 1.5B sweep | not yet run; needs an A100-80GB (float32 master weights plus Adam do not fit a 24 GB A10G) |
@@ -48,7 +48,9 @@ learning rate 1e-6, no KL penalty (`beta=0`), TRL's default `dapo` loss
 with group reward scaling, 300 optimizer steps, seeds 42, 43, 44. Every
 arm draws its step-`t` prompts from TRL's seeded sampler, so all arms see
 the same prompt stream (`grpo_filter`'s extra prompts come from a separate
-stream; see below).
+stream; see below). In TRL colocate mode the training vLLM engine uses seed
+0 for these single-process runs, recorded as `config.vllm_seed`; changing
+`--seeds` changes the prompt order and buffer draws, not the engine seed.
 
 **Arms** (`benchmarks/staleness/arms.py`).
 
@@ -69,15 +71,15 @@ inserted at its own step), telemetry on, the run seed as the buffer seed,
 an attestation log and a manifest. "Policy on" is selected by
 `--policy-on`. `staleness` (the default) passes a `StalenessPolicy` with
 the `conservative` preset's sampling-design ESS floor (0.5) and group-mass
-cap (0.25) only: no policy age bound (the age axis stays the buffer's
-`max_policy_age`) and no legacy gate. `gate` is the 0.6.0 drift gate,
+cap (0.25), plus a policy `max_age=4` below every buffer's `max_policy_age`.
+This age rule binds in the CPU smoke while the buffer age remains the arm's
+axis. The legacy gate stays off. `gate` is the 0.6.0 drift gate,
 `max_log_ratio=2.0` with uncapped declines; the TRL adapter now measures
 that log-ratio as a per-token mean, so 2.0 is far looser than when it was
-chosen and the gate rarely fires. On the CPU smoke the sampling-design ESS
-fraction is 0.97 to 1.0 and nothing is declined or rescaled, so at lr 1e-6
-the `_on` arms may train exactly like the `_off` arms; the per-step
-`reservoir/declined_*` and `rescaled_rows` metrics show whether the policy
-ever acted.
+chosen and the gate rarely fires. In the CPU smoke the age rule declined
+1 row in each age-8 run, 3 in each age-32 run, and 7 in the age-128 run;
+the ESS and mass stages did not bind. The per-step `reservoir/declined_*`
+and `rescaled_rows` metrics show how often each stage acts.
 
 **Stale-engine check.** Martingale's first colocate run caught TRL's
 in-process vLLM serving the initial weights for some generation steps

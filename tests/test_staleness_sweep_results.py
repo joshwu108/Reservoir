@@ -24,6 +24,14 @@ REPORTS = sorted(RESULTS.glob("sweep_*/report.json"))
 TOP_REPORT = ROOT / "results" / "staleness_sweep_report.json"
 
 
+def test_cpu_smoke_policy_binds_on_every_on_arm():
+    smoke = RESULTS / "sweep_tiny_cpu_smoke"
+    for path in sorted(smoke.glob("*_on_seed*.json")):
+        record = json.loads(path.read_text())
+        totals = record["totals"]
+        assert totals["declined_rows"] + totals.get("rescaled_rows", 0) > 0, path.name
+
+
 @pytest.mark.parametrize("log", LOGS, ids=[f"{p.parent.name}/{p.name}" for p in LOGS])
 def test_committed_sweep_log_verifies_with_its_manifest(log: Path):
     manifest = log.with_name(log.name.replace(".attest.jsonl", ".manifest.jsonl"))

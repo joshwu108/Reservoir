@@ -375,6 +375,7 @@ def run_arm(
             "half_life": half_life_for_spec(spec) if spec.replay else None,
             "beta_is": replay.beta if replay is not None else None,
             "vllm": {"version": VLLM_VERSION, **vllm_config} if use_vllm else None,
+            "vllm_seed": 0 if use_vllm else None,  # TRL colocate seeds LLM from process_index // tp
             "bf16": args.bf16, "fp16": args.fp16, "dtype": str(next(unwrapped.parameters()).dtype),
         },
         "versions": {"trl": trl.__version__, "transformers": transformers.__version__, "torch": torch.__version__},

@@ -115,7 +115,7 @@ def test_sweep_row_matches_the_committed_cpu_smoke():
     gpu = sorted(p for p in MODAL.glob("sweep_*/report.json") if p.parent != smoke) + sorted(
         RESULTS.glob("staleness_sweep_report.json"))
     assert gpu == [], "a GPU sweep report is committed: update the README row, docs/staleness.md and this test"
-    assert "has not been run" in text and "no training-quality claim" in text
+    assert "has not been run" in text and "This is a mechanism run" in text
 
 
 def _ratio(configs: dict, name: str) -> str:

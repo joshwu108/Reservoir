@@ -35,9 +35,10 @@ stored logprob (it was the sum when this value was chosen), so 2.0 bounds the pe
 
 STALENESS_ESS_FLOOR = 0.5
 STALENESS_MASS_CAP = 0.25
+STALENESS_MAX_AGE = 4
 """The ``_on`` arms under ``--policy-on staleness``: the ``conservative`` preset's sampling-design ESS floor and
-group-mass cap, without its age bound (the sweep's age axis is the buffer's ``max_policy_age``) and without the
-legacy gate. ``tests/test_staleness_sweep.py`` pins both to ``PRESET_RULES["conservative"]``."""
+group-mass cap, plus an age bound below every buffer age so the policy binds in the CPU smoke. The buffer's
+``max_policy_age`` remains the sweep's age axis; the legacy drift gate stays off."""
 
 
 @dataclass(frozen=True)
@@ -99,10 +100,11 @@ def plan_jobs(arms: str, seeds: str, policy_on: str, max_log_ratio: float) -> li
 
 
 def staleness_policy():
-    """The ``StalenessPolicy`` the sweep's ``_on`` arms use: sampling-design ESS floor and mass cap only."""
+    """The ``StalenessPolicy`` the sweep's ``_on`` arms use."""
     from reservoir.integrations._trl_staleness import StalenessPolicy
 
-    return StalenessPolicy(ess_floor=STALENESS_ESS_FLOOR, mass_cap=STALENESS_MASS_CAP)
+    return StalenessPolicy(max_age=STALENESS_MAX_AGE, ess_floor=STALENESS_ESS_FLOOR,
+                           mass_cap=STALENESS_MASS_CAP)
 
 
 def replay_kwargs(spec: ArmSpec) -> dict:
