@@ -38,6 +38,9 @@ def test_committed_sweep_log_verifies_with_its_manifest(log: Path):
     record = json.loads(log.with_name(log.name.replace(".attest.jsonl", ".json")).read_text())
     result = verify_json_lines(log.read_text(), manifest=manifest.read_text())
     records = [json.loads(line) for line in log.read_text().splitlines() if line]
+    if log.parent.name == "sweep_tiny_cpu_smoke":
+        assert records[0]["format"] == "4"
+        assert records[0]["min_entry_age"] == "1"
     assert record["attestation"]["records"] == len(records)
     assert result.content.manifest_matched > 0
     assert record["totals"]["hook_calls"] == record["config"]["max_steps"]

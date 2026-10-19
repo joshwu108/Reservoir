@@ -1,11 +1,10 @@
 {
   "provenance": {
     "reservoir_version": "0.7.0",
-    "commit": "890dd2000f5a03b127b4495378a05e1e88774198",
+    "commit": "069820e004f620f3a752b91fd3a5b1f50f2e1f53",
     "changed_files": [
       "CHANGELOG.md",
       "README.md",
-      "benchmarks/modal/results/sweep_tiny_cpu_smoke/ess_vs_reward.png",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/grpo_filter_seed42.json",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/grpo_filter_seed43.json",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/grpo_seed42.json",
@@ -13,39 +12,35 @@
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/report.json",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age128_on_seed42.attest.jsonl",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age128_on_seed42.json",
-      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age128_on_seed42.manifest.jsonl",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_off_seed42.attest.jsonl",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_off_seed42.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_off_seed43.attest.jsonl",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_off_seed43.json",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_on_seed42.attest.jsonl",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_on_seed42.json",
-      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_on_seed42.manifest.jsonl",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_on_seed43.attest.jsonl",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_on_seed43.json",
-      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_on_seed43.manifest.jsonl",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_off_seed42.attest.jsonl",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_off_seed42.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_off_seed43.attest.jsonl",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_off_seed43.json",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_on_seed42.attest.jsonl",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_on_seed42.json",
-      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_on_seed42.manifest.jsonl",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_on_seed43.attest.jsonl",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_on_seed43.json",
-      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age8_on_seed43.manifest.jsonl",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_naive_age32_seed42.attest.jsonl",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_naive_age32_seed42.json",
+      "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_naive_age32_seed43.attest.jsonl",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_naive_age32_seed43.json",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/wreinforce_seed42.json",
       "benchmarks/modal/results/sweep_tiny_cpu_smoke/wreinforce_seed43.json",
-      "benchmarks/modal/staleness_sweep.py",
-      "benchmarks/staleness/arms.py",
-      "docs/staleness.md",
       "pyproject.toml",
       "src/reservoir/__init__.py",
-      "tests/test_readme_evidence.py",
-      "tests/test_staleness_sweep.py",
       "tests/test_staleness_sweep_results.py",
       "uv.lock"
     ],
     "commit_dirty": true,
-    "date": "2026-10-18T22:04:16Z",
+    "date": "2026-10-19T21:50:34Z",
     "python": "3.14.2",
     "machine": "Darwin arm64",
     "gpu": null
@@ -102,56 +97,56 @@
     "transformers": "5.10.4",
     "torch": "2.14.0"
   },
-  "wall_clock_seconds": 3.458101987838745,
+  "wall_clock_seconds": 3.3031060695648193,
   "peak_memory_gb": null,
   "steps": [
     {
       "step": 1,
-      "seconds": 0.2571408748626709
+      "seconds": 0.2670261859893799
     },
     {
       "step": 2,
-      "seconds": 0.24447107315063477
+      "seconds": 0.23464012145996094
     },
     {
       "step": 3,
-      "seconds": 0.24851703643798828
+      "seconds": 0.23247408866882324
     },
     {
       "step": 4,
-      "seconds": 0.2489299774169922
+      "seconds": 0.23546409606933594
     },
     {
       "step": 5,
-      "seconds": 0.24762320518493652
+      "seconds": 0.22916817665100098
     },
     {
       "step": 6,
-      "seconds": 0.24184083938598633
+      "seconds": 0.22930383682250977
     },
     {
       "step": 7,
-      "seconds": 0.25688910484313965
+      "seconds": 0.24437594413757324
     },
     {
       "step": 8,
-      "seconds": 0.25449609756469727
+      "seconds": 0.2419419288635254
     },
     {
       "step": 9,
-      "seconds": 0.26995110511779785
+      "seconds": 0.25552797317504883
     },
     {
       "step": 10,
-      "seconds": 0.24710893630981445
+      "seconds": 0.23153376579284668
     },
     {
       "step": 11,
-      "seconds": 0.244110107421875
+      "seconds": 0.22985100746154785
     },
     {
       "step": 12,
-      "seconds": 0.24889707565307617
+      "seconds": 0.2333359718322754
     }
   ],
   "log_history": [
@@ -193,7 +188,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 0.0,
-      "step_time": 0.2547114170156419,
+      "step_time": 0.2646691659465432,
       "sweep/lm_head_grad_norm": 0.2164616584777832,
       "epoch": 0.03125,
       "step": 1
@@ -236,7 +231,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 5.737623917645429e-12,
-      "step_time": 0.24269808403914794,
+      "step_time": 0.23296458297409117,
       "sweep/lm_head_grad_norm": 0.21646426618099213,
       "epoch": 0.0625,
       "step": 2
@@ -279,7 +274,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 3.389288849575678e-12,
-      "step_time": 0.24672237498452887,
+      "step_time": 0.23084041697438806,
       "sweep/lm_head_grad_norm": 0.2164650708436966,
       "epoch": 0.09375,
       "step": 3
@@ -322,7 +317,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 9.848129256528892e-12,
-      "step_time": 0.24701387499226257,
+      "step_time": 0.2338506249943748,
       "sweep/lm_head_grad_norm": 0.21646791696548462,
       "epoch": 0.125,
       "step": 4
@@ -365,7 +360,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 1.6466852187368985e-11,
-      "step_time": 0.24589962500613183,
+      "step_time": 0.22756974992807955,
       "sweep/lm_head_grad_norm": 0.216467946767807,
       "epoch": 0.15625,
       "step": 5
@@ -408,7 +403,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 3.6745715845110105e-11,
-      "step_time": 0.24004270898876712,
+      "step_time": 0.22761974995955825,
       "sweep/lm_head_grad_norm": 0.21646691858768463,
       "sweep/lm_head_grad_z": 0.5824323431134909,
       "epoch": 0.1875,
@@ -464,7 +459,7 @@
       "sweep/clip_fraction/replayed_pos": 0.0,
       "sweep/clip_fraction/replayed_neg": 0.0,
       "sweep/kl_to_init": 1.1636523342128946e-10,
-      "step_time": 0.25494195899227634,
+      "step_time": 0.24269558303058147,
       "sweep/lm_head_grad_norm": 0.21713024377822876,
       "sweep/lm_head_grad_z": 270.4109671614968,
       "epoch": 0.21875,
@@ -520,7 +515,7 @@
       "sweep/clip_fraction/replayed_pos": 0.0,
       "sweep/clip_fraction/replayed_neg": 0.0,
       "sweep/kl_to_init": 1.2967415335962684e-11,
-      "step_time": 0.25273954204749316,
+      "step_time": 0.24023308395408094,
       "sweep/lm_head_grad_norm": 0.21689338982105255,
       "sweep/lm_head_grad_z": 1.324846039942394,
       "epoch": 0.25,
@@ -564,7 +559,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 5.978162409547849e-11,
-      "step_time": 0.2680577500141226,
+      "step_time": 0.2538322909967974,
       "sweep/lm_head_grad_norm": 0.21646179258823395,
       "sweep/lm_head_grad_z": -0.5385960270054995,
       "epoch": 0.28125,
@@ -608,7 +603,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 2.8567381099575684e-11,
-      "step_time": 0.24533679097658023,
+      "step_time": 0.22988958295900375,
       "sweep/lm_head_grad_norm": 0.21646487712860107,
       "sweep/lm_head_grad_z": -0.49020913012302336,
       "epoch": 0.3125,
@@ -652,7 +647,7 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 6.094609192319744e-11,
-      "step_time": 0.24208879098296165,
+      "step_time": 0.22820716607384384,
       "sweep/lm_head_grad_norm": 0.21646660566329956,
       "sweep/lm_head_grad_z": -0.45446383502133125,
       "epoch": 0.34375,
@@ -696,16 +691,16 @@
       "sweep/clip_fraction/fresh_pos": 0.0,
       "sweep/clip_fraction/fresh_neg": 0.0,
       "sweep/kl_to_init": 1.1728019770618214e-10,
-      "step_time": 0.2468654999975115,
+      "step_time": 0.23165024991612881,
       "sweep/lm_head_grad_norm": 0.21646444499492645,
       "sweep/lm_head_grad_z": -0.4405271895153575,
       "epoch": 0.375,
       "step": 12
     },
     {
-      "train_runtime": 3.3519,
-      "train_samples_per_second": 28.64,
-      "train_steps_per_second": 3.58,
+      "train_runtime": 3.1851,
+      "train_samples_per_second": 30.141,
+      "train_steps_per_second": 3.768,
       "total_flos": 0.0,
       "train_loss": -0.013120521791279316,
       "epoch": 0.375,
@@ -742,7 +737,7 @@
     "decoding": "greedy",
     "backend": "hf",
     "reward": "even_length_reward",
-    "seconds": 0.014909982681274414
+    "seconds": 0.013643026351928711
   },
   "evals": {
     "gsm8k_test": {
@@ -762,7 +757,7 @@
         0.0,
         0.0
       ],
-      "seconds": 0.014909982681274414
+      "seconds": 0.013643026351928711
     },
     "math500": {
       "step": 12,
@@ -781,7 +776,7 @@
         1.0,
         1.0
       ],
-      "seconds": 0.015107154846191406
+      "seconds": 0.013515949249267578
     },
     "gsm8k_avg_at_k": [
       {
@@ -801,7 +796,7 @@
           1.0,
           0.5
         ],
-        "seconds": 0.16945409774780273
+        "seconds": 0.15942072868347168
       },
       {
         "step": 12,
@@ -820,7 +815,7 @@
           0.5,
           1.0
         ],
-        "seconds": 0.16695094108581543
+        "seconds": 0.1559610366821289
       }
     ]
   },
@@ -837,12 +832,12 @@
   },
   "attestation": {
     "records": 116,
-    "head_digest": "b1cdd271dd1cc9e32f8ccd06b06411919ce432fd9895549acb49271eeec0cd5d",
+    "head_digest": "144bcad0e307b035cee0fdaf3761bda78ba7f1b176ddcc52683bf0076bcdd274",
     "checker": {
       "command": "python -m checker.verify benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_off_seed42.attest.jsonl --manifest benchmarks/modal/results/sweep_tiny_cpu_smoke/reservoir_age32_off_seed42.manifest.jsonl",
       "returncode": 0,
       "output": "OK: 116 records verified; 88 examples committed; manifest opens 88 of them"
     }
   },
-  "container_seconds": 6.434458255767822
+  "container_seconds": 6.377171039581299
 }
