@@ -241,3 +241,16 @@ def test_non_finite_log_ratios_are_declined_not_ignored(bad):
     assert r.last_telemetry.log_ratio_max_abs is None      # nothing finite to report
     verify_chain(r.buffer.attestation_log.records)
     assert choose_declines([float("nan"), 0.1], 1.0, None) == [0]
+
+
+def test_sampling_design_ess_fraction_is_over_sampled_draws_not_kept_rows():
+    # The ESS is over every sampled draw, declined ones included, so its fraction must be over
+    # the draws too; dividing by the kept rows gave fractions above 1 once a policy declined
+    # draws (the 2026-10-19 GPU smoke logged 1.36 and 2.35).
+    from types import SimpleNamespace
+
+    batch = SimpleNamespace(is_weights=(Fraction(1), Fraction(1), Fraction(1), Fraction(1)), model_versions=(1, 1, 1, 1))
+    point = summarize(batch, 3, [0.0] * 4, kept=[0], batch_rows=8, dead_groups=1, near_dead_groups=0, declined=3)
+    metrics = point.metrics()
+    assert metrics[METRIC_PREFIX + "sampling_design_ess"] == pytest.approx(4.0)
+    assert metrics[METRIC_PREFIX + "sampling_design_ess_fraction"] == pytest.approx(1.0)

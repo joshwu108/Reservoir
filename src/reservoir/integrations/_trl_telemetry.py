@@ -5,10 +5,10 @@ What an engineer watching a replayed GRPO run wants to see, every step:
 
 - how much of the batch was replayed (``reservoir/replay_fraction``), how
   many groups were dead or near-dead;
-- the sampling-design effective sample size of the replayed rows
+- the sampling-design effective sample size of the sampled draws
   (``reservoir/sampling_design_ess``, the Kish ESS of the buffer's exact
-  prioritized-sampling weights) and its fraction of the replayed count
-  (``reservoir/sampling_design_ess_fraction``). It describes the sampler's
+  prioritized-sampling weights) and its fraction of the draws, declined
+  ones included (``reservoir/sampling_design_ess_fraction``). It describes the sampler's
   priorities, not policy drift: it is the same at any staleness;
 - how stale the replayed rows are (``reservoir/staleness_mean`` and
   ``_max``, in optimizer steps behind);
@@ -56,6 +56,7 @@ class StepTelemetry:
     dead_groups: int
     near_dead_groups: int
     sampling_design_ess: Optional[float] = None       # Kish ESS of the sampling weights
+    sampled_draws: int = 0                             # draws the ESS is over, declined ones included
     staleness_mean: Optional[float] = None
     staleness_max: Optional[int] = None
     log_ratio_mean_abs: Optional[float] = None
@@ -96,8 +97,8 @@ class StepTelemetry:
             value = getattr(self, name)
             if value is not None:
                 out[name] = float(value)
-        if self.sampling_design_ess is not None and self.replaced_rows:
-            out["sampling_design_ess_fraction"] = self.sampling_design_ess / self.replaced_rows
+        if self.sampling_design_ess is not None and self.sampled_draws:
+            out["sampling_design_ess_fraction"] = self.sampling_design_ess / self.sampled_draws
         if self.decisions:
             for reason, count in self.declined_by_reason().items():
                 out[f"declined_{REASON_METRIC_NAMES[reason]}"] = float(count)
@@ -166,7 +167,7 @@ def summarize(batch: Optional[RolloutBatch], current_version: int, ratios: list[
     return StepTelemetry(
         batch_rows=batch_rows, replaced_rows=len(kept), declined_rows=declined,
         dead_groups=dead_groups, near_dead_groups=near_dead_groups,
-        sampling_design_ess=ess, staleness_mean=sum(ages) / len(ages), staleness_max=max(ages),
+        sampling_design_ess=ess, sampled_draws=len(weights), staleness_mean=sum(ages) / len(ages), staleness_max=max(ages),
         log_ratio_mean_abs=(sum(magnitudes) / len(magnitudes)) if magnitudes else None,
         log_ratio_max_abs=max(magnitudes) if magnitudes else None,
         log_ratios=tuple(ratios), decisions=tuple(decisions), policy=policy if decisions else None,
