@@ -183,10 +183,12 @@ def replay_decisions(
         kept = [k for k in range(n) if reasons[k] is None]
         total = sum((is_weights[k] for k in kept), Fraction(0))
         squares = sum((is_weights[k] * is_weights[k] for k in kept), Fraction(0))
-        while len(kept) > 1 and total * total < floor * len(kept) * squares:
-            victim = max(kept, key=lambda k: (abs(ratios[k]), -k))
+        remaining = len(kept)
+        victims = iter(sorted(kept, key=lambda k: (-abs(ratios[k]), k)))
+        while remaining > 1 and total * total < floor * remaining * squares:
+            victim = next(victims)
             reasons[victim] = "ess"
-            kept.remove(victim)
+            remaining -= 1
             total -= is_weights[victim]
             squares -= is_weights[victim] * is_weights[victim]
             declined += 1

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import math
+import time
 from fractions import Fraction
 
 import pytest
@@ -23,6 +24,19 @@ from reservoir.rollout_buffer import RolloutBuffer
 from reservoir_checker.verify import CheckerError, verify_chain
 
 G = 2  # rows per training group in these runs
+
+
+def test_checker_ess_declines_scale_to_large_sample():
+    from reservoir_checker.staleness import Policy, replay_decisions
+
+    n = 20_000
+    policy = Policy(None, 0.5, None, None, None, None)
+    weights = [Fraction(1, 10**6)] * (n - 1) + [Fraction(1)]
+    started = time.monotonic()
+    decisions = replay_decisions(policy, ratios=[0.0] * n, is_weights=weights,
+                                 ages=[0] * n, rows=list(range(n)), groups=[0] * n)
+    assert time.monotonic() - started < 5.0
+    assert sum(d[3] == "ess" for d in decisions) > n // 2
 
 
 def rechain(records, start=0):
