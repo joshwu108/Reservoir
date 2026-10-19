@@ -5,4 +5,6 @@ package installs and imports without any of them. Available adapters:
 
 - ``reservoir.integrations.trl``: replay for TRL's ``GRPOTrainer``.
 - ``reservoir.integrations.verl``: replay for verl's ``RayPPOTrainer`` under GRPO.
+- ``reservoir.integrations.martingale``: replayed-row provenance for a token
+  flight recorder (Martingale) attached to the TRL adapter; imports neither.
 """

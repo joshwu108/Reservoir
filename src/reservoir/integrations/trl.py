@@ -177,6 +177,7 @@ from reservoir.integrations._replay_common import (  # re-exported: the adapters
     _validated_gate,
     rescore_placed,
 )
+from reservoir.integrations.martingale import ReplayRecorder, register_replayed_rows, resolve_recorder
 from reservoir.integrations._trl_rows import (  # tensor_digest and its keys re-exported
     PER_TOKEN_LOGPROB_KEYS,
     TENSOR_DIGEST_KEYS,
@@ -254,6 +255,14 @@ class ReservoirReplay:
         the batch; while an entry from an earlier generation of the same
         step is live the sample is empty and ``stats["age_floor_skips"]``
         counts it. 0 allows replaying such same-step entries.
+    replay_recorder : object, optional
+        A token flight recorder (Martingale's ``MartingaleRecorder``, or
+        anything with its ``register_replayed`` method) told about every
+        replayed row: its exact batch-normalised importance weight, the
+        staleness policy's exact rescale, its origin and age. The ids it
+        returns go into the batch's ``martingale_row_id`` column. Defaults
+        to ``trainer.flight_recorder`` when the trainer has one; see
+        ``reservoir.integrations.martingale``.
 
     Attributes
     ----------
@@ -294,6 +303,7 @@ class ReservoirReplay:
         max_log_ratio: Optional[float] = None,
         max_declines_per_step: Optional[int] = None,
         min_entry_age: int = 1,
+        replay_recorder: Optional[ReplayRecorder] = None,
         **rollout_buffer_kwargs: Any,
     ) -> None:
         self._buffer_kwargs = dict(
@@ -335,6 +345,7 @@ class ReservoirReplay:
         self.last_telemetry: Optional[StepTelemetry] = None
         self.stats: dict[str, int] = {name: 0 for name in STAT_NAMES}
         self.last_replay: Optional[RolloutBatch] = None
+        self.replay_recorder = replay_recorder
         self._dropout_warned = False
 
     @property
@@ -608,6 +619,10 @@ class ReservoirReplay:
         self.stats["replaced_rows"] += len(kept)
         self.stats["declined_rows"] += len(declined)
         self.stats["rescaled_rows"] += rescaled
+        # After the log is complete for the step: a recorder that raises leaves nothing half-written.
+        recorder = resolve_recorder(self.replay_recorder, trainer)
+        if recorder is not None and kept:
+            new = register_replayed_rows(recorder, trainer, new, batch, rows, kept, decisions, weighted, step)
         return new
 
     def _decide(self, batch: RolloutBatch, ratios: list[float], rows: Sequence[int],

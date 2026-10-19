@@ -273,6 +273,45 @@ log covers the control arms or the `sweep/*` diagnostics, which are
 reported values. See `docs/reproducible-training.md` for what the
 transcript does and does not establish.
 
+## Replayed rows in a token record (Martingale)
+
+`ReservoirReplay(replay_recorder=...)` (or a trainer with a
+`flight_recorder` attribute) tells a token flight recorder about every row
+it replays: after the step's witness, telemetry and evictions are logged,
+`_replay` calls the recorder's `register_replayed` for each kept draw with
+the draw's exact importance weight as `RolloutBatch.is_weights` holds it
+(normalised by the batch maximum), the staleness policy's exact group-mass
+rescale (`Fraction(1)` when the policy is off or did not bind), the draw id
+`"<sample op_counter>/<draw>"`, the content digest, the origin's prompt,
+completion, behaviour step and log-probs, and the buffer age, and writes the
+returned id into the batch's `martingale_row_id` column. Reservoir does not
+import Martingale (`reservoir.integrations.martingale` duck-types the
+recorder; `tests/test_martingale_hook.py` uses a fake). Compose the
+trainers with Reservoir outermost, so the recorder sees the fresh batch
+first: `class Trainer(ReservoirReplayMixin, MartingaleGRPOTrainer)` with an
+`__init__` that sets `replay_buffer`, attaches it and adds
+`ReservoirGRPOTrainer.Callback`, as `benchmarks/martingale_joint.py` does.
+
+Joint CPU acceptance, 2026-10-19, Reservoir 0.7.0 with Martingale `main`
+at 4416046 (`uv run --with <Martingale> python benchmarks/martingale_joint.py
+OUT`): TRL 1.13 GRPO on `tiny-Qwen2ForCausalLM-2.5`, 12 steps, 2
+generations per prompt, a length-parity reward. Two configurations:
+
+| | beta 0.4, mass cap 0.05 | beta 0, mass cap 0 |
+|---|---|---|
+| Reservoir log | format 4, floor 1, 74 records, verifies with its manifest | same |
+| Rows replayed | 18 (15 with an importance weight below 1) | 18 (14 rescaled by the cap) |
+| Martingale replayed sequences | 18, 0 unregistered origins, 18 scored | 18, 0 unregistered, 18 scored, 14 with rescale ≠ 1 |
+| Martingale export | verifies (`verify_export`, anchored on the head) | same |
+| Join on draw id: weight and rescale equal the log's | 18 of 18 | 18 of 18 |
+
+`skipped_rows` and `unmatched_rows` were 0 in both. One model, one seed,
+CPU, HF generation (no vLLM, so the behaviour log-probs both tools hold
+are the same tensor); it shows the wiring, not anything about training.
+Martingale also installs a top-level `checker` package, which shadows
+Reservoir's `checker` compatibility alias in a shared environment; use
+`reservoir-verify` (or `reservoir_checker`) there.
+
 ## What this does not claim
 
 - Nothing about training quality until the GPU sweep has run; the CPU
