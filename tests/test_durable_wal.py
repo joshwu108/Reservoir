@@ -50,6 +50,23 @@ def open_buf(tmp_path: Path, **kw) -> DurableRolloutBuffer:
 
 
 class TestReplay:
+    def test_format4_snapshot_cannot_reopen_without_witnessed_replay(self, tmp_path):
+        buf = open_buf(tmp_path, witnessed_replay=True, min_entry_age=1)
+        assert buf.attestation_log.records[0]["format"] == "4"
+        buf.close()
+
+        with pytest.raises(ValueError, match="format-4.*witnessed_replay"):
+            open_buf(tmp_path, witnessed_replay=False, min_entry_age=1)
+
+        open_buf(tmp_path, witnessed_replay=True, min_entry_age=1).close()
+
+    def test_format3_snapshot_reopened_with_witnessed_replay_warns(self, tmp_path):
+        open_buf(tmp_path, min_entry_age=1).close()
+        with pytest.warns(UserWarning, match="format-3 attestation log"):
+            buf = open_buf(tmp_path, witnessed_replay=True, min_entry_age=1)
+        assert buf.attestation_log.records[0]["format"] == "3"
+        buf.close()
+
     def test_edited_snapshot_state_refused(self, tmp_path):
         buf = open_buf(tmp_path)
         drive(buf, range(1))

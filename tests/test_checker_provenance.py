@@ -114,8 +114,8 @@ class TestQuarantineRecords:
 
     def test_unknown_format_names_the_range(self) -> None:
         records, _ = run()
-        with pytest.raises(CheckerError, match="formats 1 to 3"):
-            verify_chain(edited(records, 0, lambda r: r.update(format="4")))
+        with pytest.raises(CheckerError, match="formats 1 to 4"):
+            verify_chain(edited(records, 0, lambda r: r.update(format="5")))
 
     def test_quarantine_while_stale_evictions_are_pending_is_rejected(self) -> None:
         buf = RolloutBuffer(capacity=8, half_life=1, max_policy_age=1, seed=2, attest=AttestationLog())

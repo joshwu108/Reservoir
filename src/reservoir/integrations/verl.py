@@ -281,6 +281,7 @@ class ReservoirReplay:
             half_life=half_life, max_policy_age=max_policy_age, beta=beta, seed=seed, attest=attest,
             manifest=manifest, min_entry_age=_validated_floor(min_entry_age), **rollout_buffer_kwargs,
         )
+        kwargs["witnessed_replay"] = bool(telemetry)
         self.buffer: Union[RolloutBuffer, DurableRolloutBuffer] = (
             RolloutBuffer(**kwargs) if directory is None else DurableRolloutBuffer(directory, **kwargs)
         )

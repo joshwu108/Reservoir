@@ -203,6 +203,7 @@ class RolloutBuffer:
         attest_overwrite: bool = False,
         manifest: ManifestTarget = None,
         min_entry_age: int = 0,
+        witnessed_replay: bool = False,
     ) -> None:
         self.priority = validate_priority(priority)
         self.alpha = validate_exponent(alpha, "alpha", minimum_exclusive=0.0)
@@ -220,6 +221,7 @@ class RolloutBuffer:
             rebase_slack=rebase_slack,
         )
         self.min_entry_age = validate_min_entry_age(min_entry_age, self._params.max_policy_age)
+        self._witnessed_replay = bool(witnessed_replay)
         self._tree = DecayedPriorityTree(self._params)
         n = self._tree.capacity
         self._rollouts: list[Optional[Rollout]] = [None] * n
@@ -236,6 +238,7 @@ class RolloutBuffer:
             attest, self._params, self.reset_age_on_update, overwrite=attest_overwrite,
             manifest=manifest,
             draw=DrawConfig(seed=self.seed, buffer_id=self.buffer_id, alpha=self.alpha, beta=self.beta),
+            witnessed_replay=self._witnessed_replay, min_entry_age=self.min_entry_age,
         )
 
     # -- read-only state ---------------------------------------------------

@@ -306,6 +306,7 @@ class ReservoirReplay:
             attest=attest,
             manifest=manifest,
             min_entry_age=_validated_floor(min_entry_age),
+            witnessed_replay=bool(telemetry),
             **rollout_buffer_kwargs,
         )
         self._directory = directory

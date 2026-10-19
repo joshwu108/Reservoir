@@ -174,6 +174,16 @@ two-A10G TRL log, 10 of 56 in the verl T4 log) and their sample records
 carry neither `min_entry_age` nor per-draw `entry_version`, so the checker
 has no entry ages to confirm in them.
 
+New adapter logs with telemetry enabled use format 4: the declared floor
+is in `decay_config`, every sample repeats it, and every sample needs a
+batch witness and telemetry, unless the next sample re-runs the same step
+(a crash between sampling and witnessing; the abandoned draws trained
+nothing). Standalone buffer logs and adapters with
+telemetry disabled remain format 3. A producer that rewrites the entire
+chain can still lower the floor in both the configuration and samples;
+the checker proves consistency with the declared rule, while the sweep
+report independently requires floor 1.
+
 ### 14. TRL Integration Scope
 
 The adapter is tested against TRL 1.13.0 only, text-only. It does not

@@ -966,9 +966,17 @@ keep each value's dtype and shape) is a
 commitment the log cannot open; a holder of the batch can. Changing the
 normaliser changes the digest (`tests/test_witness_normaliser.py`). The `format`
 field of `decay_config` is `"2"` for logs that may carry witnesses and
-telemetry and `"3"` for logs that may also carry quarantine evictions
-(§10.10); the checker reads formats 1 to 3 and refuses each record kind in
-a log whose format predates it.
+telemetry, `"3"` for logs that may also carry quarantine evictions
+(§10.10), and `"4"` for adapter logs with telemetry enabled. Format 4
+declares `min_entry_age` in the configuration, requires every sample to
+repeat that floor and carry each draw's `entry_version`, and requires a
+batch witness and telemetry for every sample, except a sample the writer
+abandoned: one followed by another sample at the same buffer version or
+earlier (a resumed trainer re-running the step), or the last sample of a log
+read with `allow_truncated`. Generic buffer logs stay at
+format 3 because standalone sampling does not build a training batch.
+The checker reads formats 1 to 4 and refuses each record kind in a log
+whose format predates it.
 
 ### 10.9 Telemetry and the drift gate
 

@@ -29,7 +29,7 @@ _CONFIG = _LINK | {
 
 RECORD_KEYS: dict[str, tuple[frozenset, frozenset]] = {
     # op: (fields the producer always writes, fields it writes in some logs)
-    "decay_config": (_CONFIG, frozenset({"format", "seed", "buffer_id", "alpha", "beta"})),
+    "decay_config": (_CONFIG, frozenset({"format", "seed", "buffer_id", "alpha", "beta", "min_entry_age"})),
     "insert": (_MUTATION, _MUTATION_OPTIONAL),
     "update": (_MUTATION, _MUTATION_OPTIONAL),
     "evict": (_MUTATION, _MUTATION_OPTIONAL),

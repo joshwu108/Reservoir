@@ -158,6 +158,13 @@ def test_directory_makes_the_buffer_durable(tmp_path):
     r.close()
 
 
+def test_new_telemetry_log_declares_format_four_and_entry_floor():
+    r = replay(attest=AttestationLog())
+    header = r.buffer.attestation_log.records[0]
+    assert (header["format"], header["min_entry_age"]) == ("4", "1")
+    r.close()
+
+
 def test_beta_and_priority_are_forwarded():
     r = replay(beta=0.0, priority=StoredAdvantagePriority(epsilon=0.0))
     assert r.buffer.beta == 0.0

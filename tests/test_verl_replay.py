@@ -222,6 +222,13 @@ def test_directory_makes_the_buffer_durable_and_manifest_requires_attest(tmp_pat
         replay(manifest=tmp_path / "m.jsonl")
 
 
+def test_new_telemetry_log_declares_format_four_and_entry_floor():
+    r = replay(attest=AttestationLog())
+    header = r.buffer.attestation_log.records[0]
+    assert (header["format"], header["min_entry_age"]) == ("4", "1")
+    r.close()
+
+
 def test_gate_threshold_is_validated():
     with pytest.raises(ValueError, match="max_log_ratio"):
         replay(max_log_ratio=-1.0)

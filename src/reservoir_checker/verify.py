@@ -233,6 +233,7 @@ def verify_chain(
     priorities: dict[int, int] = {}
 
     prev_digest = _GENESIS
+    sample_versions: list[tuple[int, int]] = []   # (op_counter, buffer version) of each sample, format 4
     for record_idx, record in enumerate(records):
         prev_digest = _verify_link(record, record_idx, prev_digest)
         try:
@@ -241,14 +242,38 @@ def verify_chain(
             raise
         except Exception as exc:  # a malformed field the per-record checks did not anticipate
             raise CheckerError(f"Record {record_idx}: malformed record ({type(exc).__name__}: {exc})") from exc
+        if decay is not None and decay.cfg["format"] == "4" and record.get("op") == "sample":
+            sample_versions.append((content.last_sample_op, decay.current_version))
 
     if decay is not None:
         decay.close_capacity_run(len(records))
         if not allow_truncated:
             decay.require_no_pending(len(records), "end of log")
+        _require_format4_witnesses(sample_versions, content, allow_truncated)
     if manifest is not None:
         content.check_manifest(manifest)
     return VerifiedLog(records, capacity, content)
+
+
+def _require_format4_witnesses(sample_versions: list[tuple[int, int]], content: ContentState,
+                               allow_truncated: bool) -> None:
+    """Every format-4 sample has a batch witness and telemetry, unless it was abandoned.
+
+    A sample is abandoned when the writer died before witnessing it and the
+    resumed trainer sampled the same step again: the next sample record is
+    at the same buffer version or earlier. The last sample may lack them
+    only in a log read with ``allow_truncated``.
+    """
+    for i, (op, version) in enumerate(sample_versions):
+        if op in content.witness_by_op and op in content.telemetered_samples:
+            continue
+        if i + 1 < len(sample_versions):
+            if sample_versions[i + 1][1] <= version:
+                continue
+        elif allow_truncated:
+            continue
+        missing = "a batch witness" if op not in content.witness_by_op else "telemetry"
+        raise CheckerError(f"format-4 sample {op} at version {version} requires {missing}")
 
 
 def _strict_int_value(obj: object, name: str, idx: int) -> int:
@@ -367,6 +392,8 @@ def _verify_sample_record(record: dict, idx: int, tree: _SumTree, priorities: di
     _verify_sample(record, idx, tree, priorities)
     if decay is not None:
         _verify_declared_draws(record, idx, tree, decay)
+        if decay.cfg["format"] == "4" and record.get("min_entry_age") != str(decay.cfg["min_entry_age"]):
+            raise CheckerError(f"Record {idx}: min_entry_age differs from the format-4 decay_config")
         verify_entry_ages(record, idx, decay)
     elif has_entry_age_fields(record):
         raise CheckerError(f"Record {idx}: min_entry_age and entry_version need a log with decay fields")

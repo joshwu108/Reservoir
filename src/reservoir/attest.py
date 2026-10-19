@@ -264,6 +264,8 @@ class AttestationLog:
         buffer_id: Optional[int] = None,
         alpha: Optional[float] = None,
         beta: Optional[float] = None,
+        log_format: str = LOG_FORMAT,
+        min_entry_age: Optional[int] = None,
     ) -> dict:
         """Append the decay configuration. Must be the very first record.
 
@@ -281,7 +283,7 @@ class AttestationLog:
             )
         record = {
             "op": "decay_config",
-            "format": LOG_FORMAT,
+            "format": log_format,
             "half_life": str(_require_int(half_life, "half_life", 1)),
             "max_policy_age": str(_require_int(max_policy_age, "max_policy_age", 0)),
             "capacity": str(_require_int(capacity, "capacity", 1)),
@@ -292,6 +294,12 @@ class AttestationLog:
             "reset_age_on_update": reset_age_on_update,
             "prev_digest": self._head_digest,
         }
+        if log_format not in ("3", "4"):
+            raise ValueError(f"unsupported log format {log_format!r}")
+        if log_format == "4":
+            if min_entry_age not in (0, 1):
+                raise ValueError("format-4 logs require min_entry_age 0 or 1")
+            record["min_entry_age"] = str(min_entry_age)
         record.update(_draw_fields(seed, buffer_id, alpha, beta))
         return self._commit(record)
 

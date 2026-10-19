@@ -213,9 +213,16 @@ def parse_config(record: dict, idx: int) -> dict:
         raise CheckerError(f"Record {idx}: reset_age_on_update must be a bool, got {reset!r}")
     cfg["reset_age_on_update"] = reset
     fmt = record.get("format", "1")
-    if fmt not in ("1", "2", "3"):
-        raise CheckerError(f"Record {idx}: unknown log format {fmt!r}; this checker reads formats 1 to 3")
+    if fmt not in ("1", "2", "3", "4"):
+        raise CheckerError(f"Record {idx}: unknown log format {fmt!r}; this checker reads formats 1 to 4")
     cfg["format"] = fmt
+    if fmt == "4":
+        floor = record.get("min_entry_age")
+        if floor not in ("0", "1"):
+            raise CheckerError(f"Record {idx}: format-4 decay_config needs min_entry_age 0 or 1")
+        cfg["min_entry_age"] = int(floor)
+    elif "min_entry_age" in record:
+        raise CheckerError(f"Record {idx}: min_entry_age in decay_config needs format 4")
     cfg.update(_parse_draw_fields(record, idx))
 
     h, age, slack = cfg["half_life"], cfg["max_policy_age"], cfg["rebase_slack"]

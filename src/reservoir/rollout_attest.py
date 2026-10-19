@@ -130,6 +130,8 @@ class RolloutAttester:
         overwrite: bool = False,
         manifest: ManifestTarget = None,
         draw: Optional[DrawConfig] = None,
+        witnessed_replay: bool = False,
+        min_entry_age: int = 0,
     ) -> None:
         self._log: Optional[AttestationLog] = None
         self._file: Optional[IO[str]] = None
@@ -158,6 +160,8 @@ class RolloutAttester:
                 table_frac_bits=params.table_frac_bits,
                 rebase_slack=params.rebase_slack,
                 reset_age_on_update=reset_age_on_update,
+                log_format="4" if witnessed_replay else LOG_FORMAT,
+                min_entry_age=min_entry_age if witnessed_replay else None,
                 **(draw._asdict() if draw is not None else {}),
             ))
         except BaseException:

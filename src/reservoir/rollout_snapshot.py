@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import warnings
 
 import heapq
 from typing import Optional
@@ -292,6 +293,12 @@ def _validate_logs(buf, state: dict) -> tuple[list, list]:
     records = state.get("attestation")
     if records is not None and not isinstance(records, list):
         raise ValueError("snapshot attestation must be a list of records or null")
+    header_format = records[0].get("format") if records and isinstance(records[0], dict) else None
+    if header_format == "4" and not buf._witnessed_replay:
+        raise ValueError("format-4 attestation requires witnessed_replay on reopen")
+    if header_format is not None and header_format != "4" and buf._witnessed_replay:
+        warnings.warn(f"reopening a format-{header_format} attestation log: it stays at that format, so its "
+                      "samples do not require batch witnesses or telemetry", stacklevel=3)
     manifest = state.get("manifest")
     if manifest is not None and not isinstance(manifest, list):
         raise ValueError("snapshot manifest must be a list of records or null")

@@ -96,6 +96,63 @@ class TestRejects:
         with pytest.raises(CheckerError, match="duplicate telemetry"):
             verify_chain(rechain(records, i + 1))
 
+    def test_format_four_requires_witness_and_declared_floor(self):
+        records, _ = telemetry_run(steps=1)
+        records[0]["format"] = "4"
+        records[0]["min_entry_age"] = "0"
+        assert verify_chain(rechain(records)).content.telemetry
+        without_witness = [r for r in records if r["op"] != "batch"]
+        with pytest.raises(CheckerError, match="batch witness"):
+            verify_chain(rechain(without_witness))
+        without_telemetry = [r for r in records if r["op"] != "telemetry"]
+        with pytest.raises(CheckerError, match="requires telemetry"):
+            verify_chain(rechain(without_telemetry))
+        lowered = copy.deepcopy(records)
+        for rec in lowered:
+            if rec["op"] == "sample":
+                rec["min_entry_age"] = "1"
+        with pytest.raises(CheckerError, match="min_entry_age differs"):
+            verify_chain(rechain(lowered))
+        stripped = copy.deepcopy(records)
+        stripped[0].pop("min_entry_age")
+        for rec in stripped:
+            if rec["op"] == "sample":
+                rec.pop("min_entry_age", None)
+                for draw in rec["samples"]:
+                    draw.pop("entry_version", None)
+        with pytest.raises(CheckerError, match="min_entry_age"):
+            verify_chain(rechain(stripped))
+
+    def test_format_four_accepts_an_abandoned_sample_only_when_its_step_is_resampled(self):
+        def run(resample_version):
+            buf = RolloutBuffer(capacity=8, half_life=2, max_policy_age=6, seed=2, attest=AttestationLog(),
+                                witnessed_replay=True, min_entry_age=1)
+            buf.add_group("g0", 0, rollouts([1.0, 0.0, 0.5]), source="s")
+            buf.advance(1)
+            buf.sample(2, current_version=1)        # the writer dies before witnessing this sample
+            if resample_version > 1:
+                buf.advance(resample_version)
+            batch = buf.sample(2, current_version=resample_version)
+            buf.witness_batch(batch, step=resample_version, batch_rows=8, rows=[6, 7], tensor_digest="ab" * 32)
+            buf.record_telemetry(resample_version, dict(COUNTS, replaced_rows=2), batch, {})
+            return [dict(r) for r in buf.attestation_log.records]
+
+        assert verify_chain(run(1)).content.telemetry
+        with pytest.raises(CheckerError, match="at version 1 requires a batch witness"):
+            verify_chain(run(2))
+
+    def test_format_four_prefix_ending_in_a_sample_verifies_only_as_truncated(self):
+        buf = RolloutBuffer(capacity=8, half_life=2, max_policy_age=6, seed=2, attest=AttestationLog(),
+                            witnessed_replay=True, min_entry_age=1)
+        buf.add_group("g0", 0, rollouts([1.0, 0.0, 0.5]), source="s")
+        buf.advance(1)
+        buf.sample(2, current_version=1)
+        records = [dict(r) for r in buf.attestation_log.records]
+        assert records[0]["format"] == "4"
+        with pytest.raises(CheckerError, match="requires a batch witness"):
+            verify_chain(records)
+        verify_chain(records, allow_truncated=True)
+
     def test_ess_forged(self):
         records, _ = telemetry_run()
         i = telemetry_indices(records)[0]
