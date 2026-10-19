@@ -15,6 +15,7 @@ their own checkers, and that the two records join draw by draw.
 """
 import argparse
 import json
+import sys
 from fractions import Fraction
 from pathlib import Path
 
@@ -29,6 +30,11 @@ from reservoir.integrations._trl_staleness import StalenessPolicy
 from reservoir.integrations.trl import ReservoirReplay, ReservoirReplayMixin
 from reservoir.integrations.trl import build_trainer_class as reservoir_trainer_class
 from reservoir_checker.verify import verify_json_lines
+
+# Appended, not prepended: the repo root holds Reservoir's ``checker`` alias, which must not shadow
+# Martingale's ``checker`` package imported above.
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+from benchmarks.provenance import stamped  # noqa: E402
 
 MODEL = "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"
 STEPS = 12
@@ -106,6 +112,7 @@ def main(out: Path, mass_cap: float = 0.05, beta: float = 0.4) -> dict:
                        "skipped_rows": flight.stats.get("skipped_rows"), "unmatched_rows": flight.stats.get("unmatched_rows")},
         "join": {"joined": joined, "mismatched": mismatched},
     }
+    result = stamped(result)
     (out / "result.json").write_text(json.dumps(result, indent=2, default=str) + "\n")
     return result
 
