@@ -93,6 +93,7 @@ DEFAULT_COMPACT_EVERY = 256
 BINDING_FILE = "binding.json"
 """Optional caller data beside a checkpoint's state (see ``DurableRolloutBuffer.checkpoint``)."""
 CHECKPOINT_DIR = "checkpoints"
+INITIALIZED_FILE = "initialized"
 _SNAPSHOT_PERSON = b"rollout-snap\x00\x00\x00\x00"
 
 
@@ -186,15 +187,16 @@ class DurableRolloutBuffer:
         except CorruptStateError as exc:
             raise ValueError(f"saved state in {self.directory} is corrupt: {exc}") from exc
         if snapshot is None:
-            if self._wal.size_bytes() or (self._attest is not None and self._attest.exists()
+            if (self.directory / INITIALIZED_FILE).exists() or self._wal.size_bytes() or (self._attest is not None and self._attest.exists()
                                           and self._attest.stat().st_size):
-                raise ValueError(f"missing snapshot in {self.directory} with non-empty WAL or attestation file")
+                raise ValueError(f"missing snapshot in {self.directory} with initialization marker, non-empty WAL or attestation file")
             buf = self._new_buffer()
             self._snapshot_seq = self._seq = 0
             # Persist the empty state (and the decay_config record) so the
             # log and state agree even if the process dies before the first
             # operation.
             durably_snapshot(self.directory, "open", self._snapshot_of(buf, 0))
+            self._mark_initialized()
             return buf
         state, self._snapshot_seq, self._epoch = self._unwrap(snapshot)
         probe = self._validate_state(state)
@@ -204,7 +206,19 @@ class DurableRolloutBuffer:
         self._warn_surplus_attestation(probe)
         buf = self._buffer_from_state(state)
         self._seq = self._replay_log(buf)
+        self._mark_initialized()
         return buf
+
+    def _mark_initialized(self) -> None:
+        """Leave durable evidence of an opened directory even when its WAL is empty."""
+        marker = self.directory / INITIALIZED_FILE
+        if marker.exists():
+            return
+        with marker.open("x", encoding="ascii") as out:
+            out.write("1\n")
+            out.flush()
+            _full_fsync(out.fileno())
+        _fsync_directory(self.directory)
 
     def _warn_surplus_attestation(self, probe: RolloutBuffer) -> None:
         if self._attest is None or not self._attest.exists():

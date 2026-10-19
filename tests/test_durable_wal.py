@@ -97,6 +97,17 @@ class TestReplay:
             open_buf(tmp_path)
         assert (tmp_path / "attest.jsonl").read_text() == "evidence\n"
 
+    def test_missing_snapshot_after_compaction_without_attest_refuses_fresh_start(self, tmp_path):
+        directory = tmp_path / "buf"
+        buf = DurableRolloutBuffer(directory, **KW, compact_every=1)
+        buf.add_group("g", 0, rollouts([1.0, 0.0]))
+        buf.compact()
+        buf.close()
+        assert not (directory / WAL_FILE).exists() or (directory / WAL_FILE).stat().st_size == 0
+        (directory / "state.json").unlink()
+        with pytest.raises(ValueError, match="missing snapshot"):
+            DurableRolloutBuffer(directory, **KW, compact_every=1)
+
     def test_deleted_wal_lines_warn_before_attest_rewrite(self, tmp_path):
         buf = open_buf(tmp_path, compact_every=1000)
         drive(buf, range(1))
