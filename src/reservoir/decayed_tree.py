@@ -305,12 +305,13 @@ class DecayedPriorityTree:
             for position, (_, version) in self._entries.items()
             if is_expired(version, current_version, self._params)
         )
+        # evict all old positions within the tree by dividing by 2^d because decay causes the 
+        # entry priority to grow, so older entires will have to be rounded down adn thsu removed
         evicted = tuple(self.evict(position, "stale") for position in expired)
 
+        # rebase in order to keep the numbers small, if priority keeps growing, its size will overflow
         shift = pending_rebase_shift(current_version, self._base_epoch, self._params)
         rebase = self._rebase(shift) if shift > 0 else None
-        # Committed last so a failure above (which would be a library bug,
-        # not a user error) does not leave the version ahead of the tree.
         self._current_version = current_version
         return AdvanceResult(
             old_version=old_version,
