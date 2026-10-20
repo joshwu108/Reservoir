@@ -221,24 +221,30 @@ caffeinate -i modal run benchmarks/modal/staleness_sweep.py --max-steps 16 --see
     --arms grpo,grpo_filter,reservoir_age8_on,reservoir_age128_on --eval-every 8 \
     --out benchmarks/modal/results/sweep_0.5b_16steps_smoke
 
-# the 0.5B sweep: 25 containers in parallel
-caffeinate -i modal run benchmarks/modal/staleness_sweep.py
+# the 0.5B sweep: 25 containers in parallel; --detach keeps it running if the laptop
+# sleeps or the connection drops
+modal run --detach benchmarks/modal/staleness_sweep.py
+
+# if the client stopped before the end: write the runs and the report from the results volume
+python benchmarks/modal/staleness_sweep.py --collect <tag modal run printed> \
+    --out-dir benchmarks/modal/results/sweep_0.5b_300steps
 
 # rebuild the report and the figure from a results directory (run from the repo root)
 python benchmarks/modal/staleness_sweep.py --report-only benchmarks/modal/results/sweep_0.5b_300steps \
     --report-path results/staleness_sweep_report.json --figure-path results/staleness_sweep_ess_vs_reward.png
 ```
 
-The estimate uses `--seconds-per-step` (prior 13 s on an A10G: 12 s before
-the KL reference forward; `grpo_filter` at 1.35×), 300 s of container
-overhead per run, and `--seconds-per-eval-completion` (prior 0.02 s
-through vLLM) times the completions one run's evaluations generate
-(6 × 1,319 × 8 avg@8 + 1,319 + 500 = 65,131 at the defaults). At the
-priors the 25 runs are 39.4 GPU-hours, about $43 (94 minutes per run on
-average, of which about 22 are evaluation); the 16-step smoke above is
-about $1.20, most of it its two full-size avg@8 evaluations. Replace both priors
-with the 16-step smoke's measurements (its records carry per-step seconds,
-peak memory and each evaluation's seconds). `--periodic-eval-size N`
+The estimate uses `--seconds-per-step` (prior 7.5 s on an A10G, measured by
+the 2026-10-20 smoke of all nine arms at 512 tokens: median 6.1 s in `grpo`
+and `wreinforce`, 7.1-7.7 s in the Reservoir arms, 7.9 s in `grpo_filter`,
+which the estimate takes at 1.35×), 300 s of container overhead per run, and
+`--seconds-per-eval-completion` (prior 0.05 s, measured by the same smoke)
+times the completions one run's evaluations generate (6 × 1,319 × 8 avg@8 +
+1,319 + 500 = 65,131 at the defaults). At the priors the 25 runs are 41.0
+GPU-hours, about $45 (98 minutes per run on average, of which about 54 are
+evaluation), well inside the 4-hour function timeout. The smoke itself was
+9 runs, 3.0 GPU-hours, $3.31 (peak memory 20.6-20.7 GB in every arm).
+`--periodic-eval-size N`
 evaluates avg@8 on the first N shuffled test items instead of all 1,319
 and is the cheapest lever on cost. The 1.5B model (`--model 1.5b`) runs on
 an A100-80GB at $2.50/h; expect roughly three times the per-step time.
@@ -249,9 +255,12 @@ weights, gradients and Adam state, 2 GB for the frozen float32 reference copy, a
 the logits of a micro-batch × its tokens × 152k vocabulary. The 16-step
 smoke at micro-batch 8 × 256 tokens peaked at 20.7 GB; the sweep runs
 micro-batch 4 × 512 tokens (8 accumulation steps), which keeps the logits
-at the same size, and needs a smoke at that shape before the full run. Keep the laptop awake for the whole
-`modal run` (`caffeinate -i`): the records are written locally as the runs
-return.
+at the same size, and needs a smoke at that shape before the full run. Every run saves its record
+(or its traceback) to the Modal volume `reservoir-sweep-results` under the tag `modal run` prints,
+before it returns, and the client also writes the records locally as the runs return. If the
+client stops early, `--collect <tag>` writes every saved run, names the failed and missing ones,
+and builds the report once none are. A failed job is re-run into the same folder with
+`modal run ... --arms <arm> --seeds <seed> --tag <tag>`.
 
 **Before the sweep, from the 16-step smoke:** the probe is `available` with
 no skipped steps and no failure, its per-step mean absolute engine-vs-trainer

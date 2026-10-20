@@ -15,8 +15,8 @@ Setup
   on an A100-80GB.
 - GSM8K train split, conversational prompts, one exact-match reward
   (``benchmarks/staleness/gsm8k.py``).
-- 8 generations per prompt, 4 prompts per optimizer step (micro-batch 8,
-  4 accumulation steps), 300 steps, 3 seeds.
+- 8 generations per prompt, 4 prompts per optimizer step (micro-batch 4,
+  8 accumulation steps), up to 512 completion tokens, 300 steps, 3 seeds.
 
 Arms (``benchmarks/staleness/arms.py``)::
 
@@ -53,8 +53,10 @@ Usage
     # 16-step engine smoke on the GPU before the sweep proper
     modal run benchmarks/modal/staleness_sweep.py --max-steps 16 --seeds 42 \
         --arms grpo,grpo_filter,reservoir_age8_on,reservoir_age128_on --eval-every 8
-    # the sweep
-    modal run benchmarks/modal/staleness_sweep.py
+    # the sweep; --detach keeps it running if this client stops (every run saves its
+    # record to the results volume), then write the runs and the report from the volume
+    modal run --detach benchmarks/modal/staleness_sweep.py
+    python benchmarks/modal/staleness_sweep.py --collect <tag it printed> --out-dir benchmarks/modal/results/sweep_0.5b_300steps
     # rebuild the report and figure from a results directory
     python benchmarks/modal/staleness_sweep.py --report-only benchmarks/modal/results/sweep_0.5b_300steps
 """
@@ -62,14 +64,16 @@ Usage
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import math
 import os
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import modal
 
@@ -128,11 +132,11 @@ MODELS: dict[str, ModelSpec] = {
     "1.5b": ModelSpec("1.5b", "Qwen/Qwen2.5-1.5B-Instruct", "A100-80GB", 2.50),
 }
 DEFAULT_SEEDS = (42, 43, 44)
-# Priors for the dry-run estimate. The 2026-10-19 16-step smoke at 256 completion tokens measured about 3.5 s per
-# step and 0.031 s per eval completion on an A10G; these scale both by about 1.7 for the 512-token budget (mean
-# completion length rises once completions are no longer cut at 256) until a smoke at 512 measures them.
-SECONDS_PER_STEP_PRIOR = 6.0
-SECONDS_PER_EVAL_COMPLETION_PRIOR = 0.053
+# Priors for the dry-run estimate, from the 2026-10-20 16-step smoke of all nine arms at 512 completion tokens
+# (micro-batch 4 x 8) on an A10G: median 6.1 s per step in grpo and wreinforce, 7.1-7.7 s in the Reservoir arms
+# (the probe's extra forward), 7.9 s in grpo_filter; avg@8 at 0.048 s per completion, greedy GSM8K at 0.052 s.
+SECONDS_PER_STEP_PRIOR = 7.5
+SECONDS_PER_EVAL_COMPLETION_PRIOR = 0.05
 CONTAINER_OVERHEAD_SECONDS = 300.0   # image start, model download from the volume, vLLM engine start
 GSM8K_TEST_SIZE = 1319
 MATH500_SIZE = 500
@@ -145,6 +149,13 @@ vllm_image = with_sources(
     .env({"HF_HOME": "/hf_cache"})
 )
 app = modal.App("reservoir-staleness-sweep")
+# Every run saves its record here before returning, so a lost local client (a closed laptop, a dropped
+# connection, ``modal run --detach``) loses nothing: ``--collect <tag>`` writes the runs and the report later.
+RESULTS_VOLUME_NAME = "reservoir-sweep-results"
+RESULTS_MOUNT = Path("/sweep_results")
+results_volume = modal.Volume.from_name(RESULTS_VOLUME_NAME, create_if_missing=True)
+RECORD_SUFFIX = ".record.json"
+ERROR_SUFFIX = ".error.txt"
 
 
 # ---------------------------------------------------------------------------
@@ -407,19 +418,44 @@ def run_arm(
     return record
 
 
-def _remote(job: dict) -> dict:
+def _persist(root: Path, tag: str, name: str, text: str, commit: Callable[[], None]) -> None:
+    """Write ``<root>/<tag>/<name>`` and commit the volume; a failure here is printed, never raised over the run."""
+    try:
+        folder = root / tag
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_text(text)
+        commit()
+    except Exception as exc:
+        print(f"could not save {tag}/{name} to the results volume: {exc!r}")
+
+
+def _remote(job: dict, persist_root: Path = RESULTS_MOUNT,
+            commit: Callable[[], None] = lambda: results_volume.commit()) -> dict:
     sys.path.insert(0, "/reservoir_src")
+    tag = job.pop("tag", None)
     spec = ArmSpec(**job.pop("spec"))
-    return run_arm(spec, work_dir=f"/tmp/sweep_{spec.name}_seed{job['seed']}", **job)
+    label = f"{spec.name}_seed{job['seed']}"
+    try:
+        record = run_arm(spec, work_dir=f"/tmp/sweep_{label}", **job)
+    except Exception:
+        if tag:
+            _persist(persist_root, tag, label + ERROR_SUFFIX, traceback.format_exc(), commit)
+        raise
+    if tag:
+        _persist(persist_root, tag, label + RECORD_SUFFIX, json.dumps(sanitize(record)), commit)
+    return record
 
 
 # single_use_containers: one job per container, so no trainer, colocated vLLM engine or process group outlives its run.
-@app.function(gpu="A10G", image=vllm_image, volumes={"/hf_cache": hf_cache}, timeout=4 * 3600, single_use_containers=True)
+_VOLUMES = {"/hf_cache": hf_cache, str(RESULTS_MOUNT): results_volume}
+
+
+@app.function(gpu="A10G", image=vllm_image, volumes=_VOLUMES, timeout=4 * 3600, single_use_containers=True)
 def run_arm_a10g(job: dict) -> dict:
     return _remote(job)
 
 
-@app.function(gpu="A100-80GB", image=vllm_image, volumes={"/hf_cache": hf_cache}, timeout=4 * 3600, single_use_containers=True)
+@app.function(gpu="A100-80GB", image=vllm_image, volumes=_VOLUMES, timeout=4 * 3600, single_use_containers=True)
 def run_arm_a100(job: dict) -> dict:
     return _remote(job)
 
@@ -471,6 +507,41 @@ def _dump_failed(record: dict, out_dir: Path) -> None:
         (out_dir / f"{label_for(record)}.failed.json").write_text(json.dumps(sanitize(record), indent=2, default=str))
     except Exception as exc:  # the original failure is already reported; say this one too
         print(f"could not dump the failed record of {label_for(record)}: {exc!r}")
+
+
+def collect_records(files: dict[str, bytes], out_dir: Path) -> list[str]:
+    """Write every saved record in ``files`` (one tag's volume folder) to ``out_dir``; return what failed or is missing."""
+    failures: list[str] = []
+    done: set[str] = set()
+    for name in sorted(files):
+        if name.endswith(ERROR_SUFFIX):
+            label = name[: -len(ERROR_SUFFIX)]
+            last = files[name].decode(errors="replace").strip().splitlines()[-1:] or ["(empty traceback)"]
+            failures.append(f"{label}: failed in its container: {last[0]}")
+            done.add(label)
+        elif name.endswith(RECORD_SUFFIX):
+            record = json.loads(files[name])
+            done.add(label_for(record))
+            try:
+                path = write_run(record, out_dir)
+            except Exception as exc:
+                failures.append(f"{label_for(record)}: {exc!r}")
+                _dump_failed(record, out_dir)
+                continue
+            print(f"wrote {path}: {_run_line(record)}")
+    planned = json.loads(files["plan.json"])["jobs"] if "plan.json" in files else []
+    failures += [f"{label}: no record on the volume (still running, or the container was lost)"
+                 for label in planned if label not in done]
+    return failures
+
+
+def collect_from_volume(tag: str, out_dir: Path) -> list[str]:
+    """``collect_records`` over the results volume's ``<tag>/`` folder."""
+    volume = modal.Volume.from_name(RESULTS_VOLUME_NAME)
+    files = {Path(entry.path).name: b"".join(volume.read_file(entry.path)) for entry in volume.listdir(tag)}
+    if not files:
+        raise SystemExit(f"nothing under {tag}/ on the volume {RESULTS_VOLUME_NAME}")
+    return collect_records(files, out_dir)
 
 
 def write_report(run_dir: Path, policy_on: Optional[str] = None, max_log_ratio: Optional[float] = None,
@@ -545,6 +616,7 @@ def main(
     seconds_per_eval_completion: float = SECONDS_PER_EVAL_COMPLETION_PRIOR,
     dry_run: bool = False,
     out: Optional[str] = None,
+    tag: str = "",
 ):
     spec = MODELS[model]
     sizes = {"eval": eval_size, "periodic": periodic_eval_size, "math500": math500_size}
@@ -554,12 +626,23 @@ def main(
                                      seconds_per_eval_completion=seconds_per_eval_completion, out=out)
     if dry_run:
         return
+    if not tag:   # a new sweep; pass an existing --tag to re-run some of its jobs into the same folder
+        tag = f"{out_dir.name}_{time.strftime('%Y%m%d-%H%M%S')}"
+        plan = json.dumps({"jobs": [f"{arm.name}_seed{seed}" for arm, seed in jobs], "out": str(out_dir)})
+        with results_volume.batch_upload(force=True) as batch:
+            batch.put_file(io.BytesIO(plan.encode()), f"/{tag}/plan.json")
+    print(f"each run also saves its record to the volume {RESULTS_VOLUME_NAME} under {tag}/; if this client stops,\n"
+          f"  python benchmarks/modal/staleness_sweep.py --collect {tag} --out-dir {out_dir}")
     payloads = [{"spec": arm.to_dict(), "seed": seed, "max_steps": max_steps, "model_key": model,
                  "eval_size": _size(eval_size), "periodic_eval_size": _size(periodic_eval_size),
-                 "math500_size": _size(math500_size), "eval_every": eval_every, "eval_samples": eval_samples}
+                 "math500_size": _size(math500_size), "eval_every": eval_every, "eval_samples": eval_samples,
+                 "tag": tag}
                 for arm, seed in jobs]
+    # spawn, not map: a spawned call belongs to the (detached) app, so it runs to the end after this client stops,
+    # where a .map's outstanding inputs are cancelled with it (seen on 2026-10-20, a hard-killed client).
+    calls = [REMOTE[spec.gpu].spawn(payload) for payload in payloads]
     failures: list[str] = []
-    for (arm, seed), result in zip(jobs, REMOTE[spec.gpu].map(payloads, return_exceptions=True)):
+    for (arm, seed), result in zip(jobs, _results_in_order(calls)):
         if isinstance(result, Exception):
             failures.append(f"{arm.name} seed {seed}: {result!r}")
             print(f"FAILED {arm.name} seed {seed}: {result!r}")
@@ -578,6 +661,15 @@ def main(
                  figure_path=FIGURE_PATH)
 
 
+def _results_in_order(calls: list) -> Any:
+    """Each spawned call's return value, or the exception it raised, in launch order."""
+    for call in calls:
+        try:
+            yield call.get()
+        except Exception as exc:  # one failed run must not stop the others being written
+            yield exc
+
+
 def _run_line(record: dict) -> str:
     totals = record["totals"] or {}
     acc = (record.get("eval") or {}).get("accuracy")
@@ -593,6 +685,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CPU smoke run, offline report or the GPU plan, without a Modal account")
     parser.add_argument("--local", action="store_true", help="run the arms here on CPU with the tiny model")
     parser.add_argument("--report-only", type=Path, metavar="RUN_DIR", help="rebuild the report and figure from RUN_DIR")
+    parser.add_argument("--collect", metavar="TAG",
+                        help="write a GPU sweep's runs and report from the results volume (the tag modal run printed)")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the GPU sweep's plan and cost estimate at the Modal entrypoint's defaults")
     parser.add_argument("--max-steps", type=int, default=None, help="local: default 3; dry run: default 300")
@@ -614,8 +708,8 @@ if __name__ == "__main__":
                         help="also write the report here (it is always written to <run dir>/report.json)")
     parser.add_argument("--figure-path", type=Path, default=None, help="figure PNG (default: <run dir>/ess_vs_reward.png)")
     cli = parser.parse_args()
-    if sum([cli.local, cli.report_only is not None, cli.dry_run]) != 1:
-        parser.error("exactly one of --local, --report-only or --dry-run is required")
+    if sum([cli.local, cli.report_only is not None, cli.dry_run, cli.collect is not None]) != 1:
+        parser.error("exactly one of --local, --report-only, --dry-run or --collect is required")
     sys.path.insert(0, _repo_src)
     import tempfile
 
@@ -630,6 +724,14 @@ if __name__ == "__main__":
                       eval_every=50 if cli.eval_every is None else cli.eval_every,
                       eval_samples=cli.eval_samples or 8, seconds_per_step=cli.seconds_per_step,
                       seconds_per_eval_completion=cli.seconds_per_eval_completion, out=None)
+        sys.exit(0)
+    if cli.collect is not None:
+        if cli.out_dir is None:
+            parser.error("--collect needs --out-dir")
+        failures = collect_from_volume(cli.collect, cli.out_dir)
+        if failures:
+            sys.exit("some runs failed or are missing; the report was not built:\n  " + "\n  ".join(failures))
+        write_report(cli.out_dir, copies=copies or (REPORT_PATH,), figure_path=cli.figure_path or FIGURE_PATH)
         sys.exit(0)
     if cli.report_only is not None:
         write_report(cli.report_only, policy_on=cli.policy_on, max_log_ratio=cli.max_log_ratio, copies=copies,

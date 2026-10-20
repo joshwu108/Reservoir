@@ -576,3 +576,68 @@ def test_gpu_defaults_leave_room_for_a_full_gsm8k_solution():
     assert (defaults["per_device_train_batch_size"], defaults["gradient_accumulation_steps"]) == (4, 8)
     assert defaults["per_device_train_batch_size"] * defaults["gradient_accumulation_steps"] == 32
     assert defaults["vllm_max_model_length"] >= 512 + 512   # MATH500 prompts plus their 512-token budget
+
+
+# --- results volume (the runs outlive the local client) ----------------------
+
+
+def test_remote_saves_each_record_to_the_volume_before_returning(tmp_path: Path, monkeypatch):
+    from benchmarks.modal import staleness_sweep as sweep
+
+    record = _fake_record("grpo", 42, replay=False)
+    monkeypatch.setattr(sweep, "run_arm", lambda spec, **kw: dict(record))
+    commits = []
+    job = {"spec": arm_specs()[0].to_dict(), "seed": 42, "max_steps": 4, "tag": "sweep_t1"}
+
+    out = sweep._remote(job, persist_root=tmp_path, commit=lambda: commits.append(1))
+
+    saved = json.loads((tmp_path / "sweep_t1" / "grpo_seed42.record.json").read_text())
+    assert out == record and saved == record and commits == [1]
+
+
+def test_remote_saves_the_traceback_of_a_failed_run_and_reraises(tmp_path: Path, monkeypatch):
+    from benchmarks.modal import staleness_sweep as sweep
+
+    def boom(spec, **kw):
+        raise RuntimeError("engine died")
+
+    monkeypatch.setattr(sweep, "run_arm", boom)
+    job = {"spec": arm_specs()[0].to_dict(), "seed": 43, "max_steps": 4, "tag": "sweep_t2"}
+
+    with pytest.raises(RuntimeError, match="engine died"):
+        sweep._remote(job, persist_root=tmp_path, commit=lambda: None)
+    assert "engine died" in (tmp_path / "sweep_t2" / "grpo_seed43.error.txt").read_text()
+
+
+def test_collect_writes_saved_records_and_names_failed_and_missing_runs(tmp_path: Path):
+    from benchmarks.modal import staleness_sweep as sweep
+
+    files = {
+        "plan.json": json.dumps({"jobs": ["grpo_seed42", "grpo_seed43", "grpo_seed44"]}).encode(),
+        "grpo_seed42.record.json": json.dumps(_fake_record("grpo", 42, replay=False)).encode(),
+        "grpo_seed43.error.txt": b"Traceback ... RuntimeError: engine died",
+    }
+
+    failures = sweep.collect_records(files, tmp_path / "out")
+
+    assert (tmp_path / "out" / "grpo_seed42.json").exists()
+    assert any("grpo_seed43" in f and "engine died" in f for f in failures)
+    assert any("grpo_seed44" in f and "no record" in f for f in failures)
+
+
+def test_spawned_results_come_back_in_launch_order_with_failures_in_place():
+    from benchmarks.modal import staleness_sweep as sweep
+
+    class Call:
+        def __init__(self, value):
+            self.value = value
+
+        def get(self):
+            if isinstance(self.value, Exception):
+                raise self.value
+            return self.value
+
+    boom = RuntimeError("container lost")
+    out = list(sweep._results_in_order([Call({"a": 1}), Call(boom), Call({"c": 3})]))
+
+    assert out == [{"a": 1}, boom, {"c": 3}]
