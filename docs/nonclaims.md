@@ -57,9 +57,12 @@ The IS weight computation uses the same float64-once boundary as α-exponentiati
 The declared IS weights are exact Fraction normalizations of float64 evaluations
 of `(N·P(i))^(-β)`. The gap from the true real IS weights is bounded by 1 ULP
 of float64 `pow()`. When a log records `beta`, the checker recomputes the
-weights with its own float64 `pow()`; the two agree on one platform, and on
-a platform whose C library rounds `pow()` differently the checker reports a
-mismatch rather than accept it. The declared value is the producer's.
+weights with its own float64 `pow()` and accepts each of the two powers
+within one ulp of its own, so a log written on Linux (glibc) verifies on
+macOS: on 2026-10-20 a GPU sweep log the macOS checker rejected over a
+one-ulp `pow()` difference verified unchanged under glibc. A weight that
+needs either power two or more ulps away is rejected. The declared value is
+the producer's.
 
 ### 8. TLA+ Model Scope
 

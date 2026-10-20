@@ -229,3 +229,34 @@ class TestDiffWithSeedInConfig:
         result = diff_logs(a, b)
         assert result["class"] == "config" and result["first_difference"] == 0
         assert result["differing_fields"] == ["seed"]
+
+
+class TestWeightAcrossLibms:
+    """A producer on another C library may round each ``pow`` one ulp away from the checker's (Stage 0b, 2026-10-20:
+    a glibc log the macOS checker rejected and a glibc checker accepted). One ulp per power is accepted; more is not."""
+
+    N, LEAF, MIN_LEAF, TOTAL, BETA = 37, 912_337, 104_221, 41_000_003, 0.4
+
+    def _weight(self, step_i: int, step_max: int) -> Fraction:
+        import math
+
+        w_i = (self.N * self.LEAF / self.TOTAL) ** (-self.BETA)
+        w_max = (self.N * self.MIN_LEAF / self.TOTAL) ** (-self.BETA)
+        for _ in range(abs(step_i)):
+            w_i = math.nextafter(w_i, math.inf if step_i > 0 else 0.0)
+        for _ in range(abs(step_max)):
+            w_max = math.nextafter(w_max, math.inf if step_max > 0 else 0.0)
+        return Fraction(w_i) / Fraction(w_max)
+
+    def _matches(self, declared: Fraction) -> bool:
+        from reservoir_checker.verify import _declared_weight_matches
+
+        return _declared_weight_matches(declared, self.N, self.LEAF, self.MIN_LEAF, self.TOTAL, self.BETA, 0, 0)
+
+    @pytest.mark.parametrize("step_i,step_max", [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1)])
+    def test_each_power_within_one_ulp_is_accepted(self, step_i, step_max) -> None:
+        assert self._matches(self._weight(step_i, step_max))
+
+    @pytest.mark.parametrize("step_i,step_max", [(2, 0), (0, -2), (3, 3)])
+    def test_a_power_two_ulps_away_is_rejected(self, step_i, step_max) -> None:
+        assert not self._matches(self._weight(step_i, step_max))

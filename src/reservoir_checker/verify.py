@@ -563,8 +563,9 @@ def _verify_declared_draws(record: dict, idx: int, tree: _SumTree, decay: DecayS
     The weight formula is the library's, evaluated in the same order:
     ``w = (n * p / total) ** -beta`` normalised by the weight of the
     smallest positive leaf, with ``n`` the live count, each power taken
-    in float64 once and the quotient exact. A verifier whose libm rounds
-    ``pow`` differently from the producer's would see a mismatch here;
+    in float64 once and the quotient exact. The producer's C library may
+    round each ``pow`` one ulp away from this one's (a glibc log checked on
+    macOS), so each power is accepted within one ulp of the checker's;
     docs/nonclaims.md §7 declares that boundary.
     """
     samples = record["samples"]
@@ -586,27 +587,47 @@ def _verify_declared_draws(record: dict, idx: int, tree: _SumTree, decay: DecayS
             )
         if min_leaf > 0:
             leaf = tree.get(s["leaf_index"])
-            w = _declared_weight(n, leaf, min_leaf, root_total, beta, idx, k)
             declared = Fraction(_strict_int_value(s, "is_weight_num", idx), _strict_int_value(s, "is_weight_den", idx))
-            if declared != w:
+            if not _declared_weight_matches(declared, n, leaf, min_leaf, root_total, beta, idx, k):
+                w = _declared_weight(n, leaf, min_leaf, root_total, beta, idx, k)
                 raise CheckerError(
                     f"Record {idx}, sample {k}: IS weight {declared} is not the declared formula's value {w}"
+                    " (within one ulp of each power)"
                 )
     decay.draw_counter += len(samples)
 
 
-def _declared_weight(n: int, leaf: int, min_leaf: int, root_total: int, beta: float, idx: int, k: int) -> Fraction:
-    """The library's IS-weight formula; a config whose beta overflows or underflows it is a forgery."""
+def _declared_powers(n: int, leaf: int, min_leaf: int, root_total: int, beta: float, idx: int,
+                     k: int) -> tuple[float, float]:
+    """``(w_i, w_max)`` of the library's IS-weight formula; a config whose beta overflows or underflows it is a forgery."""
     try:
         w_i = (n * leaf / root_total) ** (-beta)
         w_max = (n * min_leaf / root_total) ** (-beta)
         if w_max == 0.0 or w_i != w_i or w_max != w_max or w_i in (float("inf"), float("-inf")):
             raise ArithmeticError("weight not finite or normaliser zero")
-        return Fraction(w_i) / Fraction(w_max)
+        return w_i, w_max
     except (ArithmeticError, ValueError) as exc:
         raise CheckerError(
             f"Record {idx}, sample {k}: the declared beta makes the IS weight unrepresentable ({exc})"
         ) from exc
+
+
+def _declared_weight(n: int, leaf: int, min_leaf: int, root_total: int, beta: float, idx: int, k: int) -> Fraction:
+    """The library's IS-weight formula with this platform's ``pow``."""
+    w_i, w_max = _declared_powers(n, leaf, min_leaf, root_total, beta, idx, k)
+    return Fraction(w_i) / Fraction(w_max)
+
+
+def _one_ulp(x: float) -> tuple[float, float, float]:
+    return x, math.nextafter(x, math.inf), math.nextafter(x, 0.0)
+
+
+def _declared_weight_matches(declared: Fraction, n: int, leaf: int, min_leaf: int, root_total: int, beta: float,
+                             idx: int, k: int) -> bool:
+    """``declared`` is the formula's value with each ``pow`` within one ulp of this platform's (nonclaims §7)."""
+    w_i, w_max = _declared_powers(n, leaf, min_leaf, root_total, beta, idx, k)
+    return any(declared == Fraction(a) / Fraction(b)
+               for a in _one_ulp(w_i) for b in _one_ulp(w_max) if b > 0.0 and math.isfinite(a))
 
 
 def parse_json_lines(data: str) -> list:
