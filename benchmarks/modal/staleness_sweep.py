@@ -128,10 +128,11 @@ MODELS: dict[str, ModelSpec] = {
     "1.5b": ModelSpec("1.5b", "Qwen/Qwen2.5-1.5B-Instruct", "A100-80GB", 2.50),
 }
 DEFAULT_SEEDS = (42, 43, 44)
-# Prior for the dry-run estimate until the 16-step smoke measures it: ~32 completions of up to 256
-# tokens from vLLM plus four fp32 micro-batches and one behavior-logprob forward per step on an A10G.
-SECONDS_PER_STEP_PRIOR = 13.0       # 12 s before the KL-to-init reference forward every arm now runs
-SECONDS_PER_EVAL_COMPLETION_PRIOR = 0.02   # vLLM, ~200 tokens per GSM8K completion at ~10k tokens/s on an A10G
+# Priors for the dry-run estimate. The 2026-10-19 16-step smoke at 256 completion tokens measured about 3.5 s per
+# step and 0.031 s per eval completion on an A10G; these scale both by about 1.7 for the 512-token budget (mean
+# completion length rises once completions are no longer cut at 256) until a smoke at 512 measures them.
+SECONDS_PER_STEP_PRIOR = 6.0
+SECONDS_PER_EVAL_COMPLETION_PRIOR = 0.053
 CONTAINER_OVERHEAD_SECONDS = 300.0   # image start, model download from the volume, vLLM engine start
 GSM8K_TEST_SIZE = 1319
 MATH500_SIZE = 500
@@ -220,10 +221,10 @@ def run_arm(
     eval_every: int = 50,
     eval_samples: int = 8,
     math_max_new_tokens: int = 512,
-    per_device_train_batch_size: int = 8,
-    gradient_accumulation_steps: int = 4,
+    per_device_train_batch_size: int = 4,    # x 8 accumulation steps: 32 completions per optimizer step
+    gradient_accumulation_steps: int = 8,
     num_generations: int = 8,
-    max_completion_length: int = 256,
+    max_completion_length: int = 512,        # at 256, half the GPU smoke's completions were truncated
     learning_rate: float = 1e-6,
     capacity: int = 4096,
     train_size: Optional[int] = None,

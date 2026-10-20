@@ -41,9 +41,11 @@ prompts with a system line asking for step-by-step reasoning and a final
 marker (or, failing a marker, the last number in the completion) equals
 the gold answer, else 0.0 (`benchmarks/staleness/gsm8k.py`).
 
-**Batch.** 8 generations per prompt, micro-batch 8, 4 accumulation steps:
+**Batch.** 8 generations per prompt, micro-batch 4, 8 accumulation steps:
 4 prompts, 32 completions, one generation per optimizer step
-(`num_iterations=1`), up to 256 completion tokens, temperature 1.0,
+(`num_iterations=1`), up to 512 completion tokens (at 256, half the
+16-step GPU smoke's completions were truncated, so the reward mostly
+rewarded finishing sooner), temperature 1.0,
 learning rate 1e-6, no KL penalty (`beta=0`), TRL's default `dapo` loss
 with group reward scaling, 300 optimizer steps, seeds 42, 43, 44. Every
 arm draws its step-`t` prompts from TRL's seeded sampler, so all arms see
@@ -244,10 +246,10 @@ Each job runs in its own container (`single_use_containers`), so no
 trainer or colocated engine outlives its run. On the A10G the budget is
 tight: about 7 GB for vLLM at 0.3 utilisation, 8 GB for the float32
 weights, gradients and Adam state, 2 GB for the frozen float32 reference copy, and
-the logits of 8 rows × 256 tokens × 152k vocabulary; if the 16-step smoke
-shows peak memory near 22 GB, use micro-batch 4 with 8 accumulation steps
-(`run_arm`'s `per_device_train_batch_size` and
-`gradient_accumulation_steps`). Keep the laptop awake for the whole
+the logits of a micro-batch × its tokens × 152k vocabulary. The 16-step
+smoke at micro-batch 8 × 256 tokens peaked at 20.7 GB; the sweep runs
+micro-batch 4 × 512 tokens (8 accumulation steps), which keeps the logits
+at the same size, and needs a smoke at that shape before the full run. Keep the laptop awake for the whole
 `modal run` (`caffeinate -i`): the records are written locally as the runs
 return.
 

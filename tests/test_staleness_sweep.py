@@ -561,3 +561,18 @@ def test_sweep_entrypoint_puts_sources_on_path_before_benchmark_imports(tmp_path
 
     assert str(checkout / "src") in sys.path
     assert str(checkout) in sys.path
+
+
+def test_gpu_defaults_leave_room_for_a_full_gsm8k_solution():
+    # At 256 completion tokens half of the 16-step GPU smoke's completions were truncated (completions/clipped_ratio
+    # 0.50), so the reward mostly taught "finish sooner". 512 tokens, with micro-batch 4 x 8 accumulation steps to
+    # keep the logits' memory at the smoke's 8 x 256 level and 32 completions (4 prompts x 8) per optimizer step.
+    import inspect
+
+    from benchmarks.modal import staleness_sweep
+
+    defaults = {k: v.default for k, v in inspect.signature(staleness_sweep.run_arm).parameters.items()}
+    assert defaults["max_completion_length"] == 512
+    assert (defaults["per_device_train_batch_size"], defaults["gradient_accumulation_steps"]) == (4, 8)
+    assert defaults["per_device_train_batch_size"] * defaults["gradient_accumulation_steps"] == 32
+    assert defaults["vllm_max_model_length"] >= 512 + 512   # MATH500 prompts plus their 512-token budget
