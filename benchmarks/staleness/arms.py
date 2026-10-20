@@ -35,10 +35,12 @@ stored logprob (it was the sum when this value was chosen), so 2.0 bounds the pe
 
 STALENESS_ESS_FLOOR = 0.5
 STALENESS_MASS_CAP = 0.25
-STALENESS_MAX_AGE = 4
+STALENESS_AGE_DIVISOR = 2
 """The ``_on`` arms under ``--policy-on staleness``: the ``conservative`` preset's sampling-design ESS floor and
-group-mass cap, plus an age bound below every buffer age so the policy binds in the CPU smoke. The buffer's
-``max_policy_age`` remains the sweep's age axis; the legacy drift gate stays off."""
+group-mass cap, plus an age bound of half the arm's buffer ``max_policy_age`` (4, 16 and 64). The bound sits below
+the buffer's, so the policy binds at every age (the ESS floor and mass cap did not at lr 1e-6), and it scales with
+it, so the ``_on`` arms stay distinct and ``max_policy_age`` remains the sweep's age axis. One fixed bound made
+every ``_on`` arm an age-4 arm. The legacy drift gate stays off."""
 
 
 @dataclass(frozen=True)
@@ -99,11 +101,11 @@ def plan_jobs(arms: str, seeds: str, policy_on: str, max_log_ratio: float) -> li
     return [(spec, seed) for spec in chosen for seed in (seed_list[:1] if spec.stress else seed_list)]
 
 
-def staleness_policy():
-    """The ``StalenessPolicy`` the sweep's ``_on`` arms use."""
+def staleness_policy(max_policy_age: int):
+    """The ``StalenessPolicy`` an ``_on`` arm with buffer age ``max_policy_age`` uses."""
     from reservoir.integrations._trl_staleness import StalenessPolicy
 
-    return StalenessPolicy(max_age=STALENESS_MAX_AGE, ess_floor=STALENESS_ESS_FLOOR,
+    return StalenessPolicy(max_age=max_policy_age // STALENESS_AGE_DIVISOR, ess_floor=STALENESS_ESS_FLOOR,
                            mass_cap=STALENESS_MASS_CAP)
 
 
@@ -111,14 +113,14 @@ def replay_kwargs(spec: ArmSpec) -> dict:
     """The ``ReservoirReplay`` keyword arguments that turn the arm's policy on.
 
     ``gate`` is the legacy drift gate shipped in 0.6.0; ``staleness`` passes
-    ``staleness_policy()`` as ``staleness_policy``.
+    ``staleness_policy(spec.max_policy_age)`` as ``staleness_policy``.
     """
     if spec.policy == "off":
         return {}
     if spec.policy == "gate":
         return {"max_log_ratio": spec.max_log_ratio, "max_declines_per_step": None}
     if spec.policy == "staleness":
-        return {"staleness_policy": staleness_policy()}
+        return {"staleness_policy": staleness_policy(spec.max_policy_age)}
     raise ValueError(f"unknown policy {spec.policy!r}; expected one of {POLICIES}")
 
 

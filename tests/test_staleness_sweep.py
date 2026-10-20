@@ -81,7 +81,7 @@ def test_replay_kwargs_staleness_passes_a_policy_the_adapter_accepts():
     kwargs = replay_kwargs(ArmSpec("x", True, 8, "staleness", None))
     policy = kwargs["staleness_policy"]
     assert policy.ess_floor == report.STALENESS_ESS_FLOOR and policy.mass_cap == report.STALENESS_MASS_CAP
-    assert policy.max_age == 4 and policy.max_log_ratio is None
+    assert policy.max_age == 4 and policy.max_log_ratio is None   # half the buffer's max_policy_age of 8
     replay = ReservoirReplay(capacity=8, **kwargs)
     assert replay.policy == policy
     replay.close()
@@ -91,11 +91,17 @@ def test_staleness_policy_binds_below_each_buffer_age():
     pytest.importorskip("reservoir.integrations._trl_staleness")
     from reservoir.integrations._trl_staleness import PRESET_RULES
 
-    policy = report.staleness_policy()
     conservative = PRESET_RULES["conservative"]
-    assert (policy.ess_floor, policy.mass_cap) == (conservative["ess_floor"], conservative["mass_cap"])
-    assert (policy.max_age, policy.max_log_ratio) == (4, None)
-    assert all(policy.max_age < spec.max_policy_age for spec in report.arm_specs() if spec.name.endswith("_on"))
+    on_arms = [spec for spec in report.arm_specs() if spec.name.endswith("_on")]
+    bounds = {}
+    for spec in on_arms:
+        policy = report.staleness_policy(spec.max_policy_age)
+        assert (policy.ess_floor, policy.mass_cap) == (conservative["ess_floor"], conservative["mass_cap"])
+        assert policy.max_log_ratio is None
+        # The bound binds (it is below the buffer's age) but scales with it, so the _on arms stay distinct.
+        assert 0 < policy.max_age < spec.max_policy_age
+        bounds[spec.name] = policy.max_age
+    assert bounds == {"reservoir_age8_on": 4, "reservoir_age32_on": 16, "reservoir_age128_on": 64}
 
 
 def test_half_life_follows_the_age_bound():

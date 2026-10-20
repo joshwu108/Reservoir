@@ -71,14 +71,19 @@ inserted at its own step), telemetry on, the run seed as the buffer seed,
 an attestation log and a manifest. "Policy on" is selected by
 `--policy-on`. `staleness` (the default) passes a `StalenessPolicy` with
 the `conservative` preset's sampling-design ESS floor (0.5) and group-mass
-cap (0.25), plus a policy `max_age=4` below every buffer's `max_policy_age`.
-This age rule binds in the CPU smoke while the buffer age remains the arm's
-axis. The legacy gate stays off. `gate` is the 0.6.0 drift gate,
+cap (0.25), plus a policy `max_age` of half the arm's buffer
+`max_policy_age` (4, 16 and 64). Below the buffer's bound, the age rule
+binds at every age; scaled with it, the `_on` arms stay distinct, so the
+buffer age remains the arm's axis. (A single bound of 4 would have made
+every `_on` arm an age-4 arm.) The legacy gate stays off. `gate` is the 0.6.0 drift gate,
 `max_log_ratio=2.0` with uncapped declines; the TRL adapter now measures
 that log-ratio as a per-token mean, so 2.0 is far looser than when it was
-chosen and the gate rarely fires. In the CPU smoke the age rule declined
-1 row in each age-8 run, 3 in each age-32 run, and 7 in the age-128 run;
-the ESS and mass stages did not bind. The per-step `reservoir/declined_*`
+chosen and the gate rarely fires. The committed CPU smoke predates the
+scaled bound: with `max_age=4` everywhere, the age rule declined
+1 row in each age-8 run, 3 in each age-32 run, and 7 in the age-128 run.
+In the 16-step GPU smoke (2026-10-19, also `max_age=4`) it declined 41
+and 59 draws on the age-8 and age-128 arms, all for age, and nothing was
+rescaled: the ESS and mass stages did not bind. The per-step `reservoir/declined_*`
 and `rescaled_rows` metrics show how often each stage acts.
 
 **Stale-engine check.** Martingale's first colocate run caught TRL's
