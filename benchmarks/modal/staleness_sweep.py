@@ -142,11 +142,15 @@ GSM8K_TEST_SIZE = 1319
 MATH500_SIZE = 500
 EVAL_SEED = 0                        # the held-out subset is the same for every seed and arm
 
+# The 300-step sweep of 2026-10-20 lost reservoir_age{8,32}_off seed 43 to an OOM in the backward pass with 2.6 GB
+# reserved but unallocated: fragmentation, not a shortfall. Expandable segments change the allocator, not the math.
+CUDA_ALLOC_CONF = "expandable_segments:True"
+
 vllm_image = with_sources(
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(f"vllm=={VLLM_VERSION}")
     .pip_install("trl==1.13.0", "transformers==5.17.0", "datasets==5.0.1", "accelerate==1.15.0", "numpy==2.2.6")
-    .env({"HF_HOME": "/hf_cache"})
+    .env({"HF_HOME": "/hf_cache", "PYTORCH_CUDA_ALLOC_CONF": CUDA_ALLOC_CONF})
 )
 app = modal.App("reservoir-staleness-sweep")
 # Every run saves its record here before returning, so a lost local client (a closed laptop, a dropped
@@ -513,9 +517,12 @@ def collect_records(files: dict[str, bytes], out_dir: Path) -> list[str]:
     """Write every saved record in ``files`` (one tag's volume folder) to ``out_dir``; return what failed or is missing."""
     failures: list[str] = []
     done: set[str] = set()
+    rerun = {name[: -len(RECORD_SUFFIX)] for name in files if name.endswith(RECORD_SUFFIX)}
     for name in sorted(files):
         if name.endswith(ERROR_SUFFIX):
             label = name[: -len(ERROR_SUFFIX)]
+            if label in rerun:   # a re-run into the same tag (--tag) supersedes the failed attempt
+                continue
             last = files[name].decode(errors="replace").strip().splitlines()[-1:] or ["(empty traceback)"]
             failures.append(f"{label}: failed in its container: {last[0]}")
             done.add(label)

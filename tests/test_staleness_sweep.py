@@ -641,3 +641,22 @@ def test_spawned_results_come_back_in_launch_order_with_failures_in_place():
     out = list(sweep._results_in_order([Call({"a": 1}), Call(boom), Call({"c": 3})]))
 
     assert out == [{"a": 1}, boom, {"c": 3}]
+
+
+def test_collect_takes_a_rerun_record_over_the_earlier_error(tmp_path: Path):
+    from benchmarks.modal import staleness_sweep as sweep
+
+    files = {
+        "plan.json": json.dumps({"jobs": ["grpo_seed43"]}).encode(),
+        "grpo_seed43.error.txt": b"Traceback ... torch.OutOfMemoryError: CUDA out of memory",
+        "grpo_seed43.record.json": json.dumps(_fake_record("grpo", 43, replay=False)).encode(),
+    }
+
+    assert sweep.collect_records(files, tmp_path / "out") == []
+    assert (tmp_path / "out" / "grpo_seed43.json").exists()
+
+
+def test_image_uses_expandable_segments_against_allocator_fragmentation():
+    from benchmarks.modal import staleness_sweep as sweep
+
+    assert sweep.CUDA_ALLOC_CONF == "expandable_segments:True"
