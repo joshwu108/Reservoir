@@ -12,8 +12,8 @@ committed so far. Everything a run claims is in its committed record.
 |---|---|
 | Harness and report builder | `tests/test_staleness_sweep.py`, `test_staleness_arms.py`, `test_staleness_controls.py` and `test_staleness_stats.py` run the arm plan, the control trainers' pieces, the per-step diagnostics, the evaluation statistics, the report and its refusals on fabricated inputs |
 | CPU smoke | committed: `benchmarks/modal/results/sweep_tiny_cpu_smoke/` (9 arms, the 8 of the main grid on seeds 42 and 43 and the stress arm on seed 42, 12 steps, 17 runs; all 11 Reservoir logs verify with their manifests, every draw declares `min_entry_age` 1, no replayed row came from its own step; the age policy declined at least one row in every `_on` run). Tiny Qwen2 test model, HF generation, coin-flip reward, so it shows the harness and the logs work and nothing about training. `tests/test_staleness_sweep_results.py` re-verifies every log and rebuilds the report |
-| 16-step GPU engine smoke | not yet run |
-| 0.5B sweep (8 arms × 3 seeds + 1 stress run × 300 steps) | not yet run |
+| 16-step GPU engine smokes | 2026-10-19 at 256 tokens (4 arms) and 2026-10-20 at 512 tokens (all 9 arms, $3.31): peak memory 20.6-20.7 GB, no stale-engine step, every evaluation finished |
+| 0.5B sweep (8 arms × 3 seeds + 1 stress run × 300 steps) | 2026-10-20: 25 runs, 0 suspect, the 16 Reservoir logs verify, $39.38 at list price. The five seed-43 Reservoir runs first failed with a CUDA out-of-memory error in the backward pass (2.6 GB reserved but unallocated) and were re-run with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, which changes the allocator and not the arithmetic. Results: the README's Staleness sweep results section and `results/staleness_sweep_summary.json` (`benchmarks/staleness/summary.py`); the raw run directory (about 260 MB) is on the `reservoir-sweep-results` Modal volume, not in git |
 | 1.5B sweep | not yet run; needs an A100-80GB (float32 master weights plus Adam do not fit a 24 GB A10G) |
 
 The README's guarantees row for this experiment states exactly what the

@@ -112,10 +112,25 @@ def test_sweep_row_matches_the_committed_cpu_smoke():
     assert f"{report['max_steps']} steps, {report['totals']['runs']} runs" in text
     assert f"the {report['verified_logs']} Reservoir logs verify" in text
     assert report["totals"]["suspect_runs"] == 0 and report["missing_arms"] == []
-    gpu = sorted(p for p in MODAL.glob("sweep_*/report.json") if p.parent != smoke) + sorted(
-        RESULTS.glob("staleness_sweep_report.json"))
-    assert gpu == [], "a GPU sweep report is committed: update the README row, docs/staleness.md and this test"
-    assert "has not been run" in text and "This is a mechanism run" in text
+    assert "This is a mechanism run" in text
+
+
+def test_sweep_results_match_the_committed_gpu_summary():
+    text = row("The staleness sweep harness")
+    summary = load(RESULTS / "staleness_sweep_summary.json")
+    totals = summary["totals"]
+    assert totals["suspect_runs"] == 0 and summary["missing_arms"] == []
+    assert f"{totals['runs']} runs, 0 suspect, the {summary['verified_logs']} Reservoir logs verify" in text
+    section = README[README.index("## Staleness sweep results"):README.index("## Guarantees")]
+    for name, comparison in summary["paired_avg_at_k"].items():
+        arm, base = name.split(" vs ")
+        stated = (f"{comparison['mean_points']:+.2f} [{comparison['lo_points']:+.2f}, {comparison['hi_points']:+.2f}]")
+        if base == "grpo":
+            assert stated + f", {comparison['seeds_above']}/{comparison['n_seeds']} seeds above" in section, name
+            mean = sum(summary["avg_at_k_final"][arm].values()) / len(summary["avg_at_k_final"][arm])
+            assert f"| {len(summary['avg_at_k_final'][arm])} | {mean:.3f} |" in section, name
+        elif name == "reservoir_age32_on vs reservoir_age32_off":
+            assert stated in section and f"above it on {comparison['seeds_above']}/{comparison['n_seeds']} seeds" in section
 
 
 def _ratio(configs: dict, name: str) -> str:

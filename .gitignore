@@ -37,3 +37,10 @@ planning/
 
 # TLC output of the counterexample run
 spec/noparentfsync.out
+
+# GPU staleness sweep raw output (about 260 MB; kept on the reservoir-sweep-results Modal volume).
+# Committed instead: results/staleness_sweep_summary.json and the three staleness_sweep_*.png figures.
+benchmarks/modal/results/sweep_0.5b_*/
+benchmarks/modal/results/sweep_1.5b_*/
+results/staleness_sweep_report.json
+results/staleness_sweep_ess_vs_reward.png

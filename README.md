@@ -423,6 +423,44 @@ batch = buf.sample(batch_size=32)
 buf.update_priorities(batch.indices, td_errors)
 ```
 
+## Staleness sweep results
+
+Does replaying old rollouts help GRPO, and does Reservoir's staleness policy
+make old rollouts safe to replay? Qwen2.5-0.5B-Instruct, GRPO on the GSM8K
+train split, 300 steps, seeds 42, 43 and 44, one A10G with colocated vLLM
+(`docs/staleness.md`). Accuracy is avg@8 at temperature 1.0 on all 1,319
+GSM8K test items after step 300; each difference is against `grpo` on the
+same seed, with a 95% paired bootstrap interval over seeds and items.
+
+![avg@8 difference from grpo per arm](results/staleness_sweep_paired_delta.png)
+
+| Arm | Seeds | avg@8 | vs `grpo`, points [95% CI] | Rollouts |
+|---|---|---|---|---|
+| `grpo_filter` (DAPO dynamic sampling) | 3 | 0.463 | +2.11 [+1.02, +3.21], 3/3 seeds above | 18,539 |
+| `reservoir_age8_off` | 3 | 0.452 | +1.09 [+0.13, +2.09], 3/3 seeds above | 9,600 |
+| `reservoir_age8_on` | 3 | 0.452 | +1.03 [-0.09, +2.08], 3/3 seeds above | 9,600 |
+| `reservoir_age32_on` | 3 | 0.448 | +0.68 [-0.27, +1.58], 3/3 seeds above | 9,600 |
+| `grpo` | 3 | 0.442 | | 9,600 |
+| `reservoir_age128_on` (stress arm) | 1 | 0.440 | -0.43 [-1.41, +0.52], 0/1 seeds above | 9,600 |
+| `reservoir_naive_age32` | 3 | 0.438 | -0.40 [-1.29, +0.48], 1/3 seeds above | 9,600 |
+| `reservoir_age32_off` | 3 | 0.434 | -0.74 [-1.60, +0.21], 0/3 seeds above | 9,600 |
+| `wreinforce` | 3 | 0.427 | -1.50 [-2.30, -0.69], 0/3 seeds above | 9,600 |
+
+- Replaying rows at most 8 steps old beat `grpo` on every seed at the same
+  number of generated rollouts.
+- Replaying rows up to 32 steps old without the staleness policy fell below
+  `grpo` on every seed. With the policy on, the same buffer gained
+  +1.42 [+0.52, +2.33] points over the policy-off arm, above it on 3/3 seeds.
+- `grpo_filter` gained more, but it generated 1.9 times the rollouts.
+- The effects are 1 to 2 points with 3 seeds. Greedy accuracy is noisier and
+  separates no arm from `grpo`. The policy-on arms replayed fewer rows
+  (declined rows are not refilled), so part of an on/off difference is
+  replay volume.
+
+Every number is in `results/staleness_sweep_summary.json`, rebuilt by
+`python -m benchmarks.staleness.summary <run dir>`. The raw records,
+attestation logs and manifests (about 260 MB) are not committed.
+
 ---
 
 ## Guarantees
@@ -437,7 +475,7 @@ buf.update_priorities(batch.indices, td_errors)
 | A witnessed batch can be rebuilt as content from the log and manifest alone | `reservoir-replay-offline` emits every witnessed batch as JSON lines (rows, draws, exact importance weights, tokens, rewards, sources) importing nothing from the library; on the committed CPU and T4 reproducibility runs, runs a and b replay byte-identically and run c differs; fresh rows are listed by index only (`docs/nonclaims.md` §23) |
 | Two runs with the same inputs give one transcript | CPU demo: runs a and b byte-identical (116 records, one head digest), run c differs at record 1, classified `data` (`results/reproducible_grpo_report.json`). One T4 run with HF generation: a and b byte-identical, c differs as `data`, verdict `IDENTICAL`; the report records `cuda:0` and torch 2.14.0+cu130, not the GPU model or driver. The triplet was run twice, with PyTorch defaults and with deterministic kernels, and the two variants' logs and manifests are byte-identical to each other, so they are one observation of a reproducible configuration, not two, and say nothing about whether the deterministic settings were needed (`benchmarks/modal/results/repro_hf_t4_*`) |
 | The adapters survive a real trainer's call path | TRL 1.13.0 on two A10G GPUs (the driver reports them as NVIDIA A10) under `accelerate launch` (40 steps, 14 dead groups replaced with 56 rows, 1019 records, manifest opens all 584 examples) and verl 0.9.1 on one Tesla T4 (12 steps, 14 dead groups replaced with 56 rows, 445 records, manifest opens all 328 examples, a buffer checkpoint at each of the 3 trainer checkpoints); the test suite re-verifies both logs, the verl log with its manifest and the TRL log without it (`tests/test_trl_results.py`, `tests/test_verl_results.py`); one run each, tiny models, no training-quality claim (`docs/nonclaims.md` §13) |
-| The staleness sweep harness runs every arm and verifies its logs | CPU smoke committed in `benchmarks/modal/results/sweep_tiny_cpu_smoke/` (tiny Qwen2 test model, HF generation, coin-flip reward): 9 arms (the 8 of the main grid on seeds 42 and 43, the `reservoir_age128_on` stress arm on seed 42), 12 steps, 17 runs; the 11 Reservoir logs verify with their manifests, every draw declares `min_entry_age` 1, no replayed row came from its own step, and `tests/test_staleness_sweep_results.py` re-verifies the logs and rebuilds the report from the records. The GPU sweep (Qwen2.5-0.5B-Instruct, GSM8K, 300 steps × 8 arms × 3 seeds plus the stress run on one A10G with colocated vLLM) has not been run. This is a mechanism run: it measures replay, staleness-policy decisions and training behavior rather than establishing a training-quality gain. The smoke checks the harness and logs (`docs/staleness.md`) |
+| The staleness sweep harness runs every arm and verifies its logs | CPU smoke committed in `benchmarks/modal/results/sweep_tiny_cpu_smoke/` (tiny Qwen2 test model, HF generation, coin-flip reward): 9 arms (the 8 of the main grid on seeds 42 and 43, the `reservoir_age128_on` stress arm on seed 42), 12 steps, 17 runs; the 11 Reservoir logs verify with their manifests, every draw declares `min_entry_age` 1, no replayed row came from its own step, and `tests/test_staleness_sweep_results.py` re-verifies the logs and rebuilds the report from the records. The GPU sweep (Qwen2.5-0.5B-Instruct, GSM8K, 300 steps, one A10G with colocated vLLM): 25 runs, 0 suspect, the 16 Reservoir logs verify with their manifests, no stale-engine step; its summary is `results/staleness_sweep_summary.json` and its raw logs are not committed (see Staleness sweep results). This is a mechanism run: it measures replay, staleness-policy decisions and training behavior at one small scale, not a general training-quality gain (`docs/staleness.md`) |
 | What attestation and checking cost, on one machine | `results/attestation_overhead.json` (0.6.0 working tree; Apple silicon, Python 3.12, load average about 9; medians of 5 interleaved repeats after a warm-up, collector paused, ranges in the file): `add_group` costs 4.2× the unattested insert with an in-memory log, 4.1× with a log file and 8.8× with a manifest as well; in steady state a draw costs 14.9 µs unattested and 15.1 to 15.8 µs attested. An unattested buffer computes a group's content digests on the first sample that touches it rather than on insert, so over the first 200 batches its draws average 37.0 µs. The checker verifies 10k records with the manifest in 0.44 s. Pure-Python buffer; generation time is not measured |
 | The snapshot protocol is safe within a finite scope | `spec/ReplayLifecycle.tla` models the seven-stage intent, segment and rename snapshot protocol only: no command log, epochs, compaction, checkpoints, restore or attestation files. CI runs TLC on it (`bash spec/check.sh`, `.github/workflows/ci.yml`); no TLC output or state count is committed, and TLC has not been run on a developer machine. `spec/NoParentFsync.tla` reaches its violation through an action that sets the state to a torn one directly; its recovery action is the correct one, so it shows that the invariant detects a torn state, not that omitting the directory fsync produces one |
 
