@@ -1,4 +1,4 @@
-# reservoir
+# Reservoir
 
 **Exact, reproducible, auditable replay for LLM reinforcement learning.**
 
